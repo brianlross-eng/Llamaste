@@ -1,0 +1,32 @@
+# Build artifacts
+output/
+build/
+*.o
+*.d
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Buildroot build tree (lives in WSL2, not in repo)
+buildroot/
+
+# QEMU temp files
+*.pid
+*.log
+
+# Test binaries
+tests/test_*
+!tests/test_*.cpp
+!tests/test_*.sh
+
+# Compressed images
+*.img
+*.img.xz
+*.iso

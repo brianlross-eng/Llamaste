@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "WebFetch(*)",
+      "WebFetch(domain:pypistats.org)",
+      "WebFetch(domain:devpi.net)",
+      "WebFetch(domain:peps.python.org)",
+      "WebFetch(domain:hugovk.github.io)",
+      "Bash(dir:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(echo:*)",
+      "Bash(gh auth status:*)",
+      "mcp__mcp-registry__search_mcp_registry",
+      "Bash(winget install:*)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" --version:*)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status:*)",
+      "Bash(git init:*)",
+      "Bash(git -C D:/Lazarus add .gitignore pyproject.toml src/lazarus/ tests/)",
+      "Bash(git -C D:/Lazarus status)",
+      "Bash(git -C:*)",
+      "Bash(\"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" repo create:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "WebFetch(domain:lookup.icann.org)",
+      "WebFetch(domain:www.whatsmydns.net)",
+      "WebFetch(domain:instantdomainsearch.com)",
+      "WebFetch(domain:www.lazarus.org)"
+    ]
+  }
+}
