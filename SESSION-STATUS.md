@@ -1,14 +1,14 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-02-27 (BOOTABLE IMAGE WORKING)
+**Last updated**: 2026-02-27 (ISO + INSTALLER COMPLETE)
 
 ---
 
 ## Where We Are
 
-### Phase 1: BOOTABLE IMAGE COMPLETE -- boots in ~2s, 5/5 QEMU tests pass
+### Phase 1: COMPLETE — bootable image + live ISO with installer
 
-All 12 tasks from the Phase 1 implementation plan are complete. The Buildroot build produces a bootable disk image. The llamaste binary (single static ELF, 6 MB squashfs) runs as PID 1, mounts filesystems, detects hardware, and serves HTTP on port 80. All 93 host tests + 5 QEMU E2E tests pass.
+All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot build produces both a bootable disk image and a live ISO with a web-based installer. 5/5 QEMU E2E tests pass.
 
 **Currently running in stub (no-model) mode** — the next step is to integrate real llama.cpp inference.
 
@@ -21,7 +21,8 @@ All 12 tasks from the Phase 1 implementation plan are complete. The Buildroot bu
 | llamaste binary | ~6 MB (in squashfs) | Static ELF, x86-64, musl, stripped |
 | bzImage kernel | 5 MB | Built-in drivers, no modules |
 | rootfs.squashfs | 5.9 MB | llamaste + libc + web UI |
-| llamaste.img | 359 MB | 5-partition GPT disk image |
+| llamaste.img | 360 MB | 5-partition GPT disk image |
+| llamaste.iso | 39 MB | Hybrid BIOS+UEFI live ISO with installer |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
 
 ### QEMU E2E Test Results
@@ -33,6 +34,22 @@ All 12 tasks from the Phase 1 implementation plan are complete. The Buildroot bu
 | Tools | GET /llamaste/tools | PASS — 25 tool definitions |
 | Web UI | GET / | PASS — HTML served |
 | API | POST /v1/chat/completions | PASS — OpenAI-compatible response |
+
+---
+
+## ISO + Installer Summary (Session 2026-02-27b)
+
+| Task | Status | Details |
+|------|--------|---------|
+| Kernel iso9660 config | DONE | CONFIG_ISO9660_FS=y, CONFIG_JOLIET=y |
+| ISO build script | DONE | scripts/build-iso.sh, hybrid BIOS+UEFI via grub-mkrescue |
+| GRUB live config | DONE | grub-live.cfg with llamaste.mode=live |
+| Live boot detection | DONE | init.cpp + main.cpp: tmpfs /data in live mode |
+| Installer core | DONE | tools_install.cpp: detect_disks, to_disk, progress |
+| Installer web UI | DONE | install.js + style.css + HTTP routes in child_main.cpp |
+| INSTALL.md | DONE | User installation guide |
+| DEVELOPER.md | DONE | Technical reference (architecture, API, tools, build, boot) |
+| Build fixes | DONE | R"json()" delimiter, sys/mount.h, g_boot_mode declaration order |
 
 ---
 
@@ -54,6 +71,7 @@ All 12 tasks from the Phase 1 implementation plan are complete. The Buildroot bu
 | 11: Genimage layout | DONE | 36d52fb | 5-partition GPT, post_build.sh, post_image.sh |
 | 12: QEMU test scripts | DONE | 6973c15 | qemu-test.sh, qemu-run.sh, host-test.sh |
 | Build fixes | DONE | cfd83a4 + f2f8936 | C++ toolchain, PCI kernel, genimage/post_image fixes |
+| ISO + installer | DONE | 49766c8 + dd71dba | Live ISO, installer, INSTALL.md, DEVELOPER.md |
 
 ### Host Test Suites (93 total)
 
