@@ -98,6 +98,8 @@ std::string init_parse_boot_mode() {
     std::ifstream f("/proc/cmdline");
     std::string line;
     if (std::getline(f, line)) {
+        if (line.find("llamaste.mode=live") != std::string::npos)
+            return "live";
         if (line.find("llamaste.mode=desktop") != std::string::npos)
             return "desktop";
     }

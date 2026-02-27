@@ -500,3 +500,278 @@ html, body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+
+/* ==========================================================================
+   Live Mode Banner & Installer
+   ========================================================================== */
+
+#live-banner {
+  background: linear-gradient(90deg, #1a3a2a, #1a2a3a);
+  border-bottom: 1px solid var(--accent-dim);
+  padding: 8px 16px;
+  z-index: 200;
+  flex-shrink: 0;
+}
+
+.live-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.live-badge {
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 3px;
+  letter-spacing: 1px;
+}
+
+.install-btn {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.install-btn:hover { background: var(--accent-dim); }
+
+/* Installer Overlay */
+#install-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.install-dialog {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 540px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.install-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.install-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.close-btn:hover { color: var(--text-primary); }
+
+.install-step { padding: 20px; }
+
+.install-step p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+/* Disk list */
+.disk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.disk-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.disk-item:hover { border-color: var(--accent-dim); background: var(--bg-tertiary); }
+.disk-item.selected { border-color: var(--accent); background: var(--accent-bg); }
+
+.disk-name {
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.disk-details {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.disk-parts {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.disk-size {
+  font-family: 'Courier New', monospace;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.loading, .no-disks {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Warning & confirm */
+.warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.warning label {
+  font-size: 13px;
+  color: var(--danger);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.warning input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--danger);
+}
+
+/* Action buttons */
+.install-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.btn-primary:hover { background: var(--accent-dim); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-secondary:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+
+/* Progress */
+.progress-container {
+  margin-bottom: 16px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.progress-percent {
+  text-align: center;
+  font-family: 'Courier New', monospace;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.progress-status {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* Success / Error states */
+.install-success, .install-error {
+  text-align: center;
+  padding: 20px;
+}
+
+.success-icon {
+  font-size: 48px;
+  color: var(--success);
+  margin-bottom: 12px;
+}
+
+.error-icon {
+  font-size: 48px;
+  color: var(--danger);
+  margin-bottom: 12px;
+}
+
+.install-success h3 { color: var(--success); margin-bottom: 12px; }
+.install-error h3 { color: var(--danger); margin-bottom: 12px; }
+
+.install-success p, .install-error p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 8px;
+}

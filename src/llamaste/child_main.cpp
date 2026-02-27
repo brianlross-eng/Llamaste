@@ -233,6 +233,9 @@ static json gather_system_info(const SupervisorConfig& config) {
         }
     }
 
+    // Boot mode
+    info["mode"] = g_boot_mode;
+
     // Uptime
     time_t now = time(nullptr);
     info["uptime"] = static_cast<int>(now - g_start_time);
@@ -564,6 +567,9 @@ static void handle_openai_completions(const httplib::Request& req, httplib::Resp
     res.set_content(response, "application/json");
 }
 
+// Boot mode (set during child_main initialization)
+static std::string g_boot_mode = "server";
+
 // GET /health — Health check
 static void handle_health(const httplib::Request& /*req*/, httplib::Response& res) {
     json health;
@@ -571,6 +577,7 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
     health["uptime_seconds"] = static_cast<int>(time(nullptr) - g_start_time);
     health["model_loaded"] = false;  // Phase 1: no real model
     health["tools_count"] = g_tools.count();
+    health["mode"] = g_boot_mode;
     res.set_content(health.dump(), "application/json");
 }
 
@@ -583,6 +590,7 @@ int child_main(const SupervisorConfig& config) {
     signal(SIGINT, child_signal);
 
     g_start_time = time(nullptr);
+    g_boot_mode = config.boot_mode;
 
     fprintf(stderr, "[child] Inference child started\n");
     fprintf(stderr, "[child] Model: %s\n",
@@ -605,6 +613,10 @@ int child_main(const SupervisorConfig& config) {
 
     // Initialize tools
     register_all_tools(g_tools);
+    if (g_boot_mode == "live") {
+        register_install_tools(g_tools);
+        fprintf(stderr, "[child] Live mode: installer tools enabled\n");
+    }
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware
@@ -694,6 +706,83 @@ int child_main(const SupervisorConfig& config) {
     svr.Get("/llamaste/conversations", handle_conversations);
     svr.Post("/v1/chat/completions", handle_openai_completions);
     svr.Get("/health", handle_health);
+
+    // --- Installer routes (live mode only) ---
+    if (g_boot_mode == "live") {
+        svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {
+            std::string result = g_tools.dispatch("install.detect_disks", "{}");
+            res.set_content(result, "application/json");
+        });
+
+        svr.Post("/install/start", [](const httplib::Request& req, httplib::Response& res) {
+            auto body = json::parse(req.body, nullptr, false);
+            if (body.is_discarded() || !body.contains("device")) {
+                res.status = 400;
+                json err;
+                err["error"] = "Missing 'device' field";
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            // Force confirm for HTTP API
+            body["confirm"] = true;
+            std::string result = g_tools.dispatch("install.to_disk", body.dump());
+            res.set_content(result, "application/json");
+        });
+
+        svr.Get("/install/progress", [](const httplib::Request& /*req*/, httplib::Response& res) {
+            std::string result = g_tools.dispatch("install.progress", "{}");
+            res.set_content(result, "application/json");
+        });
+
+        // SSE endpoint for streaming progress updates
+        svr.Get("/install/progress/stream",
+            [](const httplib::Request& /*req*/, httplib::Response& res) {
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                        int last_pct = -1;
+                        while (true) {
+                            std::string progress = g_tools.dispatch("install.progress", "{}");
+                            auto pdata = json::parse(progress, nullptr, false);
+                            int pct = pdata.value("percent", 0);
+
+                            if (pct != last_pct) {
+                                std::string event = "data: " + progress + "\n\n";
+                                sink.write(event.c_str(), event.size());
+                                last_pct = pct;
+                            }
+
+                            if (pdata.value("finished", false)) {
+                                std::string done = "data: [DONE]\n\n";
+                                sink.write(done.c_str(), done.size());
+                                sink.done();
+                                return true;
+                            }
+
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        }
+                    }
+                );
+            }
+        );
+
+        // Serve install.js
+        svr.Get("/install.js", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+            extern const unsigned char WEB_INSTALL_JS[];
+            extern const unsigned int WEB_INSTALL_JS_LEN;
+            serve_static_file(req, res, "install.js", WEB_INSTALL_JS, WEB_INSTALL_JS_LEN);
+#else
+            serve_static_file(req, res, "install.js", nullptr, 0);
+#endif
+        });
+
+        fprintf(stderr, "[child] Installer routes enabled: /install/disks, /install/start, /install/progress\n");
+    }
 
     // --- Error handler ---
     svr.set_error_handler([](const httplib::Request& /*req*/, httplib::Response& res) {

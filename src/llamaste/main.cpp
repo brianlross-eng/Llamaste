@@ -1,5 +1,7 @@
 #include <cstdio>
 #include <unistd.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 
 #include "init.h"
 #include "hwdetect.h"
@@ -51,7 +53,14 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[main] Boot mode: %s\n", mode.c_str());
 
     if (pid1) {
-        init_mount_data();
+        if (mode == "live") {
+            // Live ISO mode: use tmpfs for /data, no disk probe
+            fprintf(stderr, "[main] Live mode: using tmpfs for /data\n");
+            mkdir("/data", 0755);
+            mount("tmpfs", "/data", "tmpfs", 0, "size=1G");
+        } else {
+            init_mount_data();
+        }
         init_create_data_dirs();
     }
 

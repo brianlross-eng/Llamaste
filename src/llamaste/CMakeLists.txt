@@ -17,6 +17,7 @@ set(LLAMASTE_SOURCES
     tools_system.cpp
     tools_config.cpp
     tools_model.cpp
+    tools_install.cpp
     agent.cpp
     prompt_builder.cpp
     net_mdns.cpp
@@ -52,7 +53,8 @@ if(LLAMASTE_EMBED_WEB)
           -DOUTPUT_H=${WEB_EMBED_H}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/embed_web.cmake
         DEPENDS ${WEB_DIR}/index.html ${WEB_DIR}/chat.js
-                ${WEB_DIR}/dashboard.js ${WEB_DIR}/style.css
+                ${WEB_DIR}/dashboard.js ${WEB_DIR}/install.js
+                ${WEB_DIR}/style.css
         COMMENT "Embedding web assets into C++ source"
     )
     target_sources(llamaste PRIVATE ${WEB_EMBED_CPP})

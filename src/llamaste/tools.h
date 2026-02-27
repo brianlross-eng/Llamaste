@@ -52,6 +52,7 @@ void register_network_tools(ToolRegistry& reg);
 void register_system_tools(ToolRegistry& reg);
 void register_config_tools(ToolRegistry& reg);
 void register_model_tools(ToolRegistry& reg);
+void register_install_tools(ToolRegistry& reg);
 
 // Convenience: register all tool categories at once.
 void register_all_tools(ToolRegistry& reg);

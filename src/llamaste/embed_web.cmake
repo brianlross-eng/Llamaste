@@ -21,6 +21,7 @@ set(WEB_FILES
   "index.html:WEB_INDEX_HTML"
   "chat.js:WEB_CHAT_JS"
   "dashboard.js:WEB_DASHBOARD_JS"
+  "install.js:WEB_INSTALL_JS"
   "style.css:WEB_STYLE_CSS"
 )
 
