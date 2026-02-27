@@ -10,6 +10,13 @@ set(LLAMASTE_SOURCES
     init.cpp
     hwdetect.cpp
     child_main.cpp
+    tools.cpp
+    tools_fs.cpp
+    tools_process.cpp
+    tools_network.cpp
+    tools_system.cpp
+    tools_config.cpp
+    tools_model.cpp
 )
 
 add_executable(llamaste ${LLAMASTE_SOURCES})
