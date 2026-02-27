@@ -3,6 +3,8 @@ BR2_x86_64=y
 
 # Toolchain
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_INSTALL_LIBSTDCPP=y
 
 # Init system: none (our binary IS init)
 BR2_INIT_NONE=y
