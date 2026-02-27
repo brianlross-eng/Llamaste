@@ -17,6 +17,8 @@ set(LLAMASTE_SOURCES
     tools_system.cpp
     tools_config.cpp
     tools_model.cpp
+    agent.cpp
+    prompt_builder.cpp
 )
 
 add_executable(llamaste ${LLAMASTE_SOURCES})
