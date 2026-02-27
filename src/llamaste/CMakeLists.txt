@@ -19,6 +19,7 @@ set(LLAMASTE_SOURCES
     tools_model.cpp
     agent.cpp
     prompt_builder.cpp
+    net_mdns.cpp
 )
 
 add_executable(llamaste ${LLAMASTE_SOURCES})

@@ -18,6 +18,7 @@
 #include "prompt_builder.h"
 #include "tools.h"
 #include "hwdetect.h"
+#include "net_mdns.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -237,15 +238,8 @@ static json gather_system_info(const SupervisorConfig& config) {
     info["uptime"] = static_cast<int>(now - g_start_time);
     info["uptime_seconds"] = static_cast<int>(now - g_start_time);
 
-    // IP address - try to read from /proc on Linux
-    info["ip"] = "127.0.0.1";
-#ifndef _WIN32
-    {
-        std::ifstream f("/proc/net/fib_trie");
-        // Simplified: just report localhost for now, real IP detection
-        // would parse route table or use getifaddrs
-    }
-#endif
+    // IP address - use MdnsResponder's cross-platform IP detection
+    info["ip"] = MdnsResponder::get_local_ip();
 
     // CPU percent - read from /proc/stat
     double cpu_pct = 0.0;
@@ -622,6 +616,15 @@ int child_main(const SupervisorConfig& config) {
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
 
+    // Start mDNS responder so the box is discoverable as "llamaste.local"
+    MdnsResponder mdns;
+    if (mdns.start("llamaste")) {
+        fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s)\n",
+                MdnsResponder::get_local_ip().c_str());
+    } else {
+        fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
+    }
+
     // Create HTTP server
     httplib::Server svr;
 
@@ -721,9 +724,12 @@ int child_main(const SupervisorConfig& config) {
     bool ok = svr.listen("0.0.0.0", port);
     if (!ok && g_running) {
         fprintf(stderr, "[child] Failed to start HTTP server on port %d\n", port);
+        mdns.stop();
         return 1;
     }
 
+    // Clean shutdown
+    mdns.stop();
     fprintf(stderr, "[child] HTTP server stopped\n");
     return 0;
 }
