@@ -25,7 +25,7 @@ LLAMASTE_CONF_OPTS = \
 	-DLLAMASTE_EMBED_WEB=ON
 
 define LLAMASTE_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/llamaste \
+	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \
 		$(TARGET_DIR)/opt/llamaste/llamaste
 endef
 

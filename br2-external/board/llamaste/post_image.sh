@@ -1,13 +1,6 @@
 #!/bin/bash
 # Llamaste post-image script
 # Called by Buildroot after image generation to assemble the final disk image.
-#
-# Environment variables (set by Buildroot):
-#   BINARIES_DIR  - output/images/ (contains bzImage, rootfs.squashfs, etc.)
-#   TARGET_DIR    - output/target/ (the target root filesystem)
-#   BUILD_DIR     - output/build/  (build artifacts)
-#   HOST_DIR      - output/host/   (host tools)
-#   BR2_CONFIG    - the Buildroot .config file
 
 set -e
 
@@ -17,8 +10,7 @@ GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 
 echo "[post-image] Assembling Llamaste disk image..."
 
-# --- Step 1: Create data partition directory overlay ---
-# These directories will be pre-populated into data.ext4
+# --- Step 1: Prepare data partition overlay ---
 DATA_OVERLAY="${BINARIES_DIR}/data-overlay"
 mkdir -p "${DATA_OVERLAY}/models"
 mkdir -p "${DATA_OVERLAY}/llamaste/conversations"
@@ -26,7 +18,6 @@ mkdir -p "${DATA_OVERLAY}/llamaste/config"
 mkdir -p "${DATA_OVERLAY}/llamaste/logs"
 mkdir -p "${DATA_OVERLAY}/llamaste/cache"
 
-# Create default config if it doesn't exist
 if [ ! -f "${DATA_OVERLAY}/llamaste/config/llamaste.json" ]; then
     cat > "${DATA_OVERLAY}/llamaste/config/llamaste.json" << 'DEFAULTCFG'
 {
@@ -42,8 +33,6 @@ DEFAULTCFG
 fi
 
 # --- Step 2: Create GRUB BIOS boot image ---
-# This is the core.img that goes into the BIOS boot partition
-# grub-mkimage creates a standalone GRUB image for BIOS boot
 GRUB_BIOS_IMG="${BINARIES_DIR}/grub-bios.img"
 if [ -f "${HOST_DIR}/lib/grub/i386-pc/boot.img" ]; then
     echo "[post-image] Creating GRUB BIOS boot image..."
@@ -55,33 +44,57 @@ if [ -f "${HOST_DIR}/lib/grub/i386-pc/boot.img" ]; then
         search_fs_uuid search_label test echo
 else
     echo "[post-image] GRUB i386-pc not available, creating empty BIOS boot image"
-    # Create a 1MB empty image as placeholder for EFI-only systems
     dd if=/dev/zero of="${GRUB_BIOS_IMG}" bs=1024 count=1024 2>/dev/null
 fi
 
-# --- Step 3: Set up EFI partition directory structure ---
-# Buildroot's GRUB2 EFI package creates efi-part/EFI/BOOT/bootx64.efi
-# We also need grub.cfg in the right place for GRUB to find it
+# --- Step 3: Set up EFI partition ---
 EFI_GRUB_DIR="${BINARIES_DIR}/efi-part/grub"
 mkdir -p "${EFI_GRUB_DIR}"
 
-# Copy grub.cfg into the EFI partition's grub directory
 if [ -f "${BOARD_DIR}/grub.cfg" ]; then
     cp "${BOARD_DIR}/grub.cfg" "${EFI_GRUB_DIR}/grub.cfg"
 fi
 
-# Ensure the EFI directory structure exists (Buildroot should create this)
+if [ -f "${BINARIES_DIR}/bzImage" ]; then
+    cp "${BINARIES_DIR}/bzImage" "${BINARIES_DIR}/efi-part/bzImage"
+fi
+
 if [ ! -d "${BINARIES_DIR}/efi-part/EFI" ]; then
-    echo "[post-image] WARNING: efi-part/EFI not found, GRUB EFI may not be built"
+    echo "[post-image] WARNING: efi-part/EFI not found"
     mkdir -p "${BINARIES_DIR}/efi-part/EFI/BOOT"
 fi
 
-# --- Step 4: Run genimage to assemble the final disk image ---
-echo "[post-image] Running genimage..."
+# --- Step 4: Build sub-images then assemble ---
+# genimage uses --rootpath to populate filesystem images.
+# We need different rootpaths for vfat (efi-part/) and ext4 (data-overlay/).
+# Strategy: build vfat and ext4 sub-images separately, then assemble.
+
 rm -rf "${GENIMAGE_TMP}"
 
+# Build the ESP vfat from efi-part/
+echo "[post-image] Creating ESP vfat image..."
+VFAT_SIZE=$((32 * 1024 * 1024))
+VFAT_IMG="${BINARIES_DIR}/efi-part.vfat"
+dd if=/dev/zero of="${VFAT_IMG}" bs=1M count=32 2>/dev/null
+mkdosfs -F 32 -n ESP "${VFAT_IMG}" >/dev/null 2>&1
+# Copy files into the vfat image using mcopy
+mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/EFI" "::/"
+mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/grub" "::/"
+if [ -f "${BINARIES_DIR}/efi-part/bzImage" ]; then
+    mcopy -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/bzImage" "::/"
+fi
+
+# Build the data ext4 from data-overlay/
+echo "[post-image] Creating DATA ext4 image..."
+DATA_IMG="${BINARIES_DIR}/data.ext4"
+dd if=/dev/zero of="${DATA_IMG}" bs=1M count=64 2>/dev/null
+mkfs.ext4 -q -L DATA -d "${DATA_OVERLAY}" "${DATA_IMG}"
+
+# Assemble final disk image using genimage
+# rootfs.squashfs and grub-bios.img are already in BINARIES_DIR
+echo "[post-image] Assembling final disk image..."
 genimage \
-    --rootpath "${DATA_OVERLAY}" \
+    --rootpath "${BINARIES_DIR}" \
     --tmppath "${GENIMAGE_TMP}" \
     --inputpath "${BINARIES_DIR}" \
     --outputpath "${BINARIES_DIR}" \
@@ -91,14 +104,7 @@ echo ""
 echo "======================================================="
 echo "  Llamaste disk image ready: ${BINARIES_DIR}/llamaste.img"
 echo ""
-echo "  Partition layout (5-partition GPT):"
-echo "    1. BIOS boot   (1 MB)   - GRUB legacy"
-echo "    2. ESP          (256 MB) - GRUB EFI + kernel"
-echo "    3. SYS-A        (256 MB) - Root filesystem (squashfs)"
-echo "    4. SYS-B        (256 MB) - Reserved (A/B updates)"
-echo "    5. DATA          (1 GB+) - Models, config, conversations"
-echo ""
-echo "  Flash to disk:"
-echo "    dd if=${BINARIES_DIR}/llamaste.img of=/dev/sdX bs=4M status=progress"
+echo "  Test with QEMU:"
+echo "    qemu-system-x86_64 -m 4G -drive file=llamaste.img,format=raw"
 echo "======================================================="
 echo ""
