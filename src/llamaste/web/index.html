@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Llamaste</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Mobile sidebar overlay -->
+    <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+    <!-- Sidebar: dashboard + conversations -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <div>
+          <h1>LLAMASTE</h1>
+          <span class="version">LLM-OS v0.1</span>
+        </div>
+      </div>
+
+      <div id="dashboard">
+        <div class="dash-section">
+          <h3>System</h3>
+          <div class="dash-row">
+            <span class="label">Model</span>
+            <span class="value" id="dash-model">--</span>
+          </div>
+          <div class="dash-row">
+            <span class="label">Uptime</span>
+            <span class="value" id="dash-uptime">--</span>
+          </div>
+          <div class="dash-row">
+            <span class="label">IP</span>
+            <span class="value" id="dash-ip">--</span>
+          </div>
+        </div>
+
+        <div class="dash-section">
+          <h3>CPU</h3>
+          <div class="dash-row">
+            <span class="label">Usage</span>
+            <span class="value" id="dash-cpu">--%</span>
+          </div>
+          <div class="dash-bar"><div class="dash-bar-fill" id="dash-cpu-bar" style="width:0%"></div></div>
+          <div class="dash-row">
+            <span class="label">Temp</span>
+            <span class="value" id="dash-temp">--</span>
+          </div>
+        </div>
+
+        <div class="dash-section">
+          <h3>Memory</h3>
+          <div class="dash-row">
+            <span class="label">RAM</span>
+            <span class="value" id="dash-ram">-- / -- MB</span>
+          </div>
+          <div class="dash-bar"><div class="dash-bar-fill" id="dash-ram-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="dash-section">
+          <h3>Storage</h3>
+          <div class="dash-row">
+            <span class="label">/data</span>
+            <span class="value" id="dash-disk">-- / -- GB</span>
+          </div>
+          <div class="dash-bar"><div class="dash-bar-fill" id="dash-disk-bar" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <div id="conversations-section">
+        <h3>Conversations</h3>
+        <div id="conv-list"></div>
+        <button id="new-conv-btn" onclick="newConversation()">+ New Conversation</button>
+      </div>
+    </aside>
+
+    <!-- Main chat area -->
+    <main id="main">
+      <header id="chat-header">
+        <div style="display:flex;align-items:center;">
+          <button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Toggle sidebar">&#9776;</button>
+          <span id="connection-status" class="connecting"></span>
+          <span class="title" id="chat-title">New Conversation</span>
+        </div>
+      </header>
+
+      <div id="messages">
+        <div class="message system">
+          Welcome to Llamaste. The LLM is your operating system. Ask anything.
+        </div>
+      </div>
+
+      <div id="input-area">
+        <div id="input-wrapper">
+          <textarea id="message-input"
+                    placeholder="Ask Llamaste anything..."
+                    rows="1"
+                    autofocus></textarea>
+          <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/chat.js"></script>
+  <script src="/dashboard.js"></script>
+</body>
+</html>
