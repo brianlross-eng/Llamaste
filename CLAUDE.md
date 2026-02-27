@@ -4,12 +4,11 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single static C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: ALL PLANNING COMPLETE — ready for Phase 1 build
+- **Phase**: PHASE 1 COMPLETE + ISO/installer done — 5/5 QEMU E2E tests, 93 host tests
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
-- **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, bite-sized steps)
+- **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
 - **Phase 1 design doc**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-design.md`
-- **Approved plan**: `C:\Users\gorig\.claude\plans\goofy-gliding-squirrel.md`
 
 ## Key Architecture Decisions
 - Single static C++ binary extending llama-server (not separate Go/Rust daemons)
@@ -38,19 +37,35 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `LLMOS-Brainstorm.docx` — Original concept (binary, use Python to extract text)
 - `LLAMASTE-IMPLEMENTATION-PLAN.md` — v2 master plan with all four phases
 - `SESSION-STATUS.md` — Detailed progress tracker with next steps
-- `docs/plans/2026-02-26-phase1-implementation-plan.md` — **START HERE**: 12-task build plan
+- `INSTALL.md` — User installation guide
+- `DEVELOPER.md` — Technical reference (architecture, API, tools, build, boot)
+- `llamaste.iso` — 39 MB live ISO with installer (built from scripts/build-iso.sh)
+- `docs/plans/2026-02-26-phase1-implementation-plan.md` — Phase 1 build plan (complete)
 - `docs/plans/2026-02-26-phase1-implementation-design.md` — Phase 1 design doc
-- `docs/plans/2026-02-26-research-round-3-design.md` — Research gap tracker (complete)
 - `research/llamaste-architecture.html` — v2 three-layer architecture SVG diagram
 - `research/` — All research documents (01 through 26)
-- `src/llamaste/` — Code scaffolding (main.cpp, CMakeLists.txt are drafts, will be rewritten)
+- `src/llamaste/` — Production C++ source (~5,500 LOC)
+
+## Build Patterns & Gotchas
+- **Buildroot invocation**: `cd /root/llamaste-build/output && make` (NOT from buildroot/ source dir)
+- **Package rebuild**: `make llamaste-dirclean && make llamaste` then `make` for full image
+- **Raw string literals**: Use `R"json(...)json"` delimiter, NOT `R"(...)"` — bare `)"` inside JSON breaks the parser
+- **Tool registration**: Use designated initializers (`.name = ..., .handler = ...`) — matches existing tools_*.cpp pattern
+- **Declaration order in child_main.cpp**: globals must appear before functions that use them
+- **Linux includes**: `mount()`/`umount()` need `#include <sys/mount.h>`, guard with `#ifndef _WIN32`
+- **ISO build**: `scripts/build-iso.sh /root/llamaste-build` — needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`
+- **QEMU E2E tests**: `scripts/qemu-boot-test.sh /root/llamaste-build/output/images/llamaste.img`
 
 ## Next Steps
-Execute Phase 1 implementation plan (`docs/plans/2026-02-26-phase1-implementation-plan.md`):
-- Use `superpowers:executing-plans` or `superpowers:subagent-driven-development` skill
-- Task 0: WSL2 dev environment → Task 1: Buildroot external tree → ... → Task 12: E2E QEMU tests
-- Bottom-up build approach (boot infrastructure first, then application code)
-- ~4,500 LOC C++ + ~400 lines config
+### Immediate
+1. Integrate real llama.cpp inference (replace stub_inference in child_main.cpp)
+2. Download test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
+3. Test actual tool-calling agent loop with a real model
+
+### Phase 2
+4. Desktop mode (Cage/Labwc Wayland compositor)
+5. Voice I/O (whisper.cpp + piper)
+6. App management tools
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
