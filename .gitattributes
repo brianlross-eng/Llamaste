@@ -1,0 +1,21 @@
+# Force LF line endings for files that run on Linux
+*.sh text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.cmake text eol=lf
+*.mk text eol=lf
+*.config text eol=lf
+*.cfg text eol=lf
+*.in text eol=lf
+Makefile text eol=lf
+
+# Keep Windows line endings for docs
+*.md text eol=auto
+*.txt text eol=auto
+
+# Binary files
+*.gguf binary
+*.img binary
+*.xz binary
+*.gz binary
