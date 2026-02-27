@@ -27,6 +27,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <linux/fs.h>  // BLKRRPART, BLKGETSIZE64
+#include <sys/mount.h>
 #endif
 
 using json = nlohmann::json;
@@ -570,25 +571,25 @@ static std::string handle_install_progress(const std::string& /*args*/) {
 
 void register_install_tools(ToolRegistry& reg) {
     reg.register_tool({
-        "install.detect_disks",
-        "Detect available disk drives for installation. Returns a list of block devices "
-        "with their size, model, and partition count. Excludes the boot device and "
-        "devices smaller than 2 GB.",
-        R"({
+        .name = "install.detect_disks",
+        .description = "Detect available disk drives for installation. Returns a list of block devices "
+                       "with their size, model, and partition count. Excludes the boot device and "
+                       "devices smaller than 2 GB.",
+        .parameters = R"json({
             "type": "object",
             "properties": {},
             "required": []
-        })",
-        handle_detect_disks,
-        false
+        })json",
+        .handler = handle_detect_disks,
+        .requires_confirmation = false
     });
 
     reg.register_tool({
-        "install.to_disk",
-        "Install Llamaste to a target disk. Writes the disk image, resizes the DATA "
-        "partition to fill the disk, and initializes the data directories. "
-        "WARNING: This erases ALL data on the target disk.",
-        R"({
+        .name = "install.to_disk",
+        .description = "Install Llamaste to a target disk. Writes the disk image, resizes the DATA "
+                       "partition to fill the disk, and initializes the data directories. "
+                       "WARNING: This erases ALL data on the target disk.",
+        .parameters = R"json({
             "type": "object",
             "properties": {
                 "device": {
@@ -601,22 +602,22 @@ void register_install_tools(ToolRegistry& reg) {
                 }
             },
             "required": ["device", "confirm"]
-        })",
-        handle_install_to_disk,
-        true  // requires confirmation
+        })json",
+        .handler = handle_install_to_disk,
+        .requires_confirmation = true
     });
 
     reg.register_tool({
-        "install.progress",
-        "Check the progress of an ongoing installation. Returns percent complete, "
-        "current status message, and whether the installation has finished.",
-        R"({
+        .name = "install.progress",
+        .description = "Check the progress of an ongoing installation. Returns percent complete, "
+                       "current status message, and whether the installation has finished.",
+        .parameters = R"json({
             "type": "object",
             "properties": {},
             "required": []
-        })",
-        handle_install_progress,
-        false
+        })json",
+        .handler = handle_install_progress,
+        .requires_confirmation = false
     });
 }
 

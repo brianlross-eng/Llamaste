@@ -58,6 +58,9 @@ using json = nlohmann::json;
 static std::atomic<bool> g_running{true};
 static time_t g_start_time = 0;
 
+// Boot mode (set during child_main initialization)
+static std::string g_boot_mode = "server";
+
 // In-memory conversation store (Phase 1)
 static std::map<std::string, ConversationState> g_conversations;
 static std::mutex g_conversations_mutex;
@@ -566,9 +569,6 @@ static void handle_openai_completions(const httplib::Request& req, httplib::Resp
 
     res.set_content(response, "application/json");
 }
-
-// Boot mode (set during child_main initialization)
-static std::string g_boot_mode = "server";
 
 // GET /health — Health check
 static void handle_health(const httplib::Request& /*req*/, httplib::Response& res) {
