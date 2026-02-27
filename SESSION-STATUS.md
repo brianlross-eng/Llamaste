@@ -1,6 +1,6 @@
 # Llamaste Project — Session Status
 
-**Last updated**: 2026-02-26 (Phase 1 implementation plan written, ready to build)
+**Last updated**: 2026-02-27 (Custom distro build patterns research complete, ready to build)
 
 ---
 
@@ -16,7 +16,7 @@ All research (23 docs), architecture design, and implementation planning are don
 
 ## What's Been Done
 
-### 1. Research (23 documents)
+### 1. Research (26 documents)
 All research is saved in `D:\Llamaste\research\`:
 
 | # | File | Topic |
@@ -44,6 +44,9 @@ All research is saved in `D:\Llamaste\research\`:
 | 21 | 21-power-management.md | Power management, laptop support, thermal, battery, ACPI |
 | 22 | 22-competitor-ux-analysis.md | Ollama, LM Studio, Open WebUI, Jan, LocalAI, llamafile, oobabooga |
 | 23 | 23-lora-fine-tuning.md | LoRA adapters, fine-tuning, skill packs, multi-LoRA serving |
+| 24 | 24-llama-cpp-speed-optimization-gaps.md | KV cache quant, ubatch-size, Vulkan iGPU, 2025 features, Qwen2.5 benchmarks |
+| 25 | 25-iso-image-construction.md | initramfs decision, live USB architecture, genimage/xorriso/grub-mkrescue, QEMU testing, model delivery |
+| 26 | 26-custom-distro-build-patterns.md | BR2_EXTERNAL deep dive, CMake package recipes, kernel driver selection, reproducible builds, immutable OS patterns, llamafile analysis |
 
 ### 2. Architecture & Design
 - `research/llamaste-architecture.html` — SVG diagram (v2 three-layer)
@@ -124,8 +127,8 @@ D:\Llamaste\
 │       ├── 2026-02-26-research-round-3-design.md     # Research gap tracker (COMPLETE)
 │       ├── 2026-02-26-phase1-implementation-design.md # Phase 1 design doc
 │       └── 2026-02-26-phase1-implementation-plan.md   # Phase 1 build plan (12 tasks)
-├── research/                          # 23 research documents + architecture diagram
-│   ├── 01-buildroot.md ... 23-lora-fine-tuning.md
+├── research/                          # 26 research documents + architecture diagram
+│   ├── 01-buildroot.md ... 26-custom-distro-build-patterns.md
 │   └── llamaste-architecture.html     # SVG diagram (v2, three-layer design)
 ├── src/
 │   └── llamaste/                      # Source code (scaffolding only, will be rewritten)

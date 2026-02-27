@@ -31,8 +31,8 @@ Llamaste is a bootable Linux image where the LLM IS the operating system. A sing
 7. Hardware-specific SIMD dispatch (build flag)
 
 ## Research
-23 research documents in `D:\Llamaste\research\` covering:
-Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clustering, appliance patterns, model selection, GPU+RAM hybrid, CPU speed projects, API development, MCP servers, minimal OS alternatives, syscall surface analysis, LLM-as-OS paradigm, LLM speed optimization, licensing analysis, failure modes & recovery, multi-user auth, privacy & data security, update mechanisms, power management, competitor UX analysis, LoRA & fine-tuning.
+26 research documents in `D:\Llamaste\research\` covering:
+Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clustering, appliance patterns, model selection, GPU+RAM hybrid, CPU speed projects, API development, MCP servers, minimal OS alternatives, syscall surface analysis, LLM-as-OS paradigm, LLM speed optimization, licensing analysis, failure modes & recovery, multi-user auth, privacy & data security, update mechanisms, power management, competitor UX analysis, LoRA & fine-tuning, LLM speed benchmarks, ISO image construction & boot architecture, custom distro build patterns.
 
 ## Important Files
 - `LLMOS-Brainstorm.docx` — Original concept (binary, use Python to extract text)
@@ -42,7 +42,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `docs/plans/2026-02-26-phase1-implementation-design.md` — Phase 1 design doc
 - `docs/plans/2026-02-26-research-round-3-design.md` — Research gap tracker (complete)
 - `research/llamaste-architecture.html` — v2 three-layer architecture SVG diagram
-- `research/` — All research documents (01 through 23)
+- `research/` — All research documents (01 through 26)
 - `src/llamaste/` — Code scaffolding (main.cpp, CMakeLists.txt are drafts, will be rewritten)
 
 ## Next Steps
