@@ -24,7 +24,7 @@ sudo apt update && sudo apt install -y \
   python3 python3-pip \
   qemu-system-x86 ovmf \
   genimage mtools dosfstools squashfs-tools e2fsprogs \
-  musl-tools
+  musl-tools ccache
 ```
 
 Expected: all packages install successfully.
@@ -37,6 +37,17 @@ ln -s /mnt/d/Llamaste ~/llamaste-build/src
 ```
 
 This keeps the Buildroot build tree on native ext4 while the source code stays on the Windows drive for IDE access.
+
+### Step 0.3: Configure ccache (research/26 — 85% build time reduction)
+
+```bash
+# Set up ccache for faster rebuilds
+echo 'export PATH="/usr/lib/ccache:$PATH"' >> ~/.bashrc
+ccache --max-size=10G
+source ~/.bashrc
+```
+
+Expected: `which gcc` returns `/usr/lib/ccache/gcc`.
 
 ---
 
@@ -199,6 +210,10 @@ BR2_TARGET_ROOTFS_SQUASHFS4_ZSTD=y
 
 # No BusyBox
 # BR2_PACKAGE_BUSYBOX is not set
+
+# ccache (research/26 — 85% build time reduction on rebuilds)
+BR2_CCACHE=y
+BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
 
 # Our package
 BR2_PACKAGE_LLAMASTE=y
@@ -370,7 +385,10 @@ CONFIG_IP_MULTICAST=y
 CONFIG_NETDEVICES=y
 CONFIG_ETHERNET=y
 CONFIG_NET_VENDOR_INTEL=y
+CONFIG_E1000=y
 CONFIG_E1000E=y
+CONFIG_IGB=y
+CONFIG_IXGBE=y
 CONFIG_NET_VENDOR_REALTEK=y
 CONFIG_R8169=y
 
@@ -1874,7 +1892,16 @@ endif()
 
 `child_main.cpp` should:
 1. Initialize llama model from `config.model_path`
-2. Set up llama context with appropriate params (threads, context size, flash attention)
+2. Set up llama context with these params (research/24 speed benchmarks):
+   - `--threads $(nproc)` — all cores for latency
+   - `--ctx-size 8192` — good balance of context vs RAM
+   - `--batch-size 2048` — prompt processing batch
+   - `--ubatch-size 512` — default is fine for most cases
+   - `--flash-attn` — required for quantized KV cache
+   - `--cache-type-k q8_0` — 50% KV RAM savings, negligible quality loss
+   - `--cache-type-v q8_0` — requires --flash-attn
+   - `--mlock` — prevent model pages from being swapped
+   - `cache_prompt: true` — KV cache reuse for system prompt (highest-impact free optimization)
 3. Start httplib HTTP server on `config.http_port`
 4. Register llama-server's standard routes (`/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`)
 5. Register custom routes:
@@ -2017,19 +2044,37 @@ menuentry "Llamaste Desktop" {
 }
 ```
 
-### Step 10.2: Test both BIOS and UEFI boot
+### Step 10.2: Test both BIOS and UEFI boot (research/25)
 
 ```bash
-# BIOS
-qemu-system-x86_64 -m 4G -drive file=llamaste.img,format=raw,if=virtio -nographic
-
-# UEFI
+# BIOS boot
 qemu-system-x86_64 -m 4G \
-  -bios /usr/share/OVMF/OVMF_CODE.fd \
-  -drive file=llamaste.img,format=raw,if=virtio -nographic
+  -drive file=llamaste.img,format=raw,if=virtio \
+  -netdev user,id=net0,hostfwd=tcp::8080-:80 \
+  -device virtio-net-pci,netdev=net0 \
+  -nographic
+
+# UEFI boot (requires OVMF)
+cp /usr/share/OVMF/OVMF_VARS.fd /tmp/OVMF_VARS_llamaste.fd
+qemu-system-x86_64 -m 4G \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+  -drive if=pflash,format=raw,file=/tmp/OVMF_VARS_llamaste.fd \
+  -drive file=llamaste.img,format=raw,if=virtio \
+  -netdev user,id=net0,hostfwd=tcp::8080-:80 \
+  -device virtio-net-pci,netdev=net0 \
+  -nographic
+
+# Direct kernel boot (fastest for debugging — bypasses GRUB entirely)
+qemu-system-x86_64 -m 4G -smp 4 \
+  -kernel ~/llamaste-build/output/images/bzImage \
+  -append "root=/dev/vda3 rootfstype=squashfs ro console=ttyS0 init=/opt/llamaste/llamaste ip=dhcp" \
+  -drive file=llamaste.img,format=raw,if=virtio \
+  -netdev user,id=net0,hostfwd=tcp::8080-:80 \
+  -device virtio-net-pci,netdev=net0 \
+  -nographic
 ```
 
-Expected: GRUB menu appears, both entries visible, Server boots by default.
+Expected: GRUB menu appears (first two), both entries visible, Server boots by default. Third command boots directly without GRUB.
 
 ### Step 10.3: Commit
 
