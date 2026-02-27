@@ -1,0 +1,8 @@
+config BR2_PACKAGE_LLAMASTE
+	bool "llamaste"
+	select BR2_PACKAGE_HOST_CMAKE
+	help
+	  Llamaste LLM-OS. Single static C++ binary that runs as PID 1.
+	  Combines llama-server + agent + system tools + web UI.
+
+	  https://github.com/user/llamaste

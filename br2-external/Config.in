@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_LLAMASTE_PATH/package/llamaste/Config.in"
