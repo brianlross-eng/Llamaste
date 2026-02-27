@@ -103,8 +103,8 @@ std::string ConversationState::serialize() const {
         json m;
         m["role"] = msg.role;
         m["content"] = msg.content;
-        m["tool_call_id"] = msg.tool_call_id;
-        m["name"] = msg.name;
+        if (!msg.tool_call_id.empty()) m["tool_call_id"] = msg.tool_call_id;
+        if (!msg.name.empty()) m["name"] = msg.name;
 
         if (!msg.tool_calls.empty()) {
             json tcs = json::array();
@@ -166,6 +166,20 @@ void ConversationState::truncate(int max_messages) {
     // Remove from the front (oldest messages) to keep the most recent
     int to_remove = static_cast<int>(messages_.size()) - max_messages;
     messages_.erase(messages_.begin(), messages_.begin() + to_remove);
+
+    // Remove orphaned leading tool results or assistant tool_calls without results
+    while (!messages_.empty()) {
+        if (messages_.front().role == "tool") {
+            messages_.erase(messages_.begin());
+        } else if (messages_.front().role == "assistant" && !messages_.front().tool_calls.empty()) {
+            messages_.erase(messages_.begin());
+            while (!messages_.empty() && messages_.front().role == "tool") {
+                messages_.erase(messages_.begin());
+            }
+        } else {
+            break;
+        }
+    }
 }
 
 int ConversationState::message_count() const {
@@ -205,8 +219,10 @@ std::vector<ToolCall> parse_tool_calls(const std::string& response_json) {
 
         if (tc.contains("function") && tc["function"].is_object()) {
             call.name = tc["function"].value("name", "");
-            // arguments can be a string or object; we store as string
-            if (tc["function"]["arguments"].is_string()) {
+            // arguments can be a string, object, null, or missing
+            if (!tc["function"].contains("arguments") || tc["function"]["arguments"].is_null()) {
+                call.arguments = "{}";
+            } else if (tc["function"]["arguments"].is_string()) {
                 call.arguments = tc["function"]["arguments"].get<std::string>();
             } else {
                 call.arguments = tc["function"]["arguments"].dump();
@@ -276,13 +292,24 @@ std::string build_inference_request(
 std::string agent_turn(
     ConversationState& conv,
     const ToolRegistry& tools,
-    std::function<std::string(const std::string&)> inference_fn,
+    const std::function<std::string(const std::string&)>& inference_fn,
     int max_rounds
 ) {
     for (int round = 0; round < max_rounds; round++) {
         // Build and send inference request
         std::string request = build_inference_request(conv, tools);
-        std::string response = inference_fn(request);
+        std::string response;
+        try {
+            response = inference_fn(request);
+        } catch (const std::exception& e) {
+            std::string err = std::string("[Inference error: ") + e.what() + "]";
+            conv.add_assistant_message(err);
+            return err;
+        } catch (...) {
+            std::string err = "[Inference error: unknown]";
+            conv.add_assistant_message(err);
+            return err;
+        }
 
         // Try to parse tool calls
         auto tool_calls = parse_tool_calls(response);
@@ -290,9 +317,10 @@ std::string agent_turn(
         if (tool_calls.empty()) {
             // No tool calls — this is a final text response
             std::string content = parse_content(response);
-            if (!content.empty()) {
-                conv.add_assistant_message(content);
+            if (content.empty()) {
+                content = "[No response from inference engine]";
             }
+            conv.add_assistant_message(content);
             return content;
         }
 

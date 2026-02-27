@@ -109,6 +109,6 @@ std::string build_inference_request(
 std::string agent_turn(
     ConversationState& conv,
     const ToolRegistry& tools,
-    std::function<std::string(const std::string&)> inference_fn,
+    const std::function<std::string(const std::string&)>& inference_fn,
     int max_rounds = 5
 );

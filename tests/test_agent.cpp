@@ -549,6 +549,105 @@ int main() {
         PASS();
     }
 
+    // ---------------------------------------------------------------
+    // Test 14: agent_turn handles inference_fn exception gracefully
+    // ---------------------------------------------------------------
+    TEST("agent_turn handles inference_fn exception");
+    {
+        ConversationState conv;
+        conv.system_prompt = "System.";
+        conv.add_user_message("Hello");
+
+        ToolRegistry tools;
+
+        auto throwing_inference = [](const std::string&) -> std::string {
+            throw std::runtime_error("connection refused");
+        };
+
+        std::string result = agent_turn(conv, tools, throwing_inference);
+        assert(result.find("Inference error") != std::string::npos);
+        assert(result.find("connection refused") != std::string::npos);
+        // Should still add a message to the conversation
+        assert(conv.message_count() == 2);  // user + error assistant msg
+        PASS();
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15: agent_turn returns fallback on empty/malformed response
+    // ---------------------------------------------------------------
+    TEST("agent_turn returns fallback on empty inference response");
+    {
+        ConversationState conv;
+        conv.system_prompt = "System.";
+        conv.add_user_message("Hello");
+
+        ToolRegistry tools;
+
+        auto empty_inference = [](const std::string&) -> std::string {
+            return "{}";  // valid JSON but no choices
+        };
+
+        std::string result = agent_turn(conv, tools, empty_inference);
+        assert(result.find("No response") != std::string::npos);
+        assert(conv.message_count() == 2);  // user + fallback msg
+        PASS();
+    }
+
+    // ---------------------------------------------------------------
+    // Test 16: parse_tool_calls with missing arguments defaults to "{}"
+    // ---------------------------------------------------------------
+    TEST("parse_tool_calls missing arguments defaults to empty object");
+    {
+        json response;
+        json choice;
+        json message;
+        message["role"] = "assistant";
+        message["content"] = nullptr;
+
+        json tc;
+        tc["id"] = "call_noargs";
+        tc["type"] = "function";
+        tc["function"] = {{"name", "system.info"}};  // no arguments key
+        message["tool_calls"] = json::array({tc});
+        choice["message"] = message;
+        response["choices"] = json::array({choice});
+
+        auto calls = parse_tool_calls(response.dump());
+        assert(calls.size() == 1);
+        assert(calls[0].name == "system.info");
+        assert(calls[0].arguments == "{}");
+        PASS();
+    }
+
+    // ---------------------------------------------------------------
+    // Test 17: truncate removes orphaned tool results
+    // ---------------------------------------------------------------
+    TEST("truncate removes orphaned leading tool results");
+    {
+        ConversationState conv;
+        conv.add_user_message("Q1");
+        conv.add_assistant_message("A1");
+
+        // Add tool call group
+        std::vector<ToolCall> calls;
+        calls.push_back({"call_1", "test.foo", "{}"});
+        conv.add_assistant_tool_calls(calls);
+        conv.add_tool_result("call_1", "test.foo", "result");
+        conv.add_assistant_message("A2");
+        conv.add_user_message("Q2");
+        conv.add_assistant_message("A3");
+        // 7 messages: user, asst, asst(tc), tool, asst, user, asst
+
+        // Truncate to 5 — removes first 2 messages (user + asst)
+        // Next leading msg is asst(tc) which is orphaned → also removed along with tool
+        conv.truncate(5);
+        // Should have removed user, asst, asst(tc), tool → leaving asst, user, asst = 3
+        assert(conv.message_count() == 3);
+        assert(conv.messages()[0].role == "assistant");
+        assert(conv.messages()[0].content == "A2");
+        PASS();
+    }
+
     printf("\n=== All %d Agent & Prompt Builder tests passed. ===\n", tests_passed);
     return 0;
 }
