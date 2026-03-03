@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single static C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: PHASE 1 COMPLETE + ISO/installer done — 5/5 QEMU E2E tests, 93 host tests
+- **Phase**: PHASE 1 COMPLETE + ISO/installer done + EFI boot verified — 5/5 QEMU E2E tests, 93 host tests
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
@@ -55,15 +55,27 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Linux includes**: `mount()`/`umount()` need `#include <sys/mount.h>`, guard with `#ifndef _WIN32`
 - **ISO build**: `scripts/build-iso.sh /root/llamaste-build` — needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`
 - **QEMU E2E tests**: `scripts/qemu-boot-test.sh /root/llamaste-build/output/images/llamaste.img`
+- **EFI boot test**: `scripts/test-efi-boot.sh` (QEMU + OVMF)
+- **Install flow test**: `scripts/qemu-install-test.sh` (ISO boot → install → verify → reboot)
+- **ESP filesystem**: Do NOT force FAT32 on <512MB volumes — use auto-select (FAT16 for 32MB per UEFI spec)
+- **Partition alignment**: Always `align = 1M` in genimage.cfg for EFI compatibility
+- **PMBR updates**: After GPT resize, must update Protective MBR size (offset 458) and CHS end (offsets 451-453)
+- **Installer is pure C++**: No shell available (`BR2_SYSTEM_BIN_SH_NONE=y`), all disk ops via open/read/write/pread/pwrite, fork/execv
+
+## VirtualBox VM
+- VM "Llamaste" at `D:\Llamaste\vm\Llamaste\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
+- 16GB VDI with installed system, boots in ~1 second
+- Start: `"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" startvm Llamaste --type gui`
+- Web UI: `http://localhost:8080`
 
 ## Next Steps
-### Immediate
-1. Integrate real llama.cpp inference (replace stub_inference in child_main.cpp)
-2. Download test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
-3. Test actual tool-calling agent loop with a real model
+### Immediate (Phase 2: Desktop)
+1. Desktop mode (Cage/Labwc Wayland compositor, fullscreen kiosk browser)
+2. Integrate real llama.cpp inference (replace stub_inference in child_main.cpp)
+3. Download test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
+4. Test actual tool-calling agent loop with a real model
 
-### Phase 2
-4. Desktop mode (Cage/Labwc Wayland compositor)
+### Phase 2 (continued)
 5. Voice I/O (whisper.cpp + piper)
 6. App management tools
 
