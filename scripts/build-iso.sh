@@ -105,10 +105,11 @@ if [ -d "${TARGET_DIR}/opt/llamaste/web" ]; then
 fi
 
 # --- Step 5: Compress and copy disk image for installer ---
-echo "[iso] Compressing disk image for installer..."
+echo "[iso] Preparing disk image for installer..."
 IMG_SIZE=$(stat -c %s "${IMAGES_DIR}/llamaste.img" 2>/dev/null || stat -f %z "${IMAGES_DIR}/llamaste.img")
 echo "[iso]   Source image: $(echo "scale=1; ${IMG_SIZE} / 1048576" | bc) MB"
 
+# Include XZ compressed image (preferred — smaller ISO, needs liblzma in binary)
 if [ -f "${IMAGES_DIR}/llamaste.img.xz" ]; then
     echo "[iso]   Using existing compressed image"
     cp "${IMAGES_DIR}/llamaste.img.xz" "${ISO_ROOT}/install/llamaste.img.xz"
@@ -119,6 +120,11 @@ fi
 
 XZ_SIZE=$(stat -c %s "${ISO_ROOT}/install/llamaste.img.xz" 2>/dev/null || stat -f %z "${ISO_ROOT}/install/llamaste.img.xz")
 echo "[iso]   Compressed image: $(echo "scale=1; ${XZ_SIZE} / 1048576" | bc) MB"
+
+# Also include raw image as fallback (works without liblzma, larger ISO)
+echo "[iso]   Copying raw image as fallback..."
+cp "${IMAGES_DIR}/llamaste.img" "${ISO_ROOT}/install/llamaste.img"
+echo "[iso]   Raw image: $(echo "scale=1; ${IMG_SIZE} / 1048576" | bc) MB"
 
 # --- Step 6: Copy squashfs for reference ---
 echo "[iso] Copying rootfs.squashfs..."

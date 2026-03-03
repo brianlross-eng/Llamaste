@@ -50,9 +50,14 @@ fi
 # --- Step 3: Set up EFI partition ---
 EFI_GRUB_DIR="${BINARIES_DIR}/efi-part/grub"
 mkdir -p "${EFI_GRUB_DIR}"
+mkdir -p "${BINARIES_DIR}/efi-part/EFI/BOOT"
 
 if [ -f "${BOARD_DIR}/grub.cfg" ]; then
+    # Main GRUB config (loaded by BIOS GRUB via prefix "(hd0,gpt2)/grub")
     cp "${BOARD_DIR}/grub.cfg" "${EFI_GRUB_DIR}/grub.cfg"
+    # ALSO overwrite the EFI fallback config (loaded by EFI GRUB bootx64.efi)
+    # Buildroot creates a wrong default here — we must replace it with ours
+    cp "${BOARD_DIR}/grub.cfg" "${BINARIES_DIR}/efi-part/EFI/BOOT/grub.cfg"
 fi
 
 if [ -f "${BINARIES_DIR}/bzImage" ]; then
@@ -76,7 +81,10 @@ echo "[post-image] Creating ESP vfat image..."
 VFAT_SIZE=$((32 * 1024 * 1024))
 VFAT_IMG="${BINARIES_DIR}/efi-part.vfat"
 dd if=/dev/zero of="${VFAT_IMG}" bs=1M count=32 2>/dev/null
-mkdosfs -F 32 -n ESP "${VFAT_IMG}" >/dev/null 2>&1
+# IMPORTANT: Do NOT force FAT32 (-F 32) on a 32 MB volume!
+# FAT32 requires >=65525 clusters which 32 MB can't provide.
+# Let mkdosfs auto-select FAT type (FAT16 for 32 MB, per UEFI spec).
+mkdosfs -n ESP "${VFAT_IMG}" >/dev/null 2>&1
 # Copy files into the vfat image using mcopy
 mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/EFI" "::/"
 mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/grub" "::/"

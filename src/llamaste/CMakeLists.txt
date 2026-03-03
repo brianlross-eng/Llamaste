@@ -37,6 +37,21 @@ if(LLAMASTE_STATIC)
     target_link_options(llamaste PRIVATE -static)
 endif()
 
+# liblzma for XZ decompression in installer (optional, provided by BR2_PACKAGE_XZ)
+# Only search for static library when building static binary
+if(LLAMASTE_STATIC)
+    find_library(LZMA_LIB NAMES liblzma.a)
+else()
+    find_library(LZMA_LIB NAMES lzma)
+endif()
+if(LZMA_LIB)
+    message(STATUS "Found liblzma: ${LZMA_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_LZMA)
+    target_link_libraries(llamaste PRIVATE ${LZMA_LIB})
+else()
+    message(STATUS "liblzma not found - XZ decompression disabled, installer will use raw images only")
+endif()
+
 # Web asset embedding (production builds)
 # When web_embed.cpp/h are generated, add them and define LLAMASTE_HAS_EMBED
 set(WEB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web")

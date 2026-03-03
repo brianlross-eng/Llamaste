@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-02-27 (ISO + INSTALLER COMPLETE)
+**Last updated**: 2026-03-03 (EFI BOOT + INSTALLER VERIFIED IN VIRTUALBOX)
 
 ---
 
@@ -8,7 +8,9 @@
 
 ### Phase 1: COMPLETE — bootable image + live ISO with installer
 
-All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot build produces both a bootable disk image and a live ISO with a web-based installer. 5/5 QEMU E2E tests pass.
+All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot build produces both a bootable disk image and a live ISO with a web-based installer. 5/5 QEMU E2E tests pass. EFI boot verified with both QEMU+OVMF and VirtualBox.
+
+**Full install flow verified in VirtualBox**: Boot ISO → install to 16 GB VDI → reboot from installed disk → HTTP server running in server mode. Both BIOS and EFI boot paths work.
 
 **Currently running in stub (no-model) mode** — the next step is to integrate real llama.cpp inference.
 
@@ -22,7 +24,7 @@ All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot bu
 | bzImage kernel | 5 MB | Built-in drivers, no modules |
 | rootfs.squashfs | 5.9 MB | llamaste + libc + web UI |
 | llamaste.img | 360 MB | 5-partition GPT disk image |
-| llamaste.iso | 39 MB | Hybrid BIOS+UEFI live ISO with installer |
+| llamaste.iso | 400 MB | Hybrid BIOS+UEFI live ISO with installer (includes raw disk image) |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
 
 ### QEMU E2E Test Results

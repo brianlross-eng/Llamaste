@@ -4,6 +4,9 @@
 // to a local hard drive from the live ISO environment.
 //
 // These tools are only registered when running in live (ISO) mode.
+//
+// IMPORTANT: This system has NO shell (/bin/sh), NO BusyBox, NO external
+// commands. All operations must be implemented in pure C++ using syscalls.
 
 #include "tools.h"
 #include "json.hpp"
@@ -18,6 +21,7 @@
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <algorithm>
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -28,6 +32,11 @@
 #include <fcntl.h>
 #include <linux/fs.h>  // BLKRRPART, BLKGETSIZE64
 #include <sys/mount.h>
+#endif
+
+// liblzma for XZ decompression (linked statically via Buildroot)
+#ifdef HAVE_LZMA
+#include <lzma.h>
 #endif
 
 using json = nlohmann::json;
@@ -96,22 +105,7 @@ static std::string read_sysfs(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: run a command and return exit code
-// ---------------------------------------------------------------------------
-
-#ifndef _WIN32
-static int run_command(const std::string& cmd) {
-    fprintf(stderr, "[installer] Running: %s\n", cmd.c_str());
-    int ret = system(cmd.c_str());
-    if (WIFEXITED(ret))
-        return WEXITSTATUS(ret);
-    return -1;
-}
-#endif
-
-// ---------------------------------------------------------------------------
-// Helper: find the boot device (the device we booted from, which we must not
-// write to). For ISO boot, this is typically sr0 or the USB device.
+// Helper: find the boot device (which we must not write to)
 // ---------------------------------------------------------------------------
 
 static std::string find_boot_device() {
@@ -119,22 +113,19 @@ static std::string find_boot_device() {
     std::ifstream f("/proc/cmdline");
     std::string cmdline;
     if (std::getline(f, cmdline)) {
-        // Look for root=LABEL= or root=/dev/
         auto pos = cmdline.find("root=");
         if (pos != std::string::npos) {
             std::string root_spec = cmdline.substr(pos + 5);
             auto space = root_spec.find(' ');
             if (space != std::string::npos)
                 root_spec = root_spec.substr(0, space);
-            // If it's a device path, extract the base device
             if (root_spec.find("/dev/") == 0) {
-                // /dev/sda3 -> sda, /dev/nvme0n1p3 -> nvme0n1
                 std::string dev = root_spec.substr(5);
-                // Remove partition number suffix
+                // Remove partition number suffix: sda3->sda, nvme0n1p3->nvme0n1
                 while (!dev.empty() && (dev.back() >= '0' && dev.back() <= '9'))
                     dev.pop_back();
                 if (!dev.empty() && dev.back() == 'p')
-                    dev.pop_back();  // nvme0n1p -> nvme0n1
+                    dev.pop_back();
                 return dev;
             }
         }
@@ -164,6 +155,534 @@ static std::string find_boot_device() {
 }
 
 // ---------------------------------------------------------------------------
+// CRC32 for GPT (standard CRC32 used by UEFI/GPT spec)
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+static uint32_t crc32_gpt(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(int32_t)(crc & 1)));
+        }
+    }
+    return ~crc;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// GPT structures (packed, matching on-disk format)
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+struct __attribute__((packed)) GPTHeader {
+    uint8_t  signature[8];           // "EFI PART"
+    uint32_t revision;               // 0x00010000
+    uint32_t header_size;            // Usually 92
+    uint32_t header_crc32;           // CRC32 of header (with this field zeroed)
+    uint32_t reserved;               // Must be zero
+    uint64_t my_lba;                 // Location of this header
+    uint64_t alternate_lba;          // Location of backup header
+    uint64_t first_usable_lba;       // First usable LBA for partitions
+    uint64_t last_usable_lba;        // Last usable LBA
+    uint8_t  disk_guid[16];          // Disk GUID
+    uint64_t partition_entry_lba;    // Start LBA of partition entries
+    uint32_t num_partition_entries;   // Number of partition entries
+    uint32_t partition_entry_size;   // Size of each entry (usually 128)
+    uint32_t partition_array_crc32;  // CRC32 of partition entry array
+};
+
+struct __attribute__((packed)) GPTEntry {
+    uint8_t  type_guid[16];
+    uint8_t  unique_guid[16];
+    uint64_t starting_lba;
+    uint64_t ending_lba;
+    uint64_t attributes;
+    uint8_t  name[72];  // UTF-16LE name
+};
+#endif
+
+// ---------------------------------------------------------------------------
+// Pure C++ block copy: file -> device with progress tracking
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+static int copy_file_to_device(const std::string& src_path, const std::string& device,
+                                uint64_t src_size, int pct_start, int pct_end) {
+    int src_fd = open(src_path.c_str(), O_RDONLY);
+    if (src_fd < 0) {
+        g_install_progress.set_error("Cannot open source: " + src_path + " (" + strerror(errno) + ")");
+        return -1;
+    }
+
+    int dst_fd = open(device.c_str(), O_WRONLY);
+    if (dst_fd < 0) {
+        close(src_fd);
+        g_install_progress.set_error("Cannot open device: " + device + " (" + strerror(errno) + ")");
+        return -1;
+    }
+
+    const size_t BUF_SIZE = 4 * 1024 * 1024;  // 4 MB buffer
+    uint8_t* buf = (uint8_t*)malloc(BUF_SIZE);
+    if (!buf) {
+        close(src_fd);
+        close(dst_fd);
+        g_install_progress.set_error("Failed to allocate copy buffer");
+        return -1;
+    }
+
+    uint64_t total_written = 0;
+    ssize_t n;
+    while ((n = read(src_fd, buf, BUF_SIZE)) > 0) {
+        ssize_t offset = 0;
+        while (offset < n) {
+            ssize_t w = write(dst_fd, buf + offset, n - offset);
+            if (w <= 0) {
+                free(buf);
+                close(src_fd);
+                close(dst_fd);
+                g_install_progress.set_error("Write error at offset " +
+                    std::to_string(total_written) + ": " + strerror(errno));
+                return -1;
+            }
+            offset += w;
+        }
+        total_written += n;
+
+        // Update progress
+        if (src_size > 0) {
+            double fraction = (double)total_written / (double)src_size;
+            int pct = pct_start + (int)((pct_end - pct_start) * fraction);
+            g_install_progress.percent = std::min(pct, pct_end);
+        }
+    }
+
+    if (n < 0) {
+        free(buf);
+        close(src_fd);
+        close(dst_fd);
+        g_install_progress.set_error("Read error: " + std::string(strerror(errno)));
+        return -1;
+    }
+
+    fsync(dst_fd);
+    free(buf);
+    close(src_fd);
+    close(dst_fd);
+
+    fprintf(stderr, "[installer] Wrote %llu bytes to %s\n",
+            (unsigned long long)total_written, device.c_str());
+    return 0;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// XZ decompression -> device using liblzma (pure C++, no external commands)
+// ---------------------------------------------------------------------------
+
+#if defined(HAVE_LZMA) && !defined(_WIN32)
+static int decompress_xz_to_device(const std::string& xz_path, const std::string& device,
+                                    uint64_t xz_file_size, int pct_start, int pct_end) {
+    int src_fd = open(xz_path.c_str(), O_RDONLY);
+    if (src_fd < 0) {
+        g_install_progress.set_error("Cannot open XZ file: " + xz_path + " (" + strerror(errno) + ")");
+        return -1;
+    }
+
+    int dst_fd = open(device.c_str(), O_WRONLY);
+    if (dst_fd < 0) {
+        close(src_fd);
+        g_install_progress.set_error("Cannot open device: " + device + " (" + strerror(errno) + ")");
+        return -1;
+    }
+
+    // Initialize liblzma decoder
+    lzma_stream strm = LZMA_STREAM_INIT;
+    lzma_ret ret = lzma_stream_decoder(&strm, UINT64_MAX, LZMA_CONCATENATED);
+    if (ret != LZMA_OK) {
+        close(src_fd);
+        close(dst_fd);
+        g_install_progress.set_error("Failed to initialize XZ decoder");
+        return -1;
+    }
+
+    const size_t IN_BUF_SIZE = 1024 * 1024;      // 1 MB input buffer
+    const size_t OUT_BUF_SIZE = 4 * 1024 * 1024;  // 4 MB output buffer
+    uint8_t* in_buf = (uint8_t*)malloc(IN_BUF_SIZE);
+    uint8_t* out_buf = (uint8_t*)malloc(OUT_BUF_SIZE);
+    if (!in_buf || !out_buf) {
+        free(in_buf);
+        free(out_buf);
+        lzma_end(&strm);
+        close(src_fd);
+        close(dst_fd);
+        g_install_progress.set_error("Failed to allocate decompression buffers");
+        return -1;
+    }
+
+    uint64_t total_read = 0;
+    uint64_t total_written = 0;
+    lzma_action action = LZMA_RUN;
+
+    strm.next_in = nullptr;
+    strm.avail_in = 0;
+    strm.next_out = out_buf;
+    strm.avail_out = OUT_BUF_SIZE;
+
+    bool done = false;
+    int result = 0;
+
+    while (!done) {
+        // Read more input if needed
+        if (strm.avail_in == 0) {
+            ssize_t n = read(src_fd, in_buf, IN_BUF_SIZE);
+            if (n < 0) {
+                g_install_progress.set_error("XZ read error: " + std::string(strerror(errno)));
+                result = -1;
+                break;
+            }
+            if (n == 0) {
+                action = LZMA_FINISH;
+            }
+            strm.next_in = in_buf;
+            strm.avail_in = (size_t)n;
+            total_read += (uint64_t)n;
+        }
+
+        // Decompress
+        ret = lzma_code(&strm, action);
+
+        // Write output if buffer is full or stream ended
+        if (strm.avail_out == 0 || ret == LZMA_STREAM_END) {
+            size_t write_size = OUT_BUF_SIZE - strm.avail_out;
+            if (write_size > 0) {
+                ssize_t offset = 0;
+                while ((size_t)offset < write_size) {
+                    ssize_t w = write(dst_fd, out_buf + offset, write_size - offset);
+                    if (w <= 0) {
+                        g_install_progress.set_error("Write error during decompression: " +
+                            std::string(strerror(errno)));
+                        result = -1;
+                        done = true;
+                        break;
+                    }
+                    offset += w;
+                }
+                total_written += write_size;
+            }
+            strm.next_out = out_buf;
+            strm.avail_out = OUT_BUF_SIZE;
+        }
+
+        if (ret == LZMA_STREAM_END) {
+            done = true;
+        } else if (ret != LZMA_OK) {
+            const char* msg = "Unknown error";
+            switch (ret) {
+                case LZMA_MEM_ERROR: msg = "Memory allocation failed"; break;
+                case LZMA_FORMAT_ERROR: msg = "Not an XZ file"; break;
+                case LZMA_DATA_ERROR: msg = "Compressed data is corrupt"; break;
+                case LZMA_BUF_ERROR: msg = "Buffer error"; break;
+                default: break;
+            }
+            g_install_progress.set_error(std::string("XZ decompression error: ") + msg);
+            result = -1;
+            break;
+        }
+
+        // Update progress based on compressed bytes read
+        if (xz_file_size > 0) {
+            double fraction = (double)total_read / (double)xz_file_size;
+            int pct = pct_start + (int)((pct_end - pct_start) * fraction);
+            g_install_progress.percent = std::min(pct, pct_end);
+        }
+    }
+
+    fsync(dst_fd);
+    free(in_buf);
+    free(out_buf);
+    lzma_end(&strm);
+    close(src_fd);
+    close(dst_fd);
+
+    if (result == 0) {
+        fprintf(stderr, "[installer] Decompressed %llu bytes -> %llu bytes to %s\n",
+                (unsigned long long)total_read, (unsigned long long)total_written,
+                device.c_str());
+    }
+    return result;
+}
+#endif  // HAVE_LZMA && !_WIN32
+
+// ---------------------------------------------------------------------------
+// GPT partition 5 resize — expand to fill remaining disk space (pure C++)
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+static int resize_gpt_data_partition(const std::string& device) {
+    int fd = open(device.c_str(), O_RDWR | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr, "[installer] Cannot open %s for GPT resize: %s\n",
+                device.c_str(), strerror(errno));
+        return -1;
+    }
+
+    // Get disk size in bytes
+    uint64_t disk_size = 0;
+    if (ioctl(fd, BLKGETSIZE64, &disk_size) != 0) {
+        fprintf(stderr, "[installer] Cannot get disk size: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    uint64_t disk_sectors = disk_size / 512;
+    fprintf(stderr, "[installer] Disk size: %llu bytes (%llu sectors)\n",
+            (unsigned long long)disk_size, (unsigned long long)disk_sectors);
+
+    // Read primary GPT header at LBA 1
+    GPTHeader header;
+    if (pread(fd, &header, sizeof(header), 512) != sizeof(header)) {
+        fprintf(stderr, "[installer] Cannot read GPT header: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    // Verify GPT signature
+    if (memcmp(header.signature, "EFI PART", 8) != 0) {
+        fprintf(stderr, "[installer] Invalid GPT signature\n");
+        close(fd);
+        return -1;
+    }
+
+    fprintf(stderr, "[installer] GPT: %u partition entries, %u bytes each, at LBA %llu\n",
+            header.num_partition_entries, header.partition_entry_size,
+            (unsigned long long)header.partition_entry_lba);
+
+    // Read all partition entries
+    uint32_t entries_size = header.num_partition_entries * header.partition_entry_size;
+    uint8_t* entries = (uint8_t*)malloc(entries_size);
+    if (!entries) {
+        close(fd);
+        return -1;
+    }
+
+    off_t entries_offset = header.partition_entry_lba * 512;
+    if (pread(fd, entries, entries_size, entries_offset) != (ssize_t)entries_size) {
+        fprintf(stderr, "[installer] Cannot read partition entries: %s\n", strerror(errno));
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    // Find partition 5 (0-indexed = entry 4)
+    if (header.num_partition_entries < 5) {
+        fprintf(stderr, "[installer] Not enough partition entries for DATA partition\n");
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    GPTEntry* part5 = (GPTEntry*)(entries + 4 * header.partition_entry_size);
+
+    // Check if partition 5 exists (has a type GUID)
+    bool has_type = false;
+    for (int i = 0; i < 16; i++) {
+        if (part5->type_guid[i] != 0) { has_type = true; break; }
+    }
+    if (!has_type) {
+        fprintf(stderr, "[installer] Partition 5 has no type GUID (not used)\n");
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    // Calculate new end LBA for partition 5:
+    // Last usable LBA = disk_sectors - 34 (33 sectors for backup GPT + 1)
+    // The backup GPT needs: 32 sectors for entries + 1 sector for header = 33 sectors
+    // So last usable LBA = disk_sectors - 34
+    uint64_t new_last_usable = disk_sectors - 34;
+    uint64_t old_end = part5->ending_lba;
+
+    if (new_last_usable <= part5->starting_lba) {
+        fprintf(stderr, "[installer] Disk too small for partition resize\n");
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    if (new_last_usable <= old_end) {
+        fprintf(stderr, "[installer] Partition 5 already at maximum size (end LBA %llu)\n",
+                (unsigned long long)old_end);
+        free(entries);
+        close(fd);
+        return 0;  // Not an error
+    }
+
+    fprintf(stderr, "[installer] Resizing partition 5: end LBA %llu -> %llu (%.1f GB)\n",
+            (unsigned long long)old_end, (unsigned long long)new_last_usable,
+            (double)(new_last_usable - part5->starting_lba + 1) * 512.0 / (1024.0 * 1024.0 * 1024.0));
+
+    // Update partition 5 end LBA
+    part5->ending_lba = new_last_usable;
+
+    // Update the GPT header's last_usable_lba
+    header.last_usable_lba = new_last_usable;
+
+    // Update alternate (backup) header LBA to end of disk
+    header.alternate_lba = disk_sectors - 1;
+
+    // Recalculate partition entry array CRC32
+    header.partition_array_crc32 = crc32_gpt(entries, entries_size);
+
+    // Recalculate header CRC32 (must zero the CRC field first)
+    header.header_crc32 = 0;
+    header.header_crc32 = crc32_gpt((const uint8_t*)&header, header.header_size);
+
+    // Write updated partition entries (primary, at partition_entry_lba)
+    if (pwrite(fd, entries, entries_size, entries_offset) != (ssize_t)entries_size) {
+        fprintf(stderr, "[installer] Cannot write partition entries: %s\n", strerror(errno));
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    // Write updated primary GPT header (LBA 1)
+    if (pwrite(fd, &header, sizeof(header), 512) != sizeof(header)) {
+        fprintf(stderr, "[installer] Cannot write GPT header: %s\n", strerror(errno));
+        free(entries);
+        close(fd);
+        return -1;
+    }
+
+    // Write backup GPT at end of disk:
+    // Backup partition entries go at (disk_sectors - 33) * 512
+    // Backup header goes at (disk_sectors - 1) * 512
+    off_t backup_entries_offset = (disk_sectors - 33) * 512;
+    if (pwrite(fd, entries, entries_size, backup_entries_offset) != (ssize_t)entries_size) {
+        fprintf(stderr, "[installer] Warning: Cannot write backup partition entries\n");
+        // Non-fatal — primary GPT is already updated
+    }
+
+    // Create backup header (swap my_lba and alternate_lba, update partition_entry_lba)
+    GPTHeader backup_header = header;
+    backup_header.my_lba = disk_sectors - 1;
+    backup_header.alternate_lba = 1;  // Points to primary
+    backup_header.partition_entry_lba = disk_sectors - 33;
+    // Recalculate backup header CRC
+    backup_header.header_crc32 = 0;
+    backup_header.header_crc32 = crc32_gpt((const uint8_t*)&backup_header, backup_header.header_size);
+
+    off_t backup_header_offset = (disk_sectors - 1) * 512;
+    if (pwrite(fd, &backup_header, sizeof(backup_header), backup_header_offset) != sizeof(backup_header)) {
+        fprintf(stderr, "[installer] Warning: Cannot write backup GPT header\n");
+    }
+
+    // ---------------------------------------------------------------
+    // Update the Protective MBR to cover the full disk
+    // Without this, EFI firmware (especially VirtualBox) rejects the GPT
+    // because the PMBR size doesn't match the actual disk size.
+    // ---------------------------------------------------------------
+    uint8_t mbr[512];
+    if (pread(fd, mbr, 512, 0) == 512) {
+        // MBR partition entry 1 starts at offset 446, is 16 bytes
+        // Bytes 12-15 = number of sectors (little-endian uint32_t)
+        // Per GPT spec: type 0xEE, start LBA 1, size = min(disk_sectors-1, 0xFFFFFFFF)
+        uint32_t pmbr_size;
+        if (disk_sectors - 1 > 0xFFFFFFFFULL) {
+            pmbr_size = 0xFFFFFFFF;  // Disk > 2 TB, use maximum
+        } else {
+            pmbr_size = (uint32_t)(disk_sectors - 1);
+        }
+        // Write the size into the PMBR partition entry (offset 446 + 12 = 458)
+        memcpy(mbr + 458, &pmbr_size, 4);
+
+        // Also update the CHS end address to FE/FF/FF (maximum CHS for protective MBR)
+        // MBR entry layout at offset 446: [boot(1)] [CHS_start(3)] [type(1)] [CHS_end(3)] [LBA(4)] [size(4)]
+        // CHS end = offset 446 + 5 = 451 (head), 452 (sector+cyl_hi), 453 (cyl_lo)
+        mbr[451] = 0xFE;  // End head
+        mbr[452] = 0xFF;  // End sector + cylinder high bits
+        mbr[453] = 0xFF;  // End cylinder low bits
+
+        if (pwrite(fd, mbr, 512, 0) != 512) {
+            fprintf(stderr, "[installer] Warning: Cannot update protective MBR\n");
+        } else {
+            fprintf(stderr, "[installer] Protective MBR updated: size = %u sectors\n", pmbr_size);
+        }
+    } else {
+        fprintf(stderr, "[installer] Warning: Cannot read MBR for PMBR update\n");
+    }
+
+    fsync(fd);
+    free(entries);
+
+    // Tell kernel to re-read partition table
+    ioctl(fd, BLKRRPART, 0);
+    close(fd);
+
+    fprintf(stderr, "[installer] GPT partition 5 resized successfully\n");
+    return 0;
+}
+#endif  // !_WIN32
+
+// ---------------------------------------------------------------------------
+// Minimal ext4 formatting using fork/exec (no shell needed)
+// If mkfs.ext4 binary is available, use it; otherwise skip (non-fatal)
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+static int try_format_ext4(const std::string& partition) {
+    // Check if mkfs.ext4 exists anywhere
+    const char* mkfs_paths[] = {
+        "/sbin/mkfs.ext4",
+        "/usr/sbin/mkfs.ext4",
+        "/bin/mkfs.ext4",
+        "/usr/bin/mkfs.ext4",
+        "/sbin/mke2fs",
+        "/usr/sbin/mke2fs",
+        nullptr
+    };
+
+    const char* mkfs_path = nullptr;
+    for (int i = 0; mkfs_paths[i]; i++) {
+        if (access(mkfs_paths[i], X_OK) == 0) {
+            mkfs_path = mkfs_paths[i];
+            break;
+        }
+    }
+
+    if (!mkfs_path) {
+        fprintf(stderr, "[installer] mkfs.ext4 not found — skipping DATA partition format\n");
+        fprintf(stderr, "[installer] The DATA partition will use the pre-existing filesystem from the image\n");
+        return -1;  // Non-fatal
+    }
+
+    fprintf(stderr, "[installer] Formatting DATA partition with %s\n", mkfs_path);
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        // Child process: run mkfs.ext4
+        const char* argv[] = {mkfs_path, "-q", "-L", "DATA", partition.c_str(), nullptr};
+        execv(mkfs_path, (char* const*)argv);
+        _exit(127);  // exec failed
+    }
+
+    // Parent: wait for child
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        fprintf(stderr, "[installer] DATA partition formatted successfully\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[installer] mkfs.ext4 returned %d — DATA partition may use existing filesystem\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    return -1;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // install.detect_disks — Scan for available target disks
 // ---------------------------------------------------------------------------
 
@@ -191,15 +710,15 @@ static std::string handle_detect_disks(const std::string& /*args*/) {
         if (name.find("loop") == 0) continue;
         if (name.find("ram") == 0) continue;
         if (name.find("dm-") == 0) continue;
-        if (name.find("sr") == 0) continue;  // CD-ROM
-        if (name.find("fd") == 0) continue;  // Floppy
+        if (name.find("sr") == 0) continue;   // CD-ROM
+        if (name.find("fd") == 0) continue;   // Floppy
 
         // Skip the boot device
         if (name == boot_dev) continue;
 
         std::string base = "/sys/block/" + name;
 
-        // Check if it's a real device (has a 'device' or 'size' entry)
+        // Check if it's a real device (has a 'size' entry)
         std::string size_str = read_sysfs(base + "/size");
         if (size_str.empty()) continue;
 
@@ -209,7 +728,7 @@ static std::string handle_detect_disks(const std::string& /*args*/) {
 
         double size_gb = (sectors * 512.0) / (1024.0 * 1024.0 * 1024.0);
 
-        // Skip tiny devices (< 2 GB, probably not a real disk)
+        // Skip tiny devices (< 2 GB)
         if (size_gb < 2.0) continue;
 
         // Read model name
@@ -256,7 +775,7 @@ static std::string handle_detect_disks(const std::string& /*args*/) {
 }
 
 // ---------------------------------------------------------------------------
-// install.to_disk — Write Llamaste image to target disk
+// install.to_disk — Write Llamaste image to target disk (pure C++)
 // ---------------------------------------------------------------------------
 
 static void install_worker(const std::string& device) {
@@ -269,7 +788,6 @@ static void install_worker(const std::string& device) {
     std::string target_name = device;
     if (target_name.find("/dev/") == 0)
         target_name = target_name.substr(5);
-    // Strip partition suffix for comparison
     std::string target_base = target_name;
     while (!target_base.empty() && (target_base.back() >= '0' && target_base.back() <= '9'))
         target_base.pop_back();
@@ -293,7 +811,7 @@ static void install_worker(const std::string& device) {
     // Get target disk size
     int fd = open(device.c_str(), O_RDONLY);
     if (fd < 0) {
-        g_install_progress.set_error("Cannot open device: " + device);
+        g_install_progress.set_error("Cannot open device: " + device + " (" + strerror(errno) + ")");
         g_install_progress.finished = true;
         return;
     }
@@ -301,79 +819,108 @@ static void install_worker(const std::string& device) {
     ioctl(fd, BLKGETSIZE64, &disk_size);
     close(fd);
 
-    if (disk_size < (uint64_t)1024 * 1024 * 1024) {  // Minimum 1 GB
-        g_install_progress.set_error("Disk too small: " + std::to_string(disk_size / (1024*1024)) + " MB");
+    if (disk_size < (uint64_t)512 * 1024 * 1024) {  // Minimum 512 MB
+        g_install_progress.set_error("Disk too small: " + std::to_string(disk_size / (1024*1024)) + " MB (need 512 MB+)");
         g_install_progress.finished = true;
         return;
     }
 
     // ---------------------------------------------------------------
-    // Step 1: Find and decompress the installation image
+    // Step 1: Find the installation image
     // ---------------------------------------------------------------
     g_install_progress.set_status("Looking for installation image...");
     g_install_progress.percent = 5;
 
-    // The image could be at several locations depending on how the ISO is mounted
-    std::vector<std::string> img_paths = {
+    // Check for XZ compressed image first, then raw image
+    std::vector<std::string> xz_paths = {
         "/install/llamaste.img.xz",
         "/media/cdrom/install/llamaste.img.xz",
         "/cdrom/install/llamaste.img.xz",
-        "/mnt/iso/install/llamaste.img.xz",
+    };
+    std::vector<std::string> raw_paths = {
+        "/install/llamaste.img",
+        "/media/cdrom/install/llamaste.img",
+        "/cdrom/install/llamaste.img",
     };
 
     std::string img_source;
-    for (const auto& p : img_paths) {
+    bool is_xz = false;
+    uint64_t src_file_size = 0;
+
+#ifdef HAVE_LZMA
+    // Try XZ first (preferred, smaller ISO)
+    for (const auto& p : xz_paths) {
         if (stat(p.c_str(), &st) == 0) {
             img_source = p;
+            is_xz = true;
+            src_file_size = st.st_size;
             break;
         }
     }
+#endif
 
+    // Fallback to raw image
     if (img_source.empty()) {
-        // Try uncompressed image
-        std::vector<std::string> raw_paths = {
-            "/install/llamaste.img",
-            "/media/cdrom/install/llamaste.img",
-            "/cdrom/install/llamaste.img",
-        };
         for (const auto& p : raw_paths) {
             if (stat(p.c_str(), &st) == 0) {
                 img_source = p;
+                is_xz = false;
+                src_file_size = st.st_size;
                 break;
             }
         }
     }
 
+    // If no raw image found, also try XZ paths (even without HAVE_LZMA, for error msg)
     if (img_source.empty()) {
-        g_install_progress.set_error("Installation image not found. Checked /install/ and /media/cdrom/install/");
+        for (const auto& p : xz_paths) {
+            if (stat(p.c_str(), &st) == 0) {
+                img_source = p;
+                is_xz = true;
+                src_file_size = st.st_size;
+                break;
+            }
+        }
+        if (!img_source.empty() && is_xz) {
+#ifndef HAVE_LZMA
+            g_install_progress.set_error("Found " + img_source + " but XZ decompression not available (liblzma not linked)");
+            g_install_progress.finished = true;
+            return;
+#endif
+        }
+    }
+
+    if (img_source.empty()) {
+        g_install_progress.set_error("Installation image not found. Checked /install/ for llamaste.img and llamaste.img.xz");
         g_install_progress.finished = true;
         return;
     }
 
-    g_install_progress.set_status("Found image: " + img_source);
+    g_install_progress.set_status("Found image: " + img_source +
+        " (" + std::to_string(src_file_size / (1024*1024)) + " MB" +
+        (is_xz ? ", XZ compressed" : ", raw") + ")");
     g_install_progress.percent = 10;
 
     // ---------------------------------------------------------------
-    // Step 2: Write image to disk
+    // Step 2: Write image to disk (pure C++, no shell, no dd)
     // ---------------------------------------------------------------
     g_install_progress.set_status("Writing image to " + device + "...");
+    int ret;
 
-    bool is_xz = (img_source.find(".xz") != std::string::npos);
-    std::string dd_cmd;
     if (is_xz) {
-        dd_cmd = "xz -dc '" + img_source + "' | dd of='" + device + "' bs=4M status=none 2>/dev/null";
+#ifdef HAVE_LZMA
+        ret = decompress_xz_to_device(img_source, device, src_file_size, 10, 60);
+#else
+        g_install_progress.set_error("XZ decompression not available");
+        g_install_progress.finished = true;
+        return;
+#endif
     } else {
-        dd_cmd = "dd if='" + img_source + "' of='" + device + "' bs=4M status=none 2>/dev/null";
+        ret = copy_file_to_device(img_source, device, src_file_size, 10, 60);
     }
 
-    // Track progress by checking bytes written periodically
-    // For simplicity in Phase 1, we just run the command and update progress
-    // in estimated steps
-    g_install_progress.percent = 15;
-
-    int ret = run_command(dd_cmd);
     if (ret != 0) {
-        g_install_progress.set_error("Failed to write image to disk (exit code " + std::to_string(ret) + ")");
+        // Error already set by copy/decompress function
         g_install_progress.finished = true;
         return;
     }
@@ -391,18 +938,29 @@ static void install_worker(const std::string& device) {
         ioctl(fd, BLKRRPART, 0);
         close(fd);
     }
-    // Also try partprobe/blockdev
-    run_command("partprobe '" + device + "' 2>/dev/null || blockdev --rereadpt '" + device + "' 2>/dev/null || true");
 
     // Give the kernel a moment to process
     std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    g_install_progress.percent = 70;
+    g_install_progress.percent = 65;
 
     // ---------------------------------------------------------------
     // Step 4: Resize DATA partition (partition 5) to fill remaining disk
+    // This is pure C++ GPT manipulation — no external tools needed
     // ---------------------------------------------------------------
-    g_install_progress.set_status("Resizing DATA partition...");
+    g_install_progress.set_status("Resizing DATA partition to fill disk...");
+
+    ret = resize_gpt_data_partition(device);
+    if (ret != 0) {
+        fprintf(stderr, "[installer] Warning: Could not resize DATA partition (non-fatal)\n");
+    }
+
+    g_install_progress.percent = 75;
+
+    // ---------------------------------------------------------------
+    // Step 5: Format the expanded DATA partition
+    // Try to use mkfs.ext4 if available, otherwise skip (non-fatal)
+    // ---------------------------------------------------------------
+    g_install_progress.set_status("Formatting DATA partition...");
 
     // Determine the partition naming scheme
     std::string part_prefix;
@@ -410,55 +968,21 @@ static void install_worker(const std::string& device) {
         part_prefix = device + "p";
     else
         part_prefix = device;
-
     std::string data_part = part_prefix + "5";
 
-    // Use sfdisk to resize partition 5 to fill remaining space
-    // The '--' is needed for the command to work without interactive input
-    std::string sfdisk_cmd = "echo ',+' | sfdisk -N 5 '" + device + "' --no-reread 2>/dev/null";
-    ret = run_command(sfdisk_cmd);
-
-    if (ret != 0) {
-        // Try sgdisk as fallback
-        std::string sgdisk_cmd = "sgdisk -e -d 5 -n 5:0:0 -t 5:8300 -c 5:data '" + device + "' 2>/dev/null";
-        ret = run_command(sgdisk_cmd);
-        if (ret != 0) {
-            fprintf(stderr, "[installer] Warning: Could not resize DATA partition (non-fatal)\n");
-        }
+    // Wait for partition device to appear
+    for (int i = 0; i < 10; i++) {
+        if (stat(data_part.c_str(), &st) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    // Re-read partition table again
-    fd = open(device.c_str(), O_RDWR);
-    if (fd >= 0) {
-        ioctl(fd, BLKRRPART, 0);
-        close(fd);
-    }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    ret = try_format_ext4(data_part);
+    // Non-fatal if this fails — the partition has the original ext4 from the image
 
-    g_install_progress.percent = 80;
+    g_install_progress.percent = 85;
 
     // ---------------------------------------------------------------
-    // Step 5: Format the DATA partition
-    // ---------------------------------------------------------------
-    g_install_progress.set_status("Formatting DATA partition...");
-
-    // Check if resize2fs is available (resize existing filesystem)
-    std::string resize_cmd = "resize2fs '" + data_part + "' 2>/dev/null";
-    ret = run_command(resize_cmd);
-
-    if (ret != 0) {
-        // Fallback: reformat the partition
-        std::string mkfs_cmd = "mkfs.ext4 -q -L DATA '" + data_part + "' 2>/dev/null";
-        ret = run_command(mkfs_cmd);
-        if (ret != 0) {
-            fprintf(stderr, "[installer] Warning: Could not format DATA partition (non-fatal)\n");
-        }
-    }
-
-    g_install_progress.percent = 90;
-
-    // ---------------------------------------------------------------
-    // Step 6: Create data directories on the new partition
+    // Step 6: Initialize data directories on the new partition
     // ---------------------------------------------------------------
     g_install_progress.set_status("Initializing data directories...");
 
@@ -492,8 +1016,10 @@ static void install_worker(const std::string& device) {
         }
 
         umount(mount_point.c_str());
+        fprintf(stderr, "[installer] Data directories initialized\n");
     } else {
-        fprintf(stderr, "[installer] Warning: Could not mount DATA partition for initialization\n");
+        fprintf(stderr, "[installer] Warning: Could not mount DATA partition for initialization (%s)\n",
+                strerror(errno));
     }
 
     g_install_progress.percent = 100;
