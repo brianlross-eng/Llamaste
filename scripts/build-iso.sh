@@ -54,6 +54,27 @@ mkdir -p "${ISO_ROOT}/boot/grub"
 mkdir -p "${ISO_ROOT}/opt/llamaste"
 mkdir -p "${ISO_ROOT}/install"
 
+# Essential mount points for PID 1 init (ISO9660 is read-only,
+# so these must exist before boot — mkdir fails on a mounted iso9660)
+mkdir -p "${ISO_ROOT}/proc"
+mkdir -p "${ISO_ROOT}/sys"
+mkdir -p "${ISO_ROOT}/dev"
+mkdir -p "${ISO_ROOT}/tmp"
+mkdir -p "${ISO_ROOT}/run"
+mkdir -p "${ISO_ROOT}/data"
+mkdir -p "${ISO_ROOT}/etc"
+
+# Minimal /etc for PID 1
+echo "llamaste" > "${ISO_ROOT}/etc/hostname"
+cat > "${ISO_ROOT}/etc/hosts" << 'HOSTS'
+127.0.0.1	localhost
+127.0.1.1	llamaste
+HOSTS
+cat > "${ISO_ROOT}/etc/resolv.conf" << 'DNS'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNS
+
 # --- Step 2: Copy kernel ---
 echo "[iso] Copying kernel..."
 cp "${IMAGES_DIR}/bzImage" "${ISO_ROOT}/boot/bzImage"
