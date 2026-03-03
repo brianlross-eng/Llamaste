@@ -333,6 +333,19 @@ static json gather_system_info(const SupervisorConfig& config) {
     info["disk_total_gb"] = disk_total_gb;
     info["disk_used_gb"] = disk_used_gb;
 
+    // Hardware details (from startup detection)
+    info["cpu_model"] = g_hwinfo.cpu_model;
+    info["cpu_cores"] = g_hwinfo.cpu_cores;
+    info["gpu_name"] = g_hwinfo.gpu_detected ? g_hwinfo.gpu_name : "";
+    info["gpu_detected"] = g_hwinfo.gpu_detected;
+    info["has_avx2"] = g_hwinfo.has_avx2;
+    info["has_avx512"] = g_hwinfo.has_avx512;
+
+    // Placeholder fields for Phase 2 features
+    info["tokens_per_sec"] = 0.0;
+    info["scheduled_tasks_count"] = 0;
+    info["active_alerts"] = json::array();
+
     return info;
 }
 
