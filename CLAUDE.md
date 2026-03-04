@@ -4,11 +4,13 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single static C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: PHASE 1 COMPLETE + ISO/installer done + EFI boot verified — 5/5 QEMU E2E tests, 93 host tests
+- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop mode PENDING Buildroot build, 108 host tests
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
 - **Phase 1 design doc**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-design.md`
+- **Console + Auth design**: `D:\Llamaste\docs\plans\2026-03-05-console-auth-design.md`
+- **Console + Auth plan**: `D:\Llamaste\docs\plans\2026-03-05-console-auth-implementation-plan.md`
 
 ## Key Architecture Decisions
 - Single static C++ binary extending llama-server (not separate Go/Rust daemons)
@@ -42,9 +44,11 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `llamaste.iso` — 39 MB live ISO with installer (built from scripts/build-iso.sh)
 - `docs/plans/2026-02-26-phase1-implementation-plan.md` — Phase 1 build plan (complete)
 - `docs/plans/2026-02-26-phase1-implementation-design.md` — Phase 1 design doc
+- `docs/plans/2026-03-05-console-auth-design.md` — Auth + console design doc
+- `docs/plans/2026-03-05-console-auth-implementation-plan.md` — Auth + console build plan
 - `research/llamaste-architecture.html` — v2 three-layer architecture SVG diagram
 - `research/` — All research documents (01 through 26)
-- `src/llamaste/` — Production C++ source (~5,500 LOC)
+- `src/llamaste/` — Production C++ source (~7,500 LOC)
 
 ## Build Patterns & Gotchas
 - **Buildroot invocation**: `cd /root/llamaste-build/output && make` (NOT from buildroot/ source dir)
@@ -61,6 +65,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Partition alignment**: Always `align = 1M` in genimage.cfg for EFI compatibility
 - **PMBR updates**: After GPT resize, must update Protective MBR size (offset 458) and CHS end (offsets 451-453)
 - **Installer is pure C++**: No shell available (`BR2_SYSTEM_BIN_SH_NONE=y`), all disk ops via open/read/write/pread/pwrite, fork/execv
+- **Buildroot ICU/C++ linking**: ICU (C++) is in sysroot but libstdc++.so isn't. Fix: symlink libstdc++ into sysroot via `ICU_POST_INSTALL_STAGING_HOOKS` in external.mk. Also `LIBXML2_CONF_OPTS += --without-icu`. `LIBS="-lstdc++"` did NOT work.
+- **bcrypt alphabet**: bcrypt base64 is `./A-Za-z0-9` NOT standard `A-Za-z0-9+/`. Decode table must match.
+- **Eksblowfish salt streaming**: Salt index must be continuous across P-array and S-box expansion (not reset to 0 for S-boxes)
 
 ## VirtualBox VM
 - VM "Llamaste" at `D:\Llamaste\vm\Llamaste\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
@@ -69,9 +76,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - Web UI: `http://localhost:8080`
 
 ## Next Steps
-### Immediate (Phase 2: Desktop)
-1. Desktop mode (Cage/Labwc Wayland compositor, fullscreen kiosk browser)
-2. Integrate real llama.cpp inference (replace stub_inference in child_main.cpp)
+### Immediate
+1. **Task 19**: WSL2 Buildroot build + QEMU desktop mode test (in progress)
+2. **Task 20**: Real llama.cpp inference integration (needs design doc)
 3. Download test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
 4. Test actual tool-calling agent loop with a real model
 

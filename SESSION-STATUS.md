@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (Auth + Console + Phase 2c DONE, pending Buildroot build)
+**Last updated**: 2026-03-05 (Auth + Console + Phase 2c DONE, Buildroot build PASSED, desktop mode tested)
 
 ---
 
@@ -15,8 +15,8 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 |-----------|-------|--------|
 | 2a: Web UI Redesign | 1-9 | DONE — status bar, tabs, file browser, dashboard, system settings |
 | 2b: Heartbeat Scheduler | 10-15 | DONE — scheduler thread, schedule.* tools, SSE notifications, toasts |
-| 2c: Desktop Compositor | 16-18 | DONE (source changes) — kernel DRM, Buildroot packages, compositor launch |
-| 2c: QEMU Testing | 19 | PENDING — needs WSL2 Buildroot build |
+| 2c: Desktop Compositor | 16-18 | DONE — kernel DRM, Buildroot packages, compositor launch |
+| 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches (needs real display for GUI) |
 | 2d: Real Inference | 20 | PENDING — needs own design doc |
 | Auth + Console | bcrypt, AuthManager, server display | DONE — 108 host tests, 7/7 suites |
 
@@ -88,11 +88,11 @@ bcrypt base64 decode table was wrong — built for standard base64 alphabet orde
 ## Next Steps
 
 ### Immediate
-1. **Task 19**: WSL2 Buildroot build + QEMU desktop mode test
-   - Buildroot fix applied: `LIBXML2_CONF_ENV += LIBS="-lstdc++"` in external.mk
-   - `cd /root/llamaste-build/output && make llamaste_x86_64_defconfig && make`
-   - Test: `qemu-system-x86_64 -m 4096 -device virtio-gpu-pci -display gtk` with `llamaste.mode=desktop`
-   - Verify server mode E2E tests still pass
+1. ~~**Task 19**: WSL2 Buildroot build + QEMU desktop mode test~~ **DONE**
+   - Build fixes: libstdc++ symlinks in sysroot (ICU/C++ linking), --without-icu for libxml2
+   - Squashfs: 65 MB (from 5.9 MB — includes WPEWebKit, Mesa, Wayland, Cage, etc.)
+   - Server mode: 5/5 E2E tests pass, boots in 2s
+   - Desktop mode: boots, HTTP server works, compositor launches (exits gracefully without real display)
 
 2. **Task 20**: Real inference integration (needs design doc)
    - Replace stub_inference with llama.cpp server communication
@@ -110,10 +110,10 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin
 | Artifact | Size | Details |
 |----------|------|---------|
 | llamaste binary | ~6 MB (in squashfs) | Static ELF, x86-64, musl, stripped |
-| bzImage kernel | 5 MB | Built-in drivers, no modules |
-| rootfs.squashfs | 5.9 MB (will grow with desktop pkgs) | llamaste + libc + web UI |
-| llamaste.img | 360 MB (will grow) | 5-partition GPT disk image |
-| llamaste.iso | 400 MB | Hybrid BIOS+UEFI live ISO with installer |
+| bzImage kernel | 7.5 MB | Built-in DRM/GPU drivers, evdev, no modules |
+| rootfs.squashfs | 65 MB | llamaste + WPEWebKit + Mesa + Wayland + Cage + ICU |
+| llamaste.img | 611 MB | 5-partition GPT disk image |
+| llamaste.iso | ~400 MB (needs rebuild) | Hybrid BIOS+UEFI live ISO with installer |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
 
 ---
