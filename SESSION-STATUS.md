@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-07 (Task 20 inference integration DONE, 118 tests across 8 suites)
+**Last updated**: 2026-03-08 (Desktop mode WORKING in VirtualBox, 118 tests across 8 suites)
 
 ---
 
@@ -16,7 +16,8 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 | 2a: Web UI Redesign | 1-9 | DONE — status bar, tabs, file browser, dashboard, system settings |
 | 2b: Heartbeat Scheduler | 10-15 | DONE — scheduler thread, schedule.* tools, SSE notifications, toasts |
 | 2c: Desktop Compositor | 16-18 | DONE — kernel DRM, Buildroot packages, compositor launch |
-| 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches (needs real display for GUI) |
+| 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches |
+| 2c: VirtualBox Desktop | — | DONE — Cage+Cog renders web UI, setup flow works, auth works |
 | 2d: Real Inference | 20 | DONE — llama-server package, HTTP proxy, lifecycle mgmt, 118 tests/8 suites |
 | Auth + Console | bcrypt, AuthManager, server display | DONE — 118 host tests, 8/8 suites |
 
@@ -89,7 +90,15 @@ bcrypt base64 decode table was wrong — built for standard base64 alphabet orde
 ## Next Steps
 
 ### Immediate
-1. ~~**Task 19**: WSL2 Buildroot build + QEMU desktop mode test~~ **DONE**
+1. **Desktop mode bugs fixed** (2026-03-08) — 3 issues found and resolved:
+   - `execlp` → `execl` with full paths (PID 1 has no PATH)
+   - `BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y` (cage/wlroots need HAS_UDEV)
+   - `CONFIG_HYPERVISOR_GUEST=y` in kernel (vmwgfx needs it for VirtualBox VMSVGA)
+   - Also added `BR2_PACKAGE_SEATD=y` (wlroots dependency)
+   - Squashfs: 73 MB, disk image: 611 MB
+   - Desktop mode: Cage+Cog renders full web UI, first-boot setup works
+
+2. ~~**Task 19**: WSL2 Buildroot build + QEMU desktop mode test~~ **DONE**
    - Build fixes: libstdc++ symlinks in sysroot (ICU/C++ linking), --without-icu for libxml2
    - Squashfs: 65 MB (from 5.9 MB — includes WPEWebKit, Mesa, Wayland, Cage, etc.)
    - Server mode: 5/5 E2E tests pass, boots in 2s

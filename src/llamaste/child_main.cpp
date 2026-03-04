@@ -1012,26 +1012,31 @@ int child_main(const SupervisorConfig& config) {
 
             pid_t pid = fork();
             if (pid == 0) {
+                // Set PATH for child processes (cage needs it to find browser)
+                setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
+
                 // Child: exec compositor with detected browser
+                // Use execl with full paths — PID 1 has no PATH
                 if (browser && access("/usr/bin/cage", X_OK) == 0) {
                     if (strcmp(browser, "cog") == 0) {
-                        execlp("cage", "cage", "-s", "--",
-                               "cog", "http://localhost", nullptr);
+                        execl("/usr/bin/cage", "cage", "-s", "--",
+                              "/usr/bin/cog", "http://localhost", nullptr);
                     } else if (strcmp(browser, "midori") == 0) {
-                        execlp("cage", "cage", "-s", "--",
-                               "midori", "-e", "Fullscreen", "-a",
-                               "http://localhost", nullptr);
+                        execl("/usr/bin/cage", "cage", "-s", "--",
+                              "/usr/bin/midori", "-e", "Fullscreen", "-a",
+                              "http://localhost", nullptr);
                     } else if (strcmp(browser, "chromium") == 0) {
-                        execlp("cage", "cage", "-s", "--",
-                               "chromium", "--no-sandbox", "--kiosk",
-                               "http://localhost", nullptr);
+                        execl("/usr/bin/cage", "cage", "-s", "--",
+                              "/usr/bin/chromium", "--no-sandbox", "--kiosk",
+                              "http://localhost", nullptr);
                     }
                 }
                 // Last resort: weston kiosk mode (no separate browser needed)
-                execlp("weston", "weston", "--shell=kiosk",
-                       "--continue-without-input", nullptr);
+                execl("/usr/bin/weston", "weston", "--shell=kiosk",
+                      "--continue-without-input", nullptr);
                 // All options failed
-                fprintf(stderr, "[child] No compositor available\n");
+                fprintf(stderr, "[child] No compositor available (errno=%d: %s)\n",
+                        errno, strerror(errno));
                 _exit(1);
             } else if (pid > 0) {
                 g_cage_pid.store(pid);
