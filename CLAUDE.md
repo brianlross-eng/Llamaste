@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop DONE, Model Download DONE, 128 host tests/9 suites
+- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop DONE, Model Download DONE, DATA auto-resize DONE, 128 host tests/9 suites
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
@@ -72,6 +72,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **libcurl CMake detection**: Use `find_library(CURL_LIB NAMES curl)` for shared, or `pkg-config --libs --static libcurl` for full static chain. `CURL_STATICLIB` define needed for static.
 - **bcrypt alphabet**: bcrypt base64 is `./A-Za-z0-9` NOT standard `A-Za-z0-9+/`. Decode table must match.
 - **Eksblowfish salt streaming**: Salt index must be continuous across P-array and S-box expansion (not reset to 0 for S-boxes)
+- **BLKPG vs BLKRRPART**: `BLKRRPART` ioctl is unreliable for partitions already visible to kernel. Use `BLKPG_RESIZE_PARTITION` (`<linux/blkpg.h>`) to directly update a specific partition in the kernel's in-memory table.
+- **DATA partition auto-resize**: init.cpp grows GPT partition 5 at boot (pure C++ GPT manipulation), then ext4 online resize via `EXT4_IOC_RESIZE_FS` ioctl on mounted filesystem. Idempotent — skips on subsequent boots.
+- **Dashboard auth bug**: Web UI fetch() calls to protected API endpoints need `credentials: 'include'` or the auth middleware returns 401. Currently affects model download button.
 
 ## VirtualBox VM
 - VM "Llamaste" at `D:\Llamaste\vm\Llamaste\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
@@ -79,12 +82,16 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - Start: `"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" startvm Llamaste --type gui`
 - Web UI: `http://localhost:8080`
 
+## Known Bugs
+1. **Dashboard download 401**: fetch() to `/llamaste/model/recommended` and `/download-recommended` returns 401 — needs `credentials: 'include'` in dashboard.js
+2. **VirtualBox console blank**: supervisor.cpp `console_display_thread()` writes VT100 to `/dev/console` but nothing visible in VBox GUI — needs debug
+
 ## Next Steps
 ### Immediate
-1. **Task 19**: WSL2 Buildroot build + QEMU desktop mode test (in progress)
-2. **Task 20**: Real llama.cpp inference integration (needs design doc)
-3. Download test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
-4. Test actual tool-calling agent loop with a real model
+1. Fix dashboard download auth (quick JS fix)
+2. Fix VirtualBox console display
+3. Download test model and test real inference end-to-end
+4. OS installation process reminder
 
 ### Phase 2 (continued)
 5. Voice I/O (whisper.cpp + piper)

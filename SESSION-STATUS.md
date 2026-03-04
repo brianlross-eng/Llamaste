@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (Model download tools DONE, 128 tests across 9 suites)
+**Last updated**: 2026-03-10 (DATA partition auto-resize + dashboard download button fix)
 
 ---
 
@@ -89,9 +89,43 @@ bcrypt base64 decode table was wrong — built for standard base64 alphabet orde
 
 ---
 
+## Known Bugs (2026-03-10)
+
+### BUG 1: Dashboard "Download Recommended Model" button fails
+- **Symptom**: Click button → "Checking recommended model..." → "Download failed" → retry also fails
+- **Root cause**: Dashboard fetch calls to `/llamaste/model/recommended` and `/llamaste/model/download-recommended` return HTTP 401 (auth required). The dashboard JS `fetch()` calls don't include session cookie or auth credentials.
+- **Fix needed**: Either add `credentials: 'include'` to the fetch calls in `dashboard.js`, or exempt these model endpoints from auth, or pass the session cookie properly.
+- **Files**: `src/llamaste/web/dashboard.js` (fetch calls ~lines 223, 251), `src/llamaste/child_main.cpp` (auth middleware)
+
+### BUG 2: VirtualBox console has no status display
+- **Symptom**: VirtualBox GUI window shows blank/no text — no box-drawing status display
+- **Root cause**: Needs investigation. The `console_display_thread()` in `supervisor.cpp` writes to `/dev/console` with VT100 escape codes every 5 seconds. May be: (a) `/dev/console` not writable in VirtualBox, (b) VirtualBox serial/VGA console not interpreting VT100, (c) thread not starting, (d) display going to wrong device.
+- **Files**: `src/llamaste/supervisor.cpp` (lines 315-527, `console_display_thread()`)
+- **Debug approach**: Add logging to confirm thread starts and `/dev/console` opens successfully. Check if output goes to serial vs VGA.
+
+---
+
+## Completed Work
+
+### DATA partition auto-resize (2026-03-10)
+- init.cpp: Auto-grow GPT partition 5 at boot (pure C++ GPT manipulation, CRC32, PMBR update)
+- init.cpp: ext4 online resize via EXT4_IOC_RESIZE_FS ioctl after mount
+- init.cpp: BLKPG_RESIZE_PARTITION for reliable kernel partition table update (BLKRRPART unreliable)
+- dashboard.js: Download button now visible when model is "stub" or "no model"
+- Tested on both QEMU and VirtualBox: DATA grows from 64 MB → 15 GB on 16 GB disk
+- Commits: bfdccab, 5496afe, 2bfdc24, 08fcda4
+
+---
+
 ## Next Steps
 
-### Immediate
+### Immediate (next session)
+1. **Fix model download auth** — dashboard fetch needs credentials for protected endpoints
+2. **Fix console status display** — debug why VirtualBox shows no supervisor output
+3. **Test real model download end-to-end** — once auth fix is in, download qwen2.5-0.5b via button
+4. **Test real inference** — load downloaded model, verify llama-server spawns and agent loop works
+
+### Recently Completed
 1. **Model download feature complete** (2026-03-09) — 5 new tools + dashboard button + REST endpoints:
    - `model.recommended`: RAM-based model recommendation (6 Qwen2.5 tiers)
    - `model.search`: Search Hugging Face for GGUF models
