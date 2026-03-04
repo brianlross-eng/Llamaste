@@ -92,6 +92,45 @@ static std::atomic<pid_t> g_cage_pid{0};
 #endif
 
 // ---------------------------------------------------------------------------
+// Inference backend state
+// ---------------------------------------------------------------------------
+
+// Inference function pointer: starts as stub, swapped to llama_inference on model load
+static std::function<std::string(const std::string&)> g_inference_fn;
+
+// llama-server process state
+#ifndef _WIN32
+static std::atomic<pid_t> g_llama_pid{0};
+#endif
+static std::atomic<bool> g_model_loaded{false};
+static int g_llama_port = 8088;
+static std::string g_model_name;
+static std::mutex g_llama_mutex;
+
+// ---------------------------------------------------------------------------
+// Inference configuration helpers (non-static for testability)
+// ---------------------------------------------------------------------------
+
+// Thread count for generation: max(1, cores * 3/4)
+int compute_thread_count(int cpu_cores) {
+    int t = cpu_cores * 3 / 4;
+    return t < 1 ? 1 : t;
+}
+
+// Batch thread count: use all cores
+int compute_batch_thread_count(int cpu_cores) {
+    return cpu_cores < 1 ? 1 : cpu_cores;
+}
+
+// Context window size based on free RAM after model loading
+int compute_context_size(int free_ram_mb) {
+    if (free_ram_mb >= 2048) return 16384;
+    if (free_ram_mb >= 1024) return 8192;
+    if (free_ram_mb >= 512)  return 4096;
+    return 2048;
+}
+
+// ---------------------------------------------------------------------------
 // Signal handler
 // ---------------------------------------------------------------------------
 
@@ -230,6 +269,55 @@ static std::string stub_inference(const std::string& request_json) {
     response["usage"] = usage;
 
     return response.dump();
+}
+
+// ---------------------------------------------------------------------------
+// Real inference: HTTP proxy to llama-server on localhost
+// ---------------------------------------------------------------------------
+
+static std::string llama_inference(const std::string& request_json) {
+    if (!g_model_loaded.load()) {
+        return stub_inference(request_json);  // graceful fallback
+    }
+
+    httplib::Client cli("127.0.0.1", g_llama_port);
+    cli.set_connection_timeout(5);
+    cli.set_read_timeout(120);  // large models may take time
+
+    auto result = cli.Post("/v1/chat/completions",
+                           request_json,
+                           "application/json");
+
+    if (!result || result->status != 200) {
+        // Return error as a well-formed chat completion
+        json response;
+        json choice;
+        json msg;
+        msg["role"] = "assistant";
+
+        if (!result) {
+            msg["content"] = "[inference error: llama-server unreachable]";
+        } else {
+            msg["content"] = "[inference error: llama-server returned HTTP " +
+                             std::to_string(result->status) + "]";
+        }
+
+        choice["index"] = 0;
+        choice["message"] = msg;
+        choice["finish_reason"] = "stop";
+        response["id"] = "chatcmpl-error";
+        response["object"] = "chat.completion";
+        response["model"] = "llamaste-error";
+        response["choices"] = json::array({choice});
+        json usage;
+        usage["prompt_tokens"] = 0;
+        usage["completion_tokens"] = 0;
+        usage["total_tokens"] = 0;
+        response["usage"] = usage;
+        return response.dump();
+    }
+
+    return result->body;
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +710,7 @@ int child_main(const SupervisorConfig& config) {
 
     g_start_time = time(nullptr);
     g_boot_mode = config.boot_mode;
+    g_inference_fn = stub_inference;  // default; swapped to llama_inference when model loads
 
     fprintf(stderr, "[child] Inference child started\n");
     fprintf(stderr, "[child] Model: %s\n",
