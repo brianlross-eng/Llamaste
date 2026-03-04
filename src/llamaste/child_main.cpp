@@ -678,8 +678,8 @@ static void handle_chat(const httplib::Request& req, httplib::Response& res) {
                 auto& conv = get_or_create_conversation(conv_id);
                 conv.add_user_message(message);
 
-                // Run agent turn with stub inference
-                std::string final_text = agent_turn(conv, g_tools, stub_inference);
+                // Run agent turn with current inference function
+                std::string final_text = agent_turn(conv, g_tools, g_inference_fn);
 
                 // Simulate streaming: emit tokens one word at a time
                 std::istringstream words(final_text);
@@ -718,7 +718,7 @@ static void handle_chat(const httplib::Request& req, httplib::Response& res) {
         auto& conv = get_or_create_conversation(conv_id);
         conv.add_user_message(message);
 
-        std::string result = agent_turn(conv, g_tools, stub_inference);
+        std::string result = agent_turn(conv, g_tools, g_inference_fn);
 
         json response;
         response["conversation_id"] = conv_id;
@@ -817,9 +817,9 @@ static void handle_openai_completions(const httplib::Request& req, httplib::Resp
         conv.add_user_message(user_msg);
     }
 
-    // Use stub inference directly to get the response
+    // Use current inference function to get the response
     std::string request = build_inference_request(conv, g_tools);
-    std::string response = stub_inference(request);
+    std::string response = g_inference_fn(request);
 
     res.set_content(response, "application/json");
 }
@@ -829,7 +829,9 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
     json health;
     health["status"] = "ok";
     health["uptime_seconds"] = static_cast<int>(time(nullptr) - g_start_time);
-    health["model_loaded"] = false;  // Phase 1: no real model
+    health["model_loaded"] = g_model_loaded.load();
+    health["model_name"] = g_model_name.empty() ? json(nullptr) : json(g_model_name);
+    health["inference_ready"] = g_model_loaded.load();
     health["tools_count"] = g_tools.count();
     health["mode"] = g_boot_mode;
     res.set_content(health.dump(), "application/json");
@@ -937,7 +939,7 @@ int child_main(const SupervisorConfig& config) {
         ConversationState conv;
         conv.system_prompt = g_system_prompt;
         conv.add_user_message(prompt);
-        return agent_turn(conv, g_tools, stub_inference);
+        return agent_turn(conv, g_tools, g_inference_fn);
     });
     g_scheduler.set_notify_fn([](const Notification& /*notif*/) {
         // Notifications are drained by the SSE endpoint; no-op callback
