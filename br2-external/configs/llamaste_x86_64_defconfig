@@ -43,6 +43,10 @@ BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
 BR2_PACKAGE_LLAMASTE=y
 BR2_PACKAGE_LLAMA_SERVER=y
 
+# HTTPS downloads (model download from Hugging Face)
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_LIBCURL=y
+
 # Scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_image.sh"
