@@ -102,4 +102,5 @@ void register_all_tools(ToolRegistry& reg) {
     register_system_tools(reg);
     register_config_tools(reg);
     register_model_tools(reg);
+    register_model_download_tools(reg);
 }
