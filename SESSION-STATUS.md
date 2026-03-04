@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (Auth + Console + Phase 2c DONE, Buildroot build PASSED, desktop mode tested)
+**Last updated**: 2026-03-07 (Task 20 inference integration DONE, 118 tests across 8 suites)
 
 ---
 
@@ -17,8 +17,8 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 | 2b: Heartbeat Scheduler | 10-15 | DONE — scheduler thread, schedule.* tools, SSE notifications, toasts |
 | 2c: Desktop Compositor | 16-18 | DONE — kernel DRM, Buildroot packages, compositor launch |
 | 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches (needs real display for GUI) |
-| 2d: Real Inference | 20 | PENDING — needs own design doc |
-| Auth + Console | bcrypt, AuthManager, server display | DONE — 108 host tests, 7/7 suites |
+| 2d: Real Inference | 20 | DONE — llama-server package, HTTP proxy, lifecycle mgmt, 118 tests/8 suites |
+| Auth + Console | bcrypt, AuthManager, server display | DONE — 118 host tests, 8/8 suites |
 
 **Phase 2 implementation plan**: `docs/plans/2026-03-03-phase2-implementation-plan.md`
 **Console + Auth design**: `docs/plans/2026-03-05-console-auth-design.md`
@@ -44,7 +44,7 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 - Protected routes: all API endpoints. Unprotected: /health, /login.html, /setup.html, static JS/CSS
 
 ### Test results
-**108 host tests across 7 suites** — ALL PASSING:
+**118 host tests across 8 suites** — ALL PASSING:
 1. Hardware Detection (3 tests)
 2. Tools System (10 tests)
 3. Agent Loop (19 tests)
@@ -52,6 +52,7 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 5. HTTP Server (15 tests)
 6. Network/mDNS (17+ tests)
 7. Auth & Console (15 tests)
+8. Inference Integration (10 tests)
 
 ### Bug found and fixed
 bcrypt base64 decode table was wrong — built for standard base64 alphabet order but bcrypt uses `./A-Za-z0-9`. Fixed decode table + salt streaming in Eksblowfish key expansion.
@@ -94,9 +95,15 @@ bcrypt base64 decode table was wrong — built for standard base64 alphabet orde
    - Server mode: 5/5 E2E tests pass, boots in 2s
    - Desktop mode: boots, HTTP server works, compositor launches (exits gracefully without real display)
 
-2. **Task 20**: Real inference integration (needs design doc)
-   - Replace stub_inference with llama.cpp server communication
-   - Download qwen2.5-0.5b-instruct-q4_k_m.gguf test model
+2. ~~**Task 20**: Real inference integration~~ **DONE**
+   - Design doc: `docs/plans/2026-03-06-inference-integration-design.md`
+   - Implementation plan: `docs/plans/2026-03-07-inference-integration-plan.md`
+   - Buildroot package for llama-server (llama.cpp b5460, static CPU build)
+   - HTTP proxy inference function (llama_inference → localhost:8088)
+   - Process lifecycle: spawn, health poll, crash recovery (3 retries)
+   - g_inference_fn global swap (stub → real when model loads)
+   - Health endpoint reports model_loaded, model_name, inference_ready
+   - ~435 lines new code (C++ + Buildroot + tests)
 
 ### Build Commands (WSL2)
 ```bash
