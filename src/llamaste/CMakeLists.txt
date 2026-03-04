@@ -41,6 +41,11 @@ target_link_libraries(llamaste PRIVATE Threads::Threads)
 option(LLAMASTE_STATIC "Build fully static binary" OFF)
 if(LLAMASTE_STATIC)
     target_link_options(llamaste PRIVATE -static)
+else()
+    # Even without full-static, always link C++ runtime statically so we don't
+    # need libstdc++.so / libgcc_s.so in the rootfs.  Shared libs like
+    # libcurl.so are still linked dynamically.
+    target_link_options(llamaste PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
 # liblzma for XZ decompression in installer (optional, provided by BR2_PACKAGE_XZ)
@@ -59,25 +64,38 @@ else()
 endif()
 
 # libcurl for HTTPS downloads (model download from Hugging Face)
-if(LLAMASTE_STATIC)
-    find_library(CURL_LIB NAMES libcurl.a)
-else()
-    find_library(CURL_LIB NAMES curl)
-endif()
-if(CURL_LIB)
-    message(STATUS "Found libcurl: ${CURL_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_LIBCURL)
-    target_link_libraries(llamaste PRIVATE ${CURL_LIB})
-    # libcurl with OpenSSL needs these when linking statically
-    if(LLAMASTE_STATIC)
-        find_library(SSL_LIB NAMES libssl.a)
-        find_library(CRYPTO_LIB NAMES libcrypto.a)
-        if(SSL_LIB AND CRYPTO_LIB)
-            target_link_libraries(llamaste PRIVATE ${SSL_LIB} ${CRYPTO_LIB})
-        endif()
+# Static linking requires all transitive deps (nghttp2, psl, ssl, crypto, z).
+# Use pkg-config --static to resolve the full chain automatically.
+find_package(PkgConfig QUIET)
+set(CURL_FOUND FALSE)
+if(PKG_CONFIG_FOUND AND LLAMASTE_STATIC)
+    pkg_check_modules(CURL_STATIC QUIET IMPORTED_TARGET libcurl)
+    if(CURL_STATIC_FOUND)
+        # Get the full static link flags (includes transitive deps)
+        execute_process(
+            COMMAND ${PKG_CONFIG_EXECUTABLE} --libs --static libcurl
+            OUTPUT_VARIABLE CURL_STATIC_LDFLAGS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        message(STATUS "Found libcurl (pkg-config static): ${CURL_STATIC_LDFLAGS}")
+        target_compile_definitions(llamaste PRIVATE HAVE_LIBCURL CURL_STATICLIB)
+        # Parse the flags and add them as link libraries
+        separate_arguments(CURL_STATIC_LDFLAGS_LIST UNIX_COMMAND "${CURL_STATIC_LDFLAGS}")
+        target_link_libraries(llamaste PRIVATE ${CURL_STATIC_LDFLAGS_LIST})
+        set(CURL_FOUND TRUE)
     endif()
-else()
-    message(STATUS "libcurl not found - model download disabled, search/browse only with pre-placed models")
+endif()
+if(NOT CURL_FOUND)
+    # Fallback: find shared libcurl
+    find_library(CURL_LIB NAMES curl)
+    if(CURL_LIB)
+        message(STATUS "Found libcurl (shared): ${CURL_LIB}")
+        target_compile_definitions(llamaste PRIVATE HAVE_LIBCURL)
+        target_link_libraries(llamaste PRIVATE ${CURL_LIB})
+        set(CURL_FOUND TRUE)
+    else()
+        message(STATUS "libcurl not found - model download disabled, search/browse only with pre-placed models")
+    endif()
 endif()
 
 # Web asset embedding (production builds)

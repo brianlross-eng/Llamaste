@@ -414,8 +414,9 @@ static std::string handle_model_download(const std::string& args_json) {
 
     CURLcode res = curl_easy_perform(curl);
 
-    double speed = 0;
-    curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &speed);
+    curl_off_t speed_t = 0;
+    curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD_T, &speed_t);
+    double speed = static_cast<double>(speed_t);
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);

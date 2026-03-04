@@ -19,10 +19,16 @@ LLAMASTE_INSTALL_STAGING = NO
 LLAMASTE_INSTALL_TARGET = YES
 LLAMASTE_SUPPORTS_IN_SOURCE_BUILD = NO
 
+# Dynamic linking: rootfs already has shared libs from desktop packages
+# (eudev, wayland, mesa, cage, wpewebkit, etc.) so the musl dynamic
+# linker and all .so deps are already present.  This avoids the
+# transitive static-dependency chain for libcurl (nghttp2, psl, icu, z).
 LLAMASTE_CONF_OPTS = \
 	-DCMAKE_BUILD_TYPE=Release \
-	-DLLAMASTE_STATIC=ON \
+	-DLLAMASTE_STATIC=OFF \
 	-DLLAMASTE_EMBED_WEB=ON
+
+LLAMASTE_DEPENDENCIES = libcurl openssl
 
 define LLAMASTE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \

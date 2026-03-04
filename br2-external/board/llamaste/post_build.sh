@@ -84,4 +84,20 @@ if [ ! -f "${TARGET_DIR}/etc/localtime" ]; then
     echo "UTC" > "${TARGET_DIR}/etc/timezone"
 fi
 
+# --- C++ runtime shared library ---
+# libcurl → libpsl → libicuuc → libstdc++  (ICU is C++ and needs the runtime)
+# Our binary links libstdc++ statically, but ICU in the rootfs needs the .so
+TOOLCHAIN_SYSROOT="${TARGET_DIR}/../host/x86_64-buildroot-linux-musl/lib64"
+if [ -f "${TOOLCHAIN_SYSROOT}/libstdc++.so.6.0.30" ]; then
+    cp "${TOOLCHAIN_SYSROOT}/libstdc++.so.6.0.30" "${TARGET_DIR}/usr/lib/"
+    ln -sf libstdc++.so.6.0.30 "${TARGET_DIR}/usr/lib/libstdc++.so.6"
+    ln -sf libstdc++.so.6 "${TARGET_DIR}/usr/lib/libstdc++.so"
+    echo "[post-build] Installed libstdc++.so.6 for ICU/libcurl"
+fi
+if [ -f "${TOOLCHAIN_SYSROOT}/libgcc_s.so.1" ]; then
+    cp "${TOOLCHAIN_SYSROOT}/libgcc_s.so.1" "${TARGET_DIR}/usr/lib/"
+    ln -sf libgcc_s.so.1 "${TARGET_DIR}/usr/lib/libgcc_s.so"
+    echo "[post-build] Installed libgcc_s.so.1"
+fi
+
 echo "[post-build] Target filesystem preparation complete"
