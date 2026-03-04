@@ -320,6 +320,141 @@ static std::string llama_inference(const std::string& request_json) {
     return result->body;
 }
 
+#ifndef _WIN32
+
+// ---------------------------------------------------------------------------
+// llama-server process lifecycle
+// ---------------------------------------------------------------------------
+
+static bool spawn_llama_server(const std::string& model_path, int cpu_cores, int free_ram_mb) {
+    std::lock_guard<std::mutex> lock(g_llama_mutex);
+
+    int threads = compute_thread_count(cpu_cores);
+    int batch_threads = compute_batch_thread_count(cpu_cores);
+    int context = compute_context_size(free_ram_mb);
+
+    std::string t_str = std::to_string(threads);
+    std::string tb_str = std::to_string(batch_threads);
+    std::string c_str = std::to_string(context);
+    std::string port_str = std::to_string(g_llama_port);
+
+    fprintf(stderr, "[child] Spawning llama-server: model=%s threads=%d batch=%d ctx=%d port=%d\n",
+            model_path.c_str(), threads, batch_threads, context, g_llama_port);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[child] Failed to fork llama-server: %s\n", strerror(errno));
+        return false;
+    }
+
+    if (pid == 0) {
+        // Child process: exec llama-server
+        execl("/opt/llamaste/llama-server", "llama-server",
+              "-m", model_path.c_str(),
+              "--host", "127.0.0.1",
+              "--port", port_str.c_str(),
+              "--no-webui",
+              "-c", c_str.c_str(),
+              "-t", t_str.c_str(),
+              "-tb", tb_str.c_str(),
+              "--mlock",
+              "-fa",
+              "--log-disable",
+              "--chat-template", "chatml",
+              (char*)nullptr);
+        // exec failed
+        fprintf(stderr, "[child] execl llama-server failed: %s\n", strerror(errno));
+        _exit(127);
+    }
+
+    // Parent: store PID
+    g_llama_pid.store(pid);
+    fprintf(stderr, "[child] llama-server spawned with PID %d\n", pid);
+    return true;
+}
+
+// Poll llama-server /health until ready (or timeout)
+static bool wait_for_llama_server(int timeout_seconds) {
+    httplib::Client cli("127.0.0.1", g_llama_port);
+    cli.set_connection_timeout(2);
+    cli.set_read_timeout(5);
+
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_seconds) {
+            fprintf(stderr, "[child] llama-server health timeout after %ds\n", timeout_seconds);
+            return false;
+        }
+
+        auto result = cli.Get("/health");
+        if (result && result->status == 200) {
+            auto body = json::parse(result->body, nullptr, false);
+            if (!body.is_discarded()) {
+                std::string status = body.value("status", "");
+                if (status == "ok" || status == "no slot available") {
+                    fprintf(stderr, "[child] llama-server healthy after %llds\n",
+                            (long long)elapsed);
+                    return true;
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
+// Background thread: monitor llama-server PID, respawn on crash
+static void llama_monitor_thread(std::string model_path, int cpu_cores, int free_ram_mb) {
+    int retries = 0;
+    const int max_retries = 3;
+
+    while (g_running.load() && retries < max_retries) {
+        pid_t pid = g_llama_pid.load();
+        if (pid <= 0) break;
+
+        int status = 0;
+        pid_t result = waitpid(pid, &status, 0);
+        if (result <= 0) break;
+
+        if (!g_running.load()) break;  // shutting down, don't respawn
+
+        if (WIFEXITED(status)) {
+            fprintf(stderr, "[child] llama-server exited with code %d\n",
+                    WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            fprintf(stderr, "[child] llama-server killed by signal %d\n",
+                    WTERMSIG(status));
+        }
+
+        g_model_loaded.store(false);
+        g_inference_fn = stub_inference;
+        retries++;
+
+        if (retries >= max_retries) {
+            fprintf(stderr, "[child] llama-server crashed %d times, staying in stub mode\n",
+                    max_retries);
+            break;
+        }
+
+        fprintf(stderr, "[child] Respawning llama-server (attempt %d/%d) in 2s...\n",
+                retries + 1, max_retries);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        if (spawn_llama_server(model_path, cpu_cores, free_ram_mb)) {
+            if (wait_for_llama_server(60)) {
+                g_model_loaded.store(true);
+                g_inference_fn = llama_inference;
+                retries = 0;  // reset on successful restart
+                fprintf(stderr, "[child] llama-server recovered successfully\n");
+            }
+        }
+    }
+}
+
+#endif // _WIN32
+
 // ---------------------------------------------------------------------------
 // System info gathering (for /llamaste/system endpoint)
 // ---------------------------------------------------------------------------
@@ -745,6 +880,42 @@ int child_main(const SupervisorConfig& config) {
     g_hwinfo = detect_hardware();
     fprintf(stderr, "[child] CPU: %s (%d cores), RAM: %d MB\n",
             g_hwinfo.cpu_model.c_str(), g_hwinfo.cpu_cores, g_hwinfo.ram_total_mb);
+
+    // Start llama-server if a model is available
+#ifndef _WIN32
+    if (!config.model_path.empty()) {
+        // Extract model filename for display
+        std::string model_file = config.model_path;
+        auto slash = model_file.rfind('/');
+        if (slash != std::string::npos) model_file = model_file.substr(slash + 1);
+        g_model_name = model_file;
+
+        // Estimate free RAM after model load
+        int free_ram_estimate = g_hwinfo.ram_free_mb - 512;  // reserve for system
+        if (config.boot_mode == "desktop") free_ram_estimate -= 500;  // reserve for compositor
+
+        if (spawn_llama_server(config.model_path, config.cpu_cores, free_ram_estimate)) {
+            auto load_start = std::chrono::steady_clock::now();
+            if (wait_for_llama_server(60)) {
+                auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - load_start).count();
+                g_model_loaded.store(true);
+                g_inference_fn = llama_inference;
+                fprintf(stderr, "[child] Model loaded: %s (%.1fs)\n",
+                        model_file.c_str(), load_time / 1000.0);
+            } else {
+                fprintf(stderr, "[child] llama-server failed health check, staying in stub mode\n");
+            }
+
+            // Start monitor thread for crash recovery
+            std::thread monitor(llama_monitor_thread, config.model_path,
+                               config.cpu_cores, free_ram_estimate);
+            monitor.detach();
+        } else {
+            fprintf(stderr, "[child] Failed to spawn llama-server, staying in stub mode\n");
+        }
+    }
+#endif
 
     // Build system prompt
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
@@ -1349,5 +1520,25 @@ int child_main(const SupervisorConfig& config) {
     g_scheduler.stop();
     mdns.stop();
     fprintf(stderr, "[child] HTTP server stopped\n");
+
+    // Stop llama-server
+#ifndef _WIN32
+    {
+        pid_t llama_pid = g_llama_pid.load();
+        if (llama_pid > 0) {
+            fprintf(stderr, "[child] Stopping llama-server (PID %d)\n", llama_pid);
+            kill(llama_pid, SIGTERM);
+            // Wait up to 5 seconds for graceful exit
+            for (int i = 0; i < 50; i++) {
+                int status;
+                if (waitpid(llama_pid, &status, WNOHANG) != 0) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            kill(llama_pid, SIGKILL);  // force if still alive
+            g_llama_pid.store(0);
+        }
+    }
+#endif
+
     return 0;
 }
