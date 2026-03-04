@@ -87,6 +87,11 @@ static void supervisor_sigterm(int) {
     g_shutdown_requested = 1;
 }
 
+static void supervisor_sigusr1(int) {
+    g_reboot_requested = 1;
+    g_shutdown_requested = 1;
+}
+
 extern int child_main(const SupervisorConfig& config);
 
 static pid_t spawn_child(const SupervisorConfig& config) {
@@ -511,10 +516,10 @@ static void console_display_thread(const SupervisorConfig& config) {
             close(fd);
         }
 
-        // Sleep interval: fast refresh during confirmation prompt, normal otherwise
-        int sleep_intervals = (g_console_prompt != PROMPT_NONE) ? 2 : 10;  // 1s vs 5s
-        for (int i = 0; i < sleep_intervals && !g_shutdown_requested; i++) {
+        // Sleep ~5s normally, but wake immediately if prompt state changes
+        for (int i = 0; i < 10 && !g_shutdown_requested; i++) {
             usleep(500000);
+            if (g_console_prompt != prompt) break;  // Key pressed — redraw now
         }
     }
 
@@ -533,6 +538,9 @@ static void console_display_thread(const SupervisorConfig& config) {
     sa.sa_handler = supervisor_sigterm;
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT, &sa, nullptr);
+
+    sa.sa_handler = supervisor_sigusr1;
+    sigaction(SIGUSR1, &sa, nullptr);
 
     int watchdog_fd = open_watchdog();
     int crash_count = 0;

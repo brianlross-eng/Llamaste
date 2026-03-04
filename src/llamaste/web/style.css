@@ -1094,6 +1094,30 @@ html, body {
 
 .btn-secondary:hover { border-color: var(--text-secondary); color: var(--text-primary); }
 
+.btn-danger {
+  background: #c0392b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-danger:hover { background: #e74c3c; }
+
+.btn-warning {
+  background: #d68910;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-warning:hover { background: #f39c12; }
+
 /* Progress */
 .progress-container {
   margin-bottom: 16px;

@@ -170,6 +170,31 @@
   // Export to window so switchTab can call it
   window.systemRefresh = systemRefresh;
 
+  // --- Power controls ---
+  var shutdownBtn = document.getElementById('btn-shutdown');
+  var rebootBtn = document.getElementById('btn-reboot');
+
+  function powerAction(action) {
+    var label = action === 'shutdown' ? 'shut down' : 'reboot';
+    if (!confirm('Are you sure you want to ' + label + '?')) return;
+
+    fetch('/llamaste/' + action, { method: 'POST' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function () {
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#aaa;font-size:1.2em">' +
+          (action === 'reboot' ? 'Rebooting...' : 'Shutting down...') + '</div>';
+      })
+      .catch(function (e) {
+        alert('Failed: ' + e.message);
+      });
+  }
+
+  if (shutdownBtn) shutdownBtn.addEventListener('click', function () { powerAction('shutdown'); });
+  if (rebootBtn) rebootBtn.addEventListener('click', function () { powerAction('reboot'); });
+
   // Initial render with empty state
   renderScheduledTasks([]);
 

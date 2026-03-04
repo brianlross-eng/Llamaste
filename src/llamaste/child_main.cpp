@@ -1315,6 +1315,25 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result.dump(), "application/json");
     });
 
+    // --- Power control routes (protected) ---
+    // POST /llamaste/shutdown — Clean shutdown via supervisor (SIGTERM to PID 1)
+    svr.Post("/llamaste/shutdown", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        json result;
+        result["status"] = "shutdown initiated";
+        res.set_content(result.dump(), "application/json");
+        // Signal supervisor (PID 1) to shut down after response is sent
+        kill(getppid(), SIGTERM);
+    }));
+
+    // POST /llamaste/reboot — Clean reboot via supervisor (SIGUSR1 to PID 1)
+    svr.Post("/llamaste/reboot", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        json result;
+        result["status"] = "reboot initiated";
+        res.set_content(result.dump(), "application/json");
+        // Signal supervisor (PID 1) to reboot after response is sent
+        kill(getppid(), SIGUSR1);
+    }));
+
     // --- API routes (protected) ---
     svr.Post("/llamaste/chat", require_auth(handle_chat));
 
