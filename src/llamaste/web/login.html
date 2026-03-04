@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Llamaste - Login</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: #0d1117;
+        color: #c9d1d9;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+    }
+    .login-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 40px;
+        width: 100%;
+        max-width: 400px;
+        text-align: center;
+    }
+    .logo {
+        font-size: 48px;
+        margin-bottom: 8px;
+    }
+    h1 {
+        font-size: 24px;
+        font-weight: 600;
+        color: #f0f6fc;
+        margin-bottom: 4px;
+    }
+    .subtitle {
+        color: #8b949e;
+        font-size: 14px;
+        margin-bottom: 32px;
+    }
+    .form-group {
+        margin-bottom: 20px;
+        text-align: left;
+    }
+    label {
+        display: block;
+        font-size: 14px;
+        color: #c9d1d9;
+        margin-bottom: 8px;
+    }
+    input[type="password"] {
+        width: 100%;
+        padding: 10px 14px;
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #f0f6fc;
+        font-size: 16px;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    input[type="password"]:focus {
+        border-color: #58a6ff;
+    }
+    button {
+        width: 100%;
+        padding: 12px;
+        background: #238636;
+        border: none;
+        border-radius: 6px;
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    button:hover { background: #2ea043; }
+    button:active { background: #1a7f37; }
+    button:disabled {
+        background: #21262d;
+        color: #484f58;
+        cursor: not-allowed;
+    }
+    .error {
+        background: rgba(248, 81, 73, 0.1);
+        border: 1px solid #f85149;
+        border-radius: 6px;
+        padding: 10px 14px;
+        color: #f85149;
+        font-size: 14px;
+        margin-bottom: 16px;
+        display: none;
+    }
+    .error.visible { display: block; }
+    .version {
+        margin-top: 24px;
+        font-size: 12px;
+        color: #484f58;
+    }
+</style>
+</head>
+<body>
+<div class="login-card">
+    <div class="logo">&#x1F9D9;</div>
+    <h1>Llamaste</h1>
+    <p class="subtitle">Enter your device password to continue</p>
+
+    <div id="error" class="error"></div>
+
+    <form id="loginForm">
+        <div class="form-group">
+            <label for="password">Device Password</label>
+            <input type="password" id="password" name="password"
+                   placeholder="Enter password" autofocus autocomplete="current-password">
+        </div>
+        <button type="submit" id="submitBtn">Sign In</button>
+    </form>
+
+    <p class="version">Llamaste 1.0.000a</p>
+</div>
+
+<script>
+const form = document.getElementById('loginForm');
+const errorDiv = document.getElementById('error');
+const submitBtn = document.getElementById('submitBtn');
+const passwordInput = document.getElementById('password');
+
+form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorDiv.classList.remove('visible');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Signing in...';
+
+    try {
+        const res = await fetch('/llamaste/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: passwordInput.value })
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+            window.location.href = '/';
+        } else {
+            errorDiv.textContent = data.error || 'Login failed';
+            errorDiv.classList.add('visible');
+            passwordInput.value = '';
+            passwordInput.focus();
+        }
+    } catch (err) {
+        errorDiv.textContent = 'Connection error. Is the server running?';
+        errorDiv.classList.add('visible');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign In';
+    }
+});
+</script>
+</body>
+</html>

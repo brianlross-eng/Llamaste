@@ -4,18 +4,17 @@
   'use strict';
 
   // --- State ---
-  let conversationId = generateId();
-  let streaming = false;
-  let currentAssistantEl = null;
-  let currentTextBuffer = '';
-  let abortController = null;
+  var conversationId = generateId();
+  var streaming = false;
+  var currentAssistantEl = null;
+  var currentTextBuffer = '';
+  var abortController = null;
 
   // --- DOM refs ---
-  const messagesEl = document.getElementById('messages');
-  const inputEl = document.getElementById('message-input');
-  const sendBtn = document.getElementById('send-btn');
-  const chatTitle = document.getElementById('chat-title');
-  const connStatus = document.getElementById('connection-status');
+  var messagesEl = document.getElementById('messages');
+  var inputEl = document.getElementById('message-input');
+  var sendBtn = document.getElementById('send-btn');
+  var connStatus = document.getElementById('connection-status');
 
   // --- Init ---
   inputEl.addEventListener('keydown', function (e) {
@@ -36,7 +35,6 @@
   // --- Public API (called from HTML) ---
   window.sendMessage = sendMessage;
   window.newConversation = newConversation;
-  window.toggleSidebar = toggleSidebar;
   window.loadConversation = loadConversation;
 
   // --- Send Message ---
@@ -323,7 +321,6 @@
   // --- Conversation Management ---
   function newConversation() {
     conversationId = generateId();
-    chatTitle.textContent = 'New Conversation';
     messagesEl.innerHTML = '<div class="message system">Welcome to Llamaste. The LLM is your operating system. Ask anything.</div>';
     highlightActiveConversation(conversationId);
   }
@@ -345,26 +342,34 @@
   }
 
   function renderConversationList(conversations) {
-    var listEl = document.getElementById('conv-list');
-    listEl.innerHTML = '';
+    var stripEl = document.getElementById('conv-strip');
+    if (!stripEl) return;
+
+    // Remove all existing chips (but keep #new-conv-btn)
+    var existing = stripEl.querySelectorAll('.conv-chip');
+    for (var i = 0; i < existing.length; i++) {
+      existing[i].remove();
+    }
+
+    // Insert chips before the new-conv button
+    var newBtn = document.getElementById('new-conv-btn');
 
     for (var i = 0; i < conversations.length; i++) {
       var conv = conversations[i];
-      var el = document.createElement('div');
-      el.className = 'conv-item';
-      if (conv.id === conversationId) el.className += ' active';
-      el.textContent = conv.title || 'Conversation ' + conv.id.substring(0, 8);
-      el.setAttribute('data-conv-id', conv.id);
-      el.addEventListener('click', (function (id, title) {
+      var chip = document.createElement('button');
+      chip.className = 'conv-chip';
+      if (conv.id === conversationId) chip.className += ' active';
+      chip.textContent = conv.title || 'Conv ' + conv.id.substring(0, 8);
+      chip.setAttribute('data-conv-id', conv.id);
+      chip.addEventListener('click', (function (id, title) {
         return function () { loadConversation(id, title); };
       })(conv.id, conv.title));
-      listEl.appendChild(el);
+      stripEl.insertBefore(chip, newBtn);
     }
   }
 
   function loadConversation(id, title) {
     conversationId = id;
-    chatTitle.textContent = title || 'Conversation ' + id.substring(0, 8);
     highlightActiveConversation(id);
 
     // Future: fetch conversation history from server
@@ -372,22 +377,14 @@
   }
 
   function highlightActiveConversation(id) {
-    var items = document.querySelectorAll('.conv-item');
-    for (var i = 0; i < items.length; i++) {
-      if (items[i].getAttribute('data-conv-id') === id) {
-        items[i].classList.add('active');
+    var chips = document.querySelectorAll('.conv-chip');
+    for (var i = 0; i < chips.length; i++) {
+      if (chips[i].getAttribute('data-conv-id') === id) {
+        chips[i].classList.add('active');
       } else {
-        items[i].classList.remove('active');
+        chips[i].classList.remove('active');
       }
     }
-  }
-
-  // --- Sidebar Toggle (mobile) ---
-  function toggleSidebar() {
-    var sidebar = document.getElementById('sidebar');
-    var overlay = document.getElementById('sidebar-overlay');
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('visible');
   }
 
   // --- Utility ---

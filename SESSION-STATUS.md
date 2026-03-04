@@ -1,18 +1,107 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-03 (EFI BOOT + INSTALLER VERIFIED IN VIRTUALBOX)
+**Last updated**: 2026-03-05 (Auth + Console + Phase 2c DONE, pending Buildroot build)
 
 ---
 
 ## Where We Are
 
-### Phase 1: COMPLETE — bootable image + live ISO with installer
+### Phase 1: COMPLETE
+All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 
-All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot build produces both a bootable disk image and a live ISO with a web-based installer. 5/5 QEMU E2E tests pass. EFI boot verified with both QEMU+OVMF and VirtualBox.
+### Phase 2: IN PROGRESS — Desktop Mode + Security
 
-**Full install flow verified in VirtualBox**: Boot ISO → install to 16 GB VDI → reboot from installed disk → HTTP server running in server mode. Both BIOS and EFI boot paths work.
+| Sub-phase | Tasks | Status |
+|-----------|-------|--------|
+| 2a: Web UI Redesign | 1-9 | DONE — status bar, tabs, file browser, dashboard, system settings |
+| 2b: Heartbeat Scheduler | 10-15 | DONE — scheduler thread, schedule.* tools, SSE notifications, toasts |
+| 2c: Desktop Compositor | 16-18 | DONE (source changes) — kernel DRM, Buildroot packages, compositor launch |
+| 2c: QEMU Testing | 19 | PENDING — needs WSL2 Buildroot build |
+| 2d: Real Inference | 20 | PENDING — needs own design doc |
+| Auth + Console | bcrypt, AuthManager, server display | DONE — 108 host tests, 7/7 suites |
 
-**Currently running in stub (no-model) mode** — the next step is to integrate real llama.cpp inference.
+**Phase 2 implementation plan**: `docs/plans/2026-03-03-phase2-implementation-plan.md`
+**Console + Auth design**: `docs/plans/2026-03-05-console-auth-design.md`
+**Console + Auth plan**: `docs/plans/2026-03-05-console-auth-implementation-plan.md`
+
+---
+
+## Auth & Server Console (2026-03-05)
+
+### What was built
+1. **bcrypt password hashing** (`bcrypt.h/cpp` ~500 LOC): Full Blowfish/Eksblowfish implementation, bcrypt-specific base64, /dev/urandom salt, constant-time comparison
+2. **AuthManager** (`auth.h/cpp` ~350 LOC): Device password (set/verify), session cookies (create/validate/expire), API key (Bearer token), brute force protection (5 failures = 30s cooldown), config persistence to /data/config/device.json
+3. **Server console display** (`supervisor.cpp`): VT100 box-drawing status display on /dev/console every 5s — CPU%, RAM, disk, temperature, IP, hostname, model, child PID status
+4. **Auth routes + middleware** (`child_main.cpp`): require_auth lambda wrapper, /llamaste/auth/setup, /login, /logout, /status endpoints, session expiry background thread
+5. **Login + Setup web pages** (`web/login.html`, `web/setup.html`): Dark-theme first-boot setup wizard + login page
+6. **Auth tools** (`tools_auth.cpp`): auth.change_password, auth.get_api_key, auth.set_session_timeout
+7. **Host tests** (`tests/test_auth.cpp`): 15 tests covering bcrypt, AuthManager, and console format helpers
+
+### Auth flow
+- First boot: no password → serves setup.html → user creates password → API key generated → session cookie set → redirect to main UI
+- Subsequent visits: serves login.html → enter password → session cookie → access granted
+- API access: `Authorization: Bearer llm-XXXXXXXXXXXXXXXXXXXX`
+- Protected routes: all API endpoints. Unprotected: /health, /login.html, /setup.html, static JS/CSS
+
+### Test results
+**108 host tests across 7 suites** — ALL PASSING:
+1. Hardware Detection (3 tests)
+2. Tools System (10 tests)
+3. Agent Loop (19 tests)
+4. Tools Integration (27 tests)
+5. HTTP Server (15 tests)
+6. Network/mDNS (17+ tests)
+7. Auth & Console (15 tests)
+
+### Bug found and fixed
+bcrypt base64 decode table was wrong — built for standard base64 alphabet order but bcrypt uses `./A-Za-z0-9`. Fixed decode table + salt streaming in Eksblowfish key expansion.
+
+---
+
+## Phase 2a-2c Details
+
+### Phase 2a (Tasks 1-9): Web UI Redesign
+- index.html: Status bar (clock, model, speed, RAM, IP, notifications), bottom tab nav (Chat/Files/Dashboard/System)
+- dashboard.js: Status bar updates + Dashboard tab (CPU/temp/RAM/disk bars, hardware info, network, model)
+- files.js: File browser with navigation, preview, upload, new folder
+- system.js: System info display + scheduled tasks list
+- notifications.js: Toast notification system + SSE connection + badge
+- chat.js: Refactored for tabbed layout
+- style.css: Complete dark-theme redesign
+- child_main.cpp: /llamaste/files endpoint, web asset routes
+
+### Phase 2b (Tasks 10-15): Heartbeat Scheduler
+- scheduler.h/cpp: Background thread, cron parser, task CRUD, alert monitoring, persistence
+- tools_schedule.cpp: schedule.create/list/delete/update tools
+- child_main.cpp: Scheduler wiring, /llamaste/notifications SSE, /llamaste/schedules REST
+- notifications.js: SSE EventSource connection, badge management
+- system.js: Schedule display with dot indicators, separate fetch
+
+### Phase 2c (Tasks 16-18): Desktop Compositor (source changes done, untested)
+- linux.config: DRM (virtio, vbox, bochs, simpledrm, vmwgfx, i915), evdev, mousedev, futex, sysvipc
+- defconfig: Cage, Wayland, Mesa (swrast+virgl), Cog+WPEWebKit, libdrm, libinput, eudev, libxkbcommon, pixman
+- genimage.cfg: sys-a partition bumped to 256M
+- child_main.cpp: TCP poll for server readiness, access() probe for browser, fork/exec cage+cog
+
+---
+
+## Next Steps
+
+### Immediate
+1. **Task 19**: WSL2 Buildroot build + QEMU desktop mode test
+   - Buildroot fix applied: `LIBXML2_CONF_ENV += LIBS="-lstdc++"` in external.mk
+   - `cd /root/llamaste-build/output && make llamaste_x86_64_defconfig && make`
+   - Test: `qemu-system-x86_64 -m 4096 -device virtio-gpu-pci -display gtk` with `llamaste.mode=desktop`
+   - Verify server mode E2E tests still pass
+
+2. **Task 20**: Real inference integration (needs design doc)
+   - Replace stub_inference with llama.cpp server communication
+   - Download qwen2.5-0.5b-instruct-q4_k_m.gguf test model
+
+### Build Commands (WSL2)
+```bash
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && export FORCE_UNSAFE_CONFIGURE=1 && cd /root/llamaste-build/output && make llamaste_x86_64_defconfig && make llamaste-dirclean && make llamaste && make"
+```
 
 ---
 
@@ -22,38 +111,22 @@ All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot bu
 |----------|------|---------|
 | llamaste binary | ~6 MB (in squashfs) | Static ELF, x86-64, musl, stripped |
 | bzImage kernel | 5 MB | Built-in drivers, no modules |
-| rootfs.squashfs | 5.9 MB | llamaste + libc + web UI |
-| llamaste.img | 360 MB | 5-partition GPT disk image |
-| llamaste.iso | 400 MB | Hybrid BIOS+UEFI live ISO with installer (includes raw disk image) |
+| rootfs.squashfs | 5.9 MB (will grow with desktop pkgs) | llamaste + libc + web UI |
+| llamaste.img | 360 MB (will grow) | 5-partition GPT disk image |
+| llamaste.iso | 400 MB | Hybrid BIOS+UEFI live ISO with installer |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
 
-### QEMU E2E Test Results
-
-| Test | Endpoint | Result |
-|------|----------|--------|
-| Health | GET /health | PASS — 25 tools, status ok |
-| System | GET /llamaste/system | PASS — CPU, RAM, disk, IP |
-| Tools | GET /llamaste/tools | PASS — 25 tool definitions |
-| Web UI | GET / | PASS — HTML served |
-| API | POST /v1/chat/completions | PASS — OpenAI-compatible response |
-
 ---
 
-## ISO + Installer Summary (Session 2026-02-27b)
+## Source Summary
 
-| Task | Status | Details |
-|------|--------|---------|
-| Kernel iso9660 config | DONE | CONFIG_ISO9660_FS=y, CONFIG_JOLIET=y |
-| ISO build script | DONE | scripts/build-iso.sh, hybrid BIOS+UEFI via grub-mkrescue |
-| GRUB live config | DONE | grub-live.cfg with llamaste.mode=live |
-| Live boot detection | DONE | init.cpp + main.cpp: tmpfs /data in live mode |
-| Installer core | DONE | tools_install.cpp: detect_disks, to_disk, progress |
-| Installer web UI | DONE | install.js + style.css + HTTP routes in child_main.cpp |
-| INSTALL.md | DONE | User installation guide |
-| DEVELOPER.md | DONE | Technical reference (architecture, API, tools, build, boot) |
-| Build fixes | DONE | R"json()" delimiter, sys/mount.h, g_boot_mode declaration order |
-
----
+~7,500 LOC original C++ + ~40KB web UI:
+- main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
+- agent.cpp, prompt_builder.cpp
+- tools.cpp + 9 tool files (fs, process, network, system, config, model, install, schedule, auth)
+- bcrypt.cpp, auth.cpp
+- net_mdns.cpp, scheduler.cpp
+- Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
 ## Phase 1 Implementation Summary
 
@@ -74,29 +147,3 @@ All 12 Phase 1 tasks plus the ISO/installer extension are done. The Buildroot bu
 | 12: QEMU test scripts | DONE | 6973c15 | qemu-test.sh, qemu-run.sh, host-test.sh |
 | Build fixes | DONE | cfd83a4 + f2f8936 | C++ toolchain, PCI kernel, genimage/post_image fixes |
 | ISO + installer | DONE | 49766c8 + dd71dba | Live ISO, installer, INSTALL.md, DEVELOPER.md |
-
-### Host Test Suites (93 total)
-
-| Suite | Tests | Status |
-|-------|-------|--------|
-| Hardware Detection | 3 | PASS |
-| Tools System | 10 | PASS |
-| Agent Loop | 19 | PASS |
-| Tools Integration | 27 | PASS |
-| HTTP Server | 15 | PASS |
-| Network (mDNS) | 17+ | PASS |
-
----
-
-## Next Steps
-
-### Phase 1 Finalization
-1. Integrate real llama.cpp inference (replace stub responses)
-2. Download a small test model (qwen2.5-0.5b-instruct-q4_k_m.gguf)
-3. Test actual tool-calling agent loop with a real model
-4. Produce distributable `llamaste.img.xz`
-
-### Phase 2 Planning
-5. Desktop mode (Cage/Labwc Wayland compositor)
-6. Voice I/O (whisper.cpp + piper)
-7. App management tools

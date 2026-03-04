@@ -21,8 +21,13 @@ set(WEB_FILES
   "index.html:WEB_INDEX_HTML"
   "chat.js:WEB_CHAT_JS"
   "dashboard.js:WEB_DASHBOARD_JS"
+  "files.js:WEB_FILES_JS"
+  "system.js:WEB_SYSTEM_JS"
+  "notifications.js:WEB_NOTIFICATIONS_JS"
   "install.js:WEB_INSTALL_JS"
   "style.css:WEB_STYLE_CSS"
+  "login.html:WEB_LOGIN_HTML"
+  "setup.html:WEB_SETUP_HTML"
 )
 
 # --- Generate header file ---

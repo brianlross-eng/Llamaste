@@ -54,5 +54,11 @@ void register_config_tools(ToolRegistry& reg);
 void register_model_tools(ToolRegistry& reg);
 void register_install_tools(ToolRegistry& reg);
 
+class Scheduler;
+void register_schedule_tools(ToolRegistry& reg, Scheduler& sched);
+
+class AuthManager;
+void register_auth_tools(ToolRegistry& reg, AuthManager& auth);
+
 // Convenience: register all tool categories at once.
 void register_all_tools(ToolRegistry& reg);

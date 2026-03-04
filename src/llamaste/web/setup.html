@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Llamaste - First Boot Setup</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: #0d1117;
+        color: #c9d1d9;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+    }
+    .setup-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 40px;
+        width: 100%;
+        max-width: 480px;
+    }
+    .logo {
+        font-size: 48px;
+        text-align: center;
+        margin-bottom: 8px;
+    }
+    h1 {
+        font-size: 24px;
+        font-weight: 600;
+        color: #f0f6fc;
+        text-align: center;
+        margin-bottom: 4px;
+    }
+    .subtitle {
+        color: #8b949e;
+        font-size: 14px;
+        text-align: center;
+        margin-bottom: 32px;
+    }
+    .form-group {
+        margin-bottom: 20px;
+    }
+    label {
+        display: block;
+        font-size: 14px;
+        color: #c9d1d9;
+        margin-bottom: 8px;
+    }
+    input[type="password"], input[type="text"] {
+        width: 100%;
+        padding: 10px 14px;
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #f0f6fc;
+        font-size: 16px;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    input:focus { border-color: #58a6ff; }
+    button {
+        width: 100%;
+        padding: 12px;
+        background: #238636;
+        border: none;
+        border-radius: 6px;
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+        margin-top: 8px;
+    }
+    button:hover { background: #2ea043; }
+    button:active { background: #1a7f37; }
+    button:disabled {
+        background: #21262d;
+        color: #484f58;
+        cursor: not-allowed;
+    }
+    .error {
+        background: rgba(248, 81, 73, 0.1);
+        border: 1px solid #f85149;
+        border-radius: 6px;
+        padding: 10px 14px;
+        color: #f85149;
+        font-size: 14px;
+        margin-bottom: 16px;
+        display: none;
+    }
+    .error.visible { display: block; }
+    .success-box {
+        background: rgba(35, 134, 54, 0.1);
+        border: 1px solid #238636;
+        border-radius: 6px;
+        padding: 16px;
+        margin-bottom: 16px;
+        display: none;
+    }
+    .success-box.visible { display: block; }
+    .success-box h3 {
+        color: #3fb950;
+        font-size: 16px;
+        margin-bottom: 8px;
+    }
+    .api-key {
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 4px;
+        padding: 8px 12px;
+        font-family: monospace;
+        font-size: 14px;
+        color: #58a6ff;
+        word-break: break-all;
+        margin: 8px 0;
+    }
+    .api-key-note {
+        font-size: 12px;
+        color: #8b949e;
+    }
+    .step-indicator {
+        text-align: center;
+        margin-bottom: 24px;
+        color: #8b949e;
+        font-size: 13px;
+    }
+    .step-indicator span {
+        display: inline-block;
+        width: 24px;
+        height: 24px;
+        line-height: 24px;
+        border-radius: 50%;
+        background: #30363d;
+        color: #8b949e;
+        font-size: 12px;
+        margin: 0 4px;
+    }
+    .step-indicator span.active {
+        background: #238636;
+        color: #fff;
+    }
+    .hint {
+        font-size: 12px;
+        color: #8b949e;
+        margin-top: 4px;
+    }
+    .mismatch {
+        border-color: #f85149 !important;
+    }
+</style>
+</head>
+<body>
+<div class="setup-card">
+    <div class="logo">&#x1F9D9;</div>
+    <h1>Welcome to Llamaste</h1>
+    <p class="subtitle">Set up your device password to get started</p>
+
+    <div class="step-indicator">
+        <span class="active">1</span> Set Password
+        <span>2</span> Done
+    </div>
+
+    <div id="error" class="error"></div>
+
+    <div id="setupForm">
+        <div class="form-group">
+            <label for="password">Create Password</label>
+            <input type="password" id="password" placeholder="Choose a password"
+                   autofocus autocomplete="new-password">
+            <p class="hint">Minimum 4 characters. This protects web UI and API access.</p>
+        </div>
+        <div class="form-group">
+            <label for="confirm">Confirm Password</label>
+            <input type="password" id="confirm" placeholder="Re-enter password"
+                   autocomplete="new-password">
+        </div>
+        <button type="button" id="submitBtn" onclick="doSetup()">Set Password & Continue</button>
+    </div>
+
+    <div id="successBox" class="success-box">
+        <h3>Setup Complete!</h3>
+        <p>Your device is now protected. Here's your API key for programmatic access:</p>
+        <div id="apiKey" class="api-key"></div>
+        <p class="api-key-note">Save this key! Use it as a Bearer token for API requests.<br>
+        Example: <code>curl -H "Authorization: Bearer YOUR_KEY" http://llamaste.local/v1/chat/completions</code></p>
+        <button type="button" onclick="window.location.href='/'">Continue to Llamaste</button>
+    </div>
+</div>
+
+<script>
+const passwordInput = document.getElementById('password');
+const confirmInput = document.getElementById('confirm');
+const errorDiv = document.getElementById('error');
+const submitBtn = document.getElementById('submitBtn');
+const setupForm = document.getElementById('setupForm');
+const successBox = document.getElementById('successBox');
+const apiKeyDiv = document.getElementById('apiKey');
+
+// Real-time mismatch indicator
+confirmInput.addEventListener('input', () => {
+    if (confirmInput.value && confirmInput.value !== passwordInput.value) {
+        confirmInput.classList.add('mismatch');
+    } else {
+        confirmInput.classList.remove('mismatch');
+    }
+});
+
+// Submit on Enter in confirm field
+confirmInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSetup();
+});
+passwordInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') confirmInput.focus();
+});
+
+async function doSetup() {
+    errorDiv.classList.remove('visible');
+
+    const password = passwordInput.value;
+    const confirm = confirmInput.value;
+
+    if (password.length < 4) {
+        errorDiv.textContent = 'Password must be at least 4 characters';
+        errorDiv.classList.add('visible');
+        return;
+    }
+
+    if (password !== confirm) {
+        errorDiv.textContent = 'Passwords do not match';
+        errorDiv.classList.add('visible');
+        confirmInput.classList.add('mismatch');
+        return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Setting up...';
+
+    try {
+        const res = await fetch('/llamaste/auth/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+            setupForm.style.display = 'none';
+            apiKeyDiv.textContent = data.api_key || 'N/A';
+            successBox.classList.add('visible');
+
+            // Update step indicator
+            document.querySelectorAll('.step-indicator span').forEach((el, i) => {
+                el.classList.toggle('active', i === 1);
+            });
+        } else {
+            errorDiv.textContent = data.error || 'Setup failed';
+            errorDiv.classList.add('visible');
+        }
+    } catch (err) {
+        errorDiv.textContent = 'Connection error';
+        errorDiv.classList.add('visible');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Set Password & Continue';
+    }
+}
+</script>
+</body>
+</html>

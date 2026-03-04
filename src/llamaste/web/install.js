@@ -188,6 +188,8 @@
         }
     }
 
+    window.showStep = showStep;
+
     window.startInstall = async function() {
         if (!selectedDisk) return;
 

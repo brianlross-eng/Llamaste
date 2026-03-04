@@ -19,6 +19,8 @@
 #include "tools.h"
 #include "hwdetect.h"
 #include "net_mdns.h"
+#include "scheduler.h"
+#include "auth.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -47,6 +49,10 @@
 #else
 #include <unistd.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #endif
 
 using json = nlohmann::json;
@@ -73,6 +79,17 @@ static HardwareInfo g_hwinfo;
 
 // System prompt (built once at startup)
 static std::string g_system_prompt;
+
+// Heartbeat scheduler
+static Scheduler g_scheduler;
+
+// Device authentication
+static AuthManager g_auth;
+
+// Desktop compositor PID (set by compositor launch thread)
+#ifndef _WIN32
+static std::atomic<pid_t> g_cage_pid{0};
+#endif
 
 // ---------------------------------------------------------------------------
 // Signal handler
@@ -341,10 +358,11 @@ static json gather_system_info(const SupervisorConfig& config) {
     info["has_avx2"] = g_hwinfo.has_avx2;
     info["has_avx512"] = g_hwinfo.has_avx512;
 
-    // Placeholder fields for Phase 2 features
-    info["tokens_per_sec"] = 0.0;
-    info["scheduled_tasks_count"] = 0;
-    info["active_alerts"] = json::array();
+    // Phase 2 fields
+    info["tokens_per_sec"] = 0.0;  // will be real when inference is wired
+    info["scheduled_tasks_count"] = g_scheduler.active_task_count();
+    auto next_sched = g_scheduler.next_scheduled_time();
+    info["next_scheduled_time"] = next_sched > 0 ? static_cast<long>(next_sched) : 0;
 
     return info;
 }
@@ -630,6 +648,8 @@ int child_main(const SupervisorConfig& config) {
         register_install_tools(g_tools);
         fprintf(stderr, "[child] Live mode: installer tools enabled\n");
     }
+    register_schedule_tools(g_tools, g_scheduler);
+    register_auth_tools(g_tools, g_auth);
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware
@@ -650,13 +670,130 @@ int child_main(const SupervisorConfig& config) {
         fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
     }
 
+    // Start heartbeat scheduler
+    g_scheduler.set_data_dir("/data/llamaste");
+    g_scheduler.set_inference_fn([](const std::string& prompt) -> std::string {
+        // Create a temporary conversation for the scheduled task
+        ConversationState conv;
+        conv.system_prompt = g_system_prompt;
+        conv.add_user_message(prompt);
+        return agent_turn(conv, g_tools, stub_inference);
+    });
+    g_scheduler.set_notify_fn([](const Notification& /*notif*/) {
+        // Notifications are drained by the SSE endpoint; no-op callback
+    });
+    g_scheduler.start();
+
+    // Initialize device authentication
+    g_auth.load_config("/data/config");
+    fprintf(stderr, "[child] Auth: setup_complete=%s\n",
+            g_auth.is_setup_complete() ? "yes" : "no (first-boot mode)");
+
+    // Start session expiry thread (runs every 60 seconds)
+    std::thread session_expiry_thread([]() {
+        while (g_running) {
+            g_auth.expire_sessions();
+            for (int i = 0; i < 120 && g_running; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+    });
+    session_expiry_thread.detach();
+
+    // --- Desktop mode: launch Wayland kiosk compositor ---
+#ifndef _WIN32
+    if (g_boot_mode == "desktop") {
+        fprintf(stderr, "[child] Desktop mode: will launch compositor after HTTP server starts\n");
+
+        // Set up Wayland environment
+        mkdir("/run/user", 0755);
+        mkdir("/run/user/0", 0700);
+        setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
+        // Allow cage to start even without physical input devices (QEMU, VM)
+        setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
+
+        // Launch compositor in a thread — polls for HTTP readiness first
+        std::thread([]() {
+            // Poll for HTTP server to be listening (up to 15 seconds)
+            bool ready = false;
+            for (int i = 0; i < 75 && g_running; i++) {
+                int sock = socket(AF_INET, SOCK_STREAM, 0);
+                if (sock >= 0) {
+                    struct sockaddr_in addr = {};
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons(80);
+                    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                        close(sock);
+                        ready = true;
+                        break;
+                    }
+                    close(sock);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (!ready) {
+                fprintf(stderr, "[child] Compositor: HTTP server not ready after 15s, launching anyway\n");
+            }
+
+            // Probe for available browser binary before forking
+            // cage is a single-window Wayland compositor that runs one client
+            // We need to find which browser client is available
+            const char* browser = nullptr;
+            if (access("/usr/bin/cog", X_OK) == 0) {
+                browser = "cog";
+            } else if (access("/usr/bin/midori", X_OK) == 0) {
+                browser = "midori";
+            } else if (access("/usr/bin/chromium", X_OK) == 0) {
+                browser = "chromium";
+            }
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                // Child: exec compositor with detected browser
+                if (browser && access("/usr/bin/cage", X_OK) == 0) {
+                    if (strcmp(browser, "cog") == 0) {
+                        execlp("cage", "cage", "-s", "--",
+                               "cog", "http://localhost", nullptr);
+                    } else if (strcmp(browser, "midori") == 0) {
+                        execlp("cage", "cage", "-s", "--",
+                               "midori", "-e", "Fullscreen", "-a",
+                               "http://localhost", nullptr);
+                    } else if (strcmp(browser, "chromium") == 0) {
+                        execlp("cage", "cage", "-s", "--",
+                               "chromium", "--no-sandbox", "--kiosk",
+                               "http://localhost", nullptr);
+                    }
+                }
+                // Last resort: weston kiosk mode (no separate browser needed)
+                execlp("weston", "weston", "--shell=kiosk",
+                       "--continue-without-input", nullptr);
+                // All options failed
+                fprintf(stderr, "[child] No compositor available\n");
+                _exit(1);
+            } else if (pid > 0) {
+                g_cage_pid.store(pid);
+                fprintf(stderr, "[child] Desktop compositor launched (pid %d, browser=%s)\n",
+                        pid, browser ? browser : "weston-kiosk");
+                // Wait for compositor to exit, log it
+                int status = 0;
+                waitpid(pid, &status, 0);
+                g_cage_pid.store(0);
+                fprintf(stderr, "[child] Desktop compositor exited (status %d)\n", status);
+            } else {
+                fprintf(stderr, "[child] Failed to fork compositor: %s\n", strerror(errno));
+            }
+        }).detach();
+    }
+#endif
+
     // Create HTTP server
     httplib::Server svr;
 
     // CORS headers for development
     svr.set_default_headers({
         {"Access-Control-Allow-Origin", "*"},
-        {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
+        {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
         {"Access-Control-Allow-Headers", "Content-Type, Authorization"},
     });
 
@@ -665,8 +802,49 @@ int child_main(const SupervisorConfig& config) {
         res.status = 204;
     });
 
+    // --- Auth helper: wraps route handlers to require authentication ---
+    auto require_auth = [](std::function<void(const httplib::Request&, httplib::Response&)> handler) {
+        return [handler](const httplib::Request& req, httplib::Response& res) {
+            if (!g_auth.is_authenticated(req)) {
+                res.status = 401;
+                json err;
+                err["error"] = "Unauthorized";
+                err["login_url"] = "/login.html";
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            handler(req, res);
+        };
+    };
+
     // --- Static file routes ---
+    // Root route: serve main UI, login page, or setup page based on auth state
     svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
+        // If setup not complete, redirect to setup
+        if (!g_auth.is_setup_complete()) {
+#ifdef LLAMASTE_HAS_EMBED
+            extern const unsigned char WEB_SETUP_HTML[];
+            extern const unsigned int WEB_SETUP_HTML_LEN;
+            serve_static_file(req, res, "setup.html", WEB_SETUP_HTML, WEB_SETUP_HTML_LEN);
+#else
+            serve_static_file(req, res, "setup.html", nullptr, 0);
+#endif
+            return;
+        }
+
+        // If not authenticated, show login page
+        if (!g_auth.is_authenticated(req)) {
+#ifdef LLAMASTE_HAS_EMBED
+            extern const unsigned char WEB_LOGIN_HTML[];
+            extern const unsigned int WEB_LOGIN_HTML_LEN;
+            serve_static_file(req, res, "login.html", WEB_LOGIN_HTML, WEB_LOGIN_HTML_LEN);
+#else
+            serve_static_file(req, res, "login.html", nullptr, 0);
+#endif
+            return;
+        }
+
+        // Authenticated: serve main UI
 #ifdef LLAMASTE_HAS_EMBED
         extern const unsigned char WEB_INDEX_HTML[];
         extern const unsigned int WEB_INDEX_HTML_LEN;
@@ -706,19 +884,207 @@ int child_main(const SupervisorConfig& config) {
 #endif
     });
 
-    // --- API routes ---
-    svr.Post("/llamaste/chat", handle_chat);
+    svr.Get("/files.js", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_FILES_JS[];
+        extern const unsigned int WEB_FILES_JS_LEN;
+        serve_static_file(req, res, "files.js", WEB_FILES_JS, WEB_FILES_JS_LEN);
+#else
+        serve_static_file(req, res, "files.js", nullptr, 0);
+#endif
+    });
+
+    svr.Get("/system.js", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_SYSTEM_JS[];
+        extern const unsigned int WEB_SYSTEM_JS_LEN;
+        serve_static_file(req, res, "system.js", WEB_SYSTEM_JS, WEB_SYSTEM_JS_LEN);
+#else
+        serve_static_file(req, res, "system.js", nullptr, 0);
+#endif
+    });
+
+    svr.Get("/notifications.js", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_NOTIFICATIONS_JS[];
+        extern const unsigned int WEB_NOTIFICATIONS_JS_LEN;
+        serve_static_file(req, res, "notifications.js", WEB_NOTIFICATIONS_JS, WEB_NOTIFICATIONS_JS_LEN);
+#else
+        serve_static_file(req, res, "notifications.js", nullptr, 0);
+#endif
+    });
+
+    // Login and setup pages (always accessible, no auth required)
+    svr.Get("/login.html", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_LOGIN_HTML[];
+        extern const unsigned int WEB_LOGIN_HTML_LEN;
+        serve_static_file(req, res, "login.html", WEB_LOGIN_HTML, WEB_LOGIN_HTML_LEN);
+#else
+        serve_static_file(req, res, "login.html", nullptr, 0);
+#endif
+    });
+
+    svr.Get("/setup.html", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_SETUP_HTML[];
+        extern const unsigned int WEB_SETUP_HTML_LEN;
+        serve_static_file(req, res, "setup.html", WEB_SETUP_HTML, WEB_SETUP_HTML_LEN);
+#else
+        serve_static_file(req, res, "setup.html", nullptr, 0);
+#endif
+    });
+
+    // --- Auth API routes (no auth required) ---
+
+    // POST /llamaste/auth/setup — First-boot password setup
+    svr.Post("/llamaste/auth/setup", [](const httplib::Request& req, httplib::Response& res) {
+        if (g_auth.is_setup_complete()) {
+            res.status = 403;
+            json err;
+            err["error"] = "Setup already complete";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded()) {
+            res.status = 400;
+            json err;
+            err["error"] = "Invalid JSON";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        std::string password = body.value("password", "");
+        if (password.size() < 4) {
+            res.status = 400;
+            json err;
+            err["error"] = "Password must be at least 4 characters";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        if (!g_auth.set_device_password(password)) {
+            res.status = 500;
+            json err;
+            err["error"] = "Failed to set password";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        // Create session and set cookie
+        std::string token = g_auth.create_session();
+        g_auth.set_session_cookie(res, token);
+
+        json result;
+        result["success"] = true;
+        result["api_key"] = g_auth.get_api_key();
+        result["message"] = "Device password set. Save your API key for programmatic access.";
+        res.set_content(result.dump(), "application/json");
+    });
+
+    // POST /llamaste/auth/login — Verify password and create session
+    svr.Post("/llamaste/auth/login", [](const httplib::Request& req, httplib::Response& res) {
+        // Check rate limiting
+        std::string client_ip = req.remote_addr;
+        if (g_auth.is_rate_limited(client_ip)) {
+            res.status = 429;
+            json err;
+            err["error"] = "Too many failed attempts. Try again in 30 seconds.";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded()) {
+            res.status = 400;
+            json err;
+            err["error"] = "Invalid JSON";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        std::string password = body.value("password", "");
+        if (!g_auth.verify_device_password(password)) {
+            bool rate_limited = g_auth.record_failed_login(client_ip);
+            res.status = 401;
+            json err;
+            err["error"] = "Invalid password";
+            if (rate_limited) {
+                err["error"] = "Too many failed attempts. Locked for 30 seconds.";
+            }
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        // Create session and set cookie
+        std::string token = g_auth.create_session();
+        g_auth.set_session_cookie(res, token);
+
+        json result;
+        result["success"] = true;
+        res.set_content(result.dump(), "application/json");
+    });
+
+    // POST /llamaste/auth/logout — Invalidate session
+    svr.Post("/llamaste/auth/logout", [](const httplib::Request& req, httplib::Response& res) {
+        std::string sid = AuthManager::extract_session_cookie(req);
+        if (!sid.empty()) {
+            g_auth.invalidate_session(sid);
+        }
+        AuthManager::clear_session_cookie(res);
+
+        json result;
+        result["success"] = true;
+        res.set_content(result.dump(), "application/json");
+    });
+
+    // GET /llamaste/auth/status — Check auth state
+    svr.Get("/llamaste/auth/status", [](const httplib::Request& req, httplib::Response& res) {
+        json result;
+        result["setup_complete"] = g_auth.is_setup_complete();
+        result["authenticated"] = g_auth.is_authenticated(req);
+        res.set_content(result.dump(), "application/json");
+    });
+
+    // --- API routes (protected) ---
+    svr.Post("/llamaste/chat", require_auth(handle_chat));
 
     svr.Get("/llamaste/system",
-        [&config](const httplib::Request& req, httplib::Response& res) {
+        require_auth([&config](const httplib::Request& req, httplib::Response& res) {
             handle_system(req, res, config);
-        }
+        })
     );
 
-    svr.Get("/llamaste/tools", handle_tools);
-    svr.Get("/llamaste/conversations", handle_conversations);
-    svr.Post("/v1/chat/completions", handle_openai_completions);
-    svr.Get("/health", handle_health);
+    svr.Get("/llamaste/tools", require_auth(handle_tools));
+    svr.Get("/llamaste/conversations", require_auth(handle_conversations));
+    svr.Post("/v1/chat/completions", require_auth(handle_openai_completions));
+    svr.Get("/health", handle_health);  // Health check always accessible
+
+    // --- Files API route (protected) ---
+    svr.Get("/llamaste/files", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        std::string path = req.get_param_value("path");
+        std::string action = req.get_param_value("action");
+        if (path.empty()) path = "/data";
+
+        json args;
+        args["path"] = path;
+
+        std::string result;
+        if (action == "read") {
+            result = g_tools.dispatch("fs.read_file", args.dump());
+        } else if (action.empty() || action == "list") {
+            result = g_tools.dispatch("fs.list_directory", args.dump());
+        } else {
+            json err;
+            err["error"] = "Unknown action: " + action;
+            res.status = 400;
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        res.set_content(result, "application/json");
+    }));
 
     // --- Installer routes (live mode only) ---
     if (g_boot_mode == "live") {
@@ -783,19 +1149,79 @@ int child_main(const SupervisorConfig& config) {
             }
         );
 
-        // Serve install.js
-        svr.Get("/install.js", [](const httplib::Request& req, httplib::Response& res) {
-#ifdef LLAMASTE_HAS_EMBED
-            extern const unsigned char WEB_INSTALL_JS[];
-            extern const unsigned int WEB_INSTALL_JS_LEN;
-            serve_static_file(req, res, "install.js", WEB_INSTALL_JS, WEB_INSTALL_JS_LEN);
-#else
-            serve_static_file(req, res, "install.js", nullptr, 0);
-#endif
-        });
-
         fprintf(stderr, "[child] Installer routes enabled: /install/disks, /install/start, /install/progress\n");
     }
+
+    // Serve install.js always (it self-detects live mode via /health)
+    svr.Get("/install.js", [](const httplib::Request& req, httplib::Response& res) {
+#ifdef LLAMASTE_HAS_EMBED
+        extern const unsigned char WEB_INSTALL_JS[];
+        extern const unsigned int WEB_INSTALL_JS_LEN;
+        serve_static_file(req, res, "install.js", WEB_INSTALL_JS, WEB_INSTALL_JS_LEN);
+#else
+        serve_static_file(req, res, "install.js", nullptr, 0);
+#endif
+    });
+
+    // --- Notification SSE endpoint ---
+    svr.Get("/llamaste/notifications", [](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        res.set_header("X-Accel-Buffering", "no");
+
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                auto last_hb = std::chrono::steady_clock::now();
+                while (g_running) {
+                    auto notifs = g_scheduler.drain_notifications();
+                    for (const auto& n : notifs) {
+                        json data;
+                        data["type"] = n.type;
+                        data["title"] = n.title;
+                        data["body"] = n.body;
+                        data["time"] = static_cast<long>(n.time);
+                        data["id"] = n.id;
+                        std::string line = "data: " + data.dump() + "\n\n";
+                        if (!sink.write(line.c_str(), line.size())) return false;
+                    }
+                    // Send heartbeat every ~5s to keep connection alive
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - last_hb >= std::chrono::seconds(5)) {
+                        std::string heartbeat = ": heartbeat\n\n";
+                        if (!sink.write(heartbeat.c_str(), heartbeat.size())) return false;
+                        last_hb = now;
+                    }
+                    // Poll every 500ms for responsive notification delivery
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                sink.done();
+                return true;
+            }
+        );
+    });
+
+    // --- Schedule REST endpoints (protected) ---
+    svr.Get("/llamaste/schedules", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(g_scheduler.list_tasks(), "application/json");
+    }));
+
+    svr.Post("/llamaste/schedules", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded()) {
+            res.status = 400;
+            json err;
+            err["error"] = "Invalid JSON";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        res.set_content(g_scheduler.create_task(body), "application/json");
+    }));
+
+    svr.Delete(R"(/llamaste/schedules/(.+))", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        std::string id = req.matches[1];
+        res.set_content(g_scheduler.delete_task(id), "application/json");
+    }));
 
     // --- Error handler ---
     svr.set_error_handler([](const httplib::Request& /*req*/, httplib::Response& res) {
@@ -831,6 +1257,7 @@ int child_main(const SupervisorConfig& config) {
     }
 
     // Clean shutdown
+    g_scheduler.stop();
     mdns.stop();
     fprintf(stderr, "[child] HTTP server stopped\n");
     return 0;

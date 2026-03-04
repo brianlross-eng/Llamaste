@@ -46,3 +46,33 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_
 # Image
 BR2_TARGET_GENERIC_HOSTNAME="llamaste"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Llamaste"
+
+# ---------------------------------------------------------------------------
+# Desktop mode packages (Wayland compositor + kiosk browser)
+# ---------------------------------------------------------------------------
+# Cage: single-window Wayland compositor (kiosk mode)
+BR2_PACKAGE_CAGE=y
+# Wayland protocol libraries
+BR2_PACKAGE_WAYLAND=y
+BR2_PACKAGE_WAYLAND_PROTOCOLS=y
+# Mesa 3D (software rendering + virgl for QEMU)
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SWRAST=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+# Graphics support libraries
+BR2_PACKAGE_LIBDRM=y
+BR2_PACKAGE_LIBINPUT=y
+BR2_PACKAGE_EUDEV=y
+BR2_PACKAGE_LIBXKBCOMMON=y
+BR2_PACKAGE_PIXMAN=y
+# Kiosk browser for Cage compositor
+# Cog is the purpose-built WPE WebKit kiosk browser for Cage.
+# If BR2_PACKAGE_COG is not available in this Buildroot version,
+# enable one of the fallbacks below instead.
+BR2_PACKAGE_COG=y
+BR2_PACKAGE_WPEWEBKIT=y
+# Fallbacks (uncomment ONE if Cog/WPEWebKit unavailable):
+# BR2_PACKAGE_MIDORI=y
+# BR2_PACKAGE_CHROMIUM=y

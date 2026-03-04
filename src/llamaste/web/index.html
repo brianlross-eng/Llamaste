@@ -8,104 +8,227 @@
 </head>
 <body>
   <div id="app">
-    <!-- Mobile sidebar overlay -->
-    <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <!-- Status bar (top) -->
+    <div id="status-bar">
+      <div class="status-left">
+        <span class="wordmark">LLAMASTE</span>
+        <span class="status-sep">|</span>
+        <span class="status-item" id="status-clock">--:-- --</span>
+      </div>
+      <div class="status-center">
+        <span class="status-item" id="status-model">--</span>
+        <span class="status-sep">|</span>
+        <span class="status-item" id="status-speed">-- tok/s</span>
+        <span class="status-sep">|</span>
+        <span class="status-item" id="status-ram">-- GB</span>
+        <span class="status-sep">|</span>
+        <span class="status-item" id="status-ip">--</span>
+      </div>
+      <div class="status-right">
+        <span id="connection-status" class="connecting"></span>
+        <span class="notif-badge hidden" id="notif-badge">0</span>
+      </div>
+    </div>
 
-    <!-- Sidebar: dashboard + conversations -->
-    <aside id="sidebar">
-      <div id="sidebar-header">
-        <div>
-          <h1>LLAMASTE</h1>
-          <span class="version">LLM-OS v0.1</span>
+    <!-- Tab content area (middle) -->
+    <div id="tab-content">
+      <!-- Chat panel -->
+      <div id="panel-chat" class="tab-panel active">
+        <div id="conv-strip">
+          <button class="conv-chip active" data-conv-id="default">New Conversation</button>
+          <button id="new-conv-btn" onclick="newConversation()">+</button>
+        </div>
+        <div id="messages">
+          <div class="message system">
+            Welcome to Llamaste. The LLM is your operating system. Ask anything.
+          </div>
+        </div>
+        <div id="input-area">
+          <div id="input-wrapper">
+            <textarea id="message-input"
+                      placeholder="Ask Llamaste anything..."
+                      rows="1"
+                      autofocus></textarea>
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+          </div>
         </div>
       </div>
 
-      <div id="dashboard">
-        <div class="dash-section">
-          <h3>System</h3>
-          <div class="dash-row">
-            <span class="label">Model</span>
-            <span class="value" id="dash-model">--</span>
-          </div>
-          <div class="dash-row">
-            <span class="label">Uptime</span>
-            <span class="value" id="dash-uptime">--</span>
-          </div>
-          <div class="dash-row">
-            <span class="label">IP</span>
-            <span class="value" id="dash-ip">--</span>
-          </div>
+      <!-- Files panel -->
+      <div id="panel-files" class="tab-panel">
+        <div id="files-toolbar">
+          <span id="files-path">/data/</span>
+          <button onclick="filesUpload()" class="btn-small">Upload</button>
+          <button onclick="filesNewFolder()" class="btn-small">New Folder</button>
         </div>
-
-        <div class="dash-section">
-          <h3>CPU</h3>
-          <div class="dash-row">
-            <span class="label">Usage</span>
-            <span class="value" id="dash-cpu">--%</span>
+        <div id="files-body">
+          <div id="files-list">
+            <div class="files-loading">Loading...</div>
           </div>
-          <div class="dash-bar"><div class="dash-bar-fill" id="dash-cpu-bar" style="width:0%"></div></div>
-          <div class="dash-row">
-            <span class="label">Temp</span>
-            <span class="value" id="dash-temp">--</span>
+          <div id="files-preview">
+            <div class="preview-placeholder">Select a file to preview</div>
           </div>
-        </div>
-
-        <div class="dash-section">
-          <h3>Memory</h3>
-          <div class="dash-row">
-            <span class="label">RAM</span>
-            <span class="value" id="dash-ram">-- / -- MB</span>
-          </div>
-          <div class="dash-bar"><div class="dash-bar-fill" id="dash-ram-bar" style="width:0%"></div></div>
-        </div>
-
-        <div class="dash-section">
-          <h3>Storage</h3>
-          <div class="dash-row">
-            <span class="label">/data</span>
-            <span class="value" id="dash-disk">-- / -- GB</span>
-          </div>
-          <div class="dash-bar"><div class="dash-bar-fill" id="dash-disk-bar" style="width:0%"></div></div>
         </div>
       </div>
 
-      <div id="conversations-section">
-        <h3>Conversations</h3>
-        <div id="conv-list"></div>
-        <button id="new-conv-btn" onclick="newConversation()">+ New Conversation</button>
-      </div>
-    </aside>
+      <!-- Dashboard panel -->
+      <div id="panel-dashboard" class="tab-panel">
+        <div class="dash-grid">
+          <div class="dash-card">
+            <h3>CPU</h3>
+            <div class="dash-row">
+              <span class="label">Usage</span>
+              <span class="value" id="dash-cpu">--%</span>
+            </div>
+            <div class="dash-bar"><div class="dash-bar-fill" id="dash-cpu-bar" style="width:0%"></div></div>
+            <div class="dash-row">
+              <span class="label">Temp</span>
+              <span class="value" id="dash-temp">--</span>
+            </div>
+          </div>
 
-    <!-- Main chat area -->
-    <main id="main">
-      <header id="chat-header">
-        <div style="display:flex;align-items:center;">
-          <button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Toggle sidebar">&#9776;</button>
-          <span id="connection-status" class="connecting"></span>
-          <span class="title" id="chat-title">New Conversation</span>
-        </div>
-      </header>
+          <div class="dash-card">
+            <h3>Memory</h3>
+            <div class="dash-row">
+              <span class="label">RAM</span>
+              <span class="value" id="dash-ram">-- / -- MB</span>
+            </div>
+            <div class="dash-bar"><div class="dash-bar-fill" id="dash-ram-bar" style="width:0%"></div></div>
+          </div>
 
-      <div id="messages">
-        <div class="message system">
-          Welcome to Llamaste. The LLM is your operating system. Ask anything.
+          <div class="dash-card">
+            <h3>Storage</h3>
+            <div class="dash-row">
+              <span class="label">/data</span>
+              <span class="value" id="dash-disk">-- / -- GB</span>
+            </div>
+            <div class="dash-bar"><div class="dash-bar-fill" id="dash-disk-bar" style="width:0%"></div></div>
+          </div>
+
+          <div class="dash-card">
+            <h3>Hardware</h3>
+            <div class="dash-row">
+              <span class="label">CPU</span>
+              <span class="value" id="dash-cpu-model">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Cores</span>
+              <span class="value" id="dash-cpu-cores">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">GPU</span>
+              <span class="value" id="dash-gpu">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">AVX2</span>
+              <span class="value" id="dash-avx2">--</span>
+            </div>
+          </div>
+
+          <div class="dash-card">
+            <h3>Network</h3>
+            <div class="dash-row">
+              <span class="label">IP</span>
+              <span class="value" id="dash-ip">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Mode</span>
+              <span class="value" id="dash-mode">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Uptime</span>
+              <span class="value" id="dash-uptime">--</span>
+            </div>
+          </div>
+
+          <div class="dash-card">
+            <h3>Model</h3>
+            <div class="dash-row">
+              <span class="label">Name</span>
+              <span class="value" id="dash-model">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Speed</span>
+              <span class="value" id="dash-speed">-- tok/s</span>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div id="input-area">
-        <div id="input-wrapper">
-          <textarea id="message-input"
-                    placeholder="Ask Llamaste anything..."
-                    rows="1"
-                    autofocus></textarea>
-          <button id="send-btn" onclick="sendMessage()">Send</button>
+      <!-- System panel -->
+      <div id="panel-system" class="tab-panel">
+        <div class="system-sections">
+          <div class="system-card">
+            <h3>Model Management</h3>
+            <div class="dash-row">
+              <span class="label">Active Model</span>
+              <span class="value" id="sys-model">--</span>
+            </div>
+            <p class="text-muted">Model download and switching coming soon.</p>
+          </div>
+
+          <div class="system-card">
+            <h3>Scheduled Tasks</h3>
+            <p class="text-muted">No scheduled tasks. Task scheduling coming soon.</p>
+          </div>
+
+          <div class="system-card">
+            <h3>Network</h3>
+            <div class="dash-row">
+              <span class="label">IP</span>
+              <span class="value" id="sys-ip">--</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Mode</span>
+              <span class="value" id="sys-mode">--</span>
+            </div>
+            <p class="text-muted">Network configuration coming soon.</p>
+          </div>
+
+          <div class="system-card">
+            <h3>About</h3>
+            <p class="text-muted">Llamaste LLM-OS v0.1 — The LLM is your operating system.</p>
+          </div>
         </div>
       </div>
-    </main>
+    </div>
+
+    <!-- Tab bar (bottom) -->
+    <div id="tab-bar">
+      <button class="tab active" data-tab="chat" onclick="switchTab('chat')">Chat</button>
+      <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
+      <button class="tab" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab" data-tab="system" onclick="switchTab('system')">System</button>
+    </div>
   </div>
 
+  <!-- Toast container (notifications) -->
+  <div id="toast-container"></div>
+
+  <script>
+    function switchTab(name) {
+      var panels = document.querySelectorAll('.tab-panel');
+      var tabs = document.querySelectorAll('#tab-bar .tab');
+      for (var i = 0; i < panels.length; i++) {
+        panels[i].classList.remove('active');
+      }
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.remove('active');
+      }
+      var panel = document.getElementById('panel-' + name);
+      if (panel) panel.classList.add('active');
+      var tab = document.querySelector('#tab-bar .tab[data-tab="' + name + '"]');
+      if (tab) tab.classList.add('active');
+      if (name === 'files' && typeof filesRefresh === 'function') filesRefresh();
+      if (name === 'system' && typeof systemRefresh === 'function') systemRefresh();
+    }
+    window.switchTab = switchTab;
+  </script>
   <script src="/chat.js"></script>
   <script src="/dashboard.js"></script>
+  <script src="/files.js"></script>
   <script src="/install.js"></script>
+  <script src="/system.js"></script>
+  <script src="/notifications.js"></script>
 </body>
 </html>

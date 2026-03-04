@@ -59,7 +59,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 1: Hardware Detection
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [1/6] Hardware Detection ---${NC}"
+echo -e "${BOLD}--- [1/7] Hardware Detection ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_hwdetect" \
     "${TESTS}/test_hwdetect.cpp" "${SRC}/hwdetect.cpp" 2>&1; then
     if "${BUILD_DIR}/test_hwdetect"; then
@@ -75,7 +75,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 2: Tools System
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [2/6] Tools System ---${NC}"
+echo -e "${BOLD}--- [2/7] Tools System ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_tools" \
     "${TESTS}/test_tools.cpp" \
     "${SRC}/tools.cpp" \
@@ -98,7 +98,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 3: Agent Loop & Prompt Builder
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [3/6] Agent Loop ---${NC}"
+echo -e "${BOLD}--- [3/7] Agent Loop ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_agent" \
     "${TESTS}/test_agent.cpp" \
     "${SRC}/agent.cpp" \
@@ -124,7 +124,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 4: Tools Integration
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [4/6] Tools Integration ---${NC}"
+echo -e "${BOLD}--- [4/7] Tools Integration ---${NC}"
 # These tests need /data directory (run as root in WSL2)
 if [ ! -d "/data" ]; then
     echo "Creating /data directory for integration tests..."
@@ -161,7 +161,7 @@ fi
 # ---------------------------------------------------------------
 # Suite 5: HTTP Server
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [5/6] HTTP Server ---${NC}"
+echo -e "${BOLD}--- [5/7] HTTP Server ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${TESTS}/test_http.cpp" \
     "${SRC}/child_main.cpp" \
@@ -174,8 +174,14 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_system.cpp" \
     "${SRC}/tools_config.cpp" \
     "${SRC}/tools_model.cpp" \
+    "${SRC}/tools_install.cpp" \
+    "${SRC}/tools_schedule.cpp" \
+    "${SRC}/tools_auth.cpp" \
     "${SRC}/hwdetect.cpp" \
-    "${SRC}/net_mdns.cpp" 2>&1; then
+    "${SRC}/net_mdns.cpp" \
+    "${SRC}/scheduler.cpp" \
+    "${SRC}/bcrypt.cpp" \
+    "${SRC}/auth.cpp" 2>&1; then
     if "${BUILD_DIR}/test_http" 2>/dev/null; then
         suite_pass "HTTP Server"
     else
@@ -189,7 +195,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 6: Network (mDNS)
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [6/6] Network (mDNS) ---${NC}"
+echo -e "${BOLD}--- [6/7] Network (mDNS) ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_net" \
     "${TESTS}/test_net.cpp" \
     "${SRC}/net_mdns.cpp" 2>&1; then
@@ -200,6 +206,25 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_net" \
     fi
 else
     suite_fail "Network (mDNS) (compile)"
+fi
+echo ""
+
+# ---------------------------------------------------------------
+# Suite 7: Auth & Console
+# ---------------------------------------------------------------
+echo -e "${BOLD}--- [7/7] Auth & Console ---${NC}"
+if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_auth" \
+    "${TESTS}/test_auth.cpp" \
+    "${SRC}/bcrypt.cpp" \
+    "${SRC}/auth.cpp" \
+    "${SRC}/supervisor.cpp" 2>&1; then
+    if "${BUILD_DIR}/test_auth"; then
+        suite_pass "Auth & Console"
+    else
+        suite_fail "Auth & Console (runtime)"
+    fi
+else
+    suite_fail "Auth & Console (compile)"
 fi
 echo ""
 

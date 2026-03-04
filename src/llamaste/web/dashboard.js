@@ -1,4 +1,4 @@
-/* Llamaste Dashboard — System stats polling */
+/* Llamaste Dashboard — Status bar updater + Dashboard tab + System tab */
 
 (function () {
   'use strict';
@@ -6,25 +6,61 @@
   var POLL_INTERVAL = 5000; // 5 seconds
   var pollTimer = null;
 
-  // --- DOM refs ---
-  var els = {
-    model:    document.getElementById('dash-model'),
-    uptime:   document.getElementById('dash-uptime'),
-    ip:       document.getElementById('dash-ip'),
-    cpu:      document.getElementById('dash-cpu'),
-    cpuBar:   document.getElementById('dash-cpu-bar'),
-    temp:     document.getElementById('dash-temp'),
-    ram:      document.getElementById('dash-ram'),
-    ramBar:   document.getElementById('dash-ram-bar'),
-    disk:     document.getElementById('dash-disk'),
-    diskBar:  document.getElementById('dash-disk-bar')
-  };
+  // --- DOM refs: Status bar ---
+  var statusClock = document.getElementById('status-clock');
+  var statusModel = document.getElementById('status-model');
+  var statusSpeed = document.getElementById('status-speed');
+  var statusRam = document.getElementById('status-ram');
+  var statusIp = document.getElementById('status-ip');
 
-  // --- Start polling ---
+  // --- DOM refs: Dashboard tab ---
+  var dashCpu = document.getElementById('dash-cpu');
+  var dashCpuBar = document.getElementById('dash-cpu-bar');
+  var dashTemp = document.getElementById('dash-temp');
+  var dashRam = document.getElementById('dash-ram');
+  var dashRamBar = document.getElementById('dash-ram-bar');
+  var dashDisk = document.getElementById('dash-disk');
+  var dashDiskBar = document.getElementById('dash-disk-bar');
+  var dashCpuModel = document.getElementById('dash-cpu-model');
+  var dashCpuCores = document.getElementById('dash-cpu-cores');
+  var dashGpu = document.getElementById('dash-gpu');
+  var dashAvx2 = document.getElementById('dash-avx2');
+  var dashIp = document.getElementById('dash-ip');
+  var dashMode = document.getElementById('dash-mode');
+  var dashUptime = document.getElementById('dash-uptime');
+  var dashModel = document.getElementById('dash-model');
+  var dashSpeed = document.getElementById('dash-speed');
+
+  // --- DOM refs: System tab ---
+  var sysModel = document.getElementById('sys-model');
+  var sysIp = document.getElementById('sys-ip');
+  var sysMode = document.getElementById('sys-mode');
+
+  // --- Clock (updates every second) ---
+  function updateClock() {
+    var now = new Date();
+    var hours = now.getHours();
+    var minutes = now.getMinutes();
+    var ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    if (hours === 0) hours = 12;
+    var minuteStr = minutes < 10 ? '0' + minutes : '' + minutes;
+
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var month = months[now.getMonth()];
+    var day = now.getDate();
+
+    statusClock.textContent = hours + ':' + minuteStr + ' ' + ampm + '  ' + month + ' ' + day;
+  }
+
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // --- Data polling ---
   fetchDashboard();
   pollTimer = setInterval(fetchDashboard, POLL_INTERVAL);
 
-  // Pause polling when tab hidden, resume when visible
+  // Pause polling when browser tab hidden, resume when visible
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       clearInterval(pollTimer);
@@ -42,69 +78,108 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
-      .then(updateDashboard)
+      .then(updateAll)
       .catch(function () {
-        // Server not available, show dashes
-        els.model.textContent = '--';
-        els.uptime.textContent = '--';
-        els.ip.textContent = '--';
-        els.cpu.textContent = '--%';
-        els.cpuBar.style.width = '0%';
-        els.temp.textContent = '--';
-        els.temp.className = 'value';
-        els.ram.textContent = '-- / -- MB';
-        els.ramBar.style.width = '0%';
-        els.disk.textContent = '-- / -- GB';
-        els.diskBar.style.width = '0%';
+        // Server not available, show dashes in status bar
+        statusModel.textContent = '--';
+        statusSpeed.textContent = '-- tok/s';
+        statusRam.textContent = '-- GB';
+        statusIp.textContent = '--';
+
+        // Dashboard tab
+        dashCpu.textContent = '--%';
+        dashCpuBar.style.width = '0%';
+        dashTemp.textContent = '--';
+        dashTemp.className = 'value';
+        dashRam.textContent = '-- / -- MB';
+        dashRamBar.style.width = '0%';
+        dashDisk.textContent = '-- / -- GB';
+        dashDiskBar.style.width = '0%';
+        dashCpuModel.textContent = '--';
+        dashCpuCores.textContent = '--';
+        dashGpu.textContent = '--';
+        dashAvx2.textContent = '--';
+        dashIp.textContent = '--';
+        dashMode.textContent = '--';
+        dashUptime.textContent = '--';
+        dashModel.textContent = '--';
+        dashSpeed.textContent = '-- tok/s';
+
+        // System tab
+        sysModel.textContent = '--';
+        sysIp.textContent = '--';
+        sysMode.textContent = '--';
       });
   }
 
-  function updateDashboard(data) {
-    // Model
-    els.model.textContent = data.model || '--';
+  function updateAll(data) {
+    // --- Status bar ---
+    statusModel.textContent = data.model || '--';
+    statusIp.textContent = data.ip || '--';
 
-    // Uptime
-    els.uptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
+    var tokPerSec = typeof data.tokens_per_sec === 'number' ? data.tokens_per_sec.toFixed(1) : '--';
+    statusSpeed.textContent = tokPerSec + ' tok/s';
 
-    // IP
-    els.ip.textContent = data.ip || '--';
+    var ramTotalMb = data.ram_total_mb || 0;
+    var ramUsedMb = data.ram_used_mb || 0;
+    var ramTotalGb = (ramTotalMb / 1024).toFixed(1);
+    var ramUsedGb = (ramUsedMb / 1024).toFixed(1);
+    statusRam.textContent = ramUsedGb + '/' + ramTotalGb + ' GB';
 
-    // CPU
+    // --- Dashboard tab: CPU card ---
     var cpuPct = typeof data.cpu_percent === 'number' ? data.cpu_percent : 0;
-    els.cpu.textContent = cpuPct.toFixed(0) + '%';
-    els.cpuBar.style.width = cpuPct + '%';
-    setBarColor(els.cpuBar, cpuPct);
+    dashCpu.textContent = cpuPct.toFixed(0) + '%';
+    dashCpuBar.style.width = cpuPct + '%';
+    setBarColor(dashCpuBar, cpuPct);
 
     // Temperature
     if (typeof data.temperature === 'number') {
-      els.temp.textContent = data.temperature.toFixed(0) + '\u00B0C';
+      dashTemp.textContent = data.temperature.toFixed(0) + '\u00B0C';
       if (data.temperature < 60) {
-        els.temp.className = 'value temp-green';
+        dashTemp.className = 'value temp-green';
       } else if (data.temperature < 80) {
-        els.temp.className = 'value temp-yellow';
+        dashTemp.className = 'value temp-yellow';
       } else {
-        els.temp.className = 'value temp-red';
+        dashTemp.className = 'value temp-red';
       }
     } else {
-      els.temp.textContent = '--';
-      els.temp.className = 'value';
+      dashTemp.textContent = '--';
+      dashTemp.className = 'value';
     }
 
-    // RAM
-    var ramUsed = data.ram_used_mb || 0;
-    var ramTotal = data.ram_total_mb || 1;
-    var ramPct = (ramUsed / ramTotal) * 100;
-    els.ram.textContent = ramUsed.toFixed(0) + ' / ' + ramTotal.toFixed(0) + ' MB';
-    els.ramBar.style.width = ramPct.toFixed(1) + '%';
-    setBarColor(els.ramBar, ramPct);
+    // --- Dashboard tab: Memory card ---
+    var ramPct = ramTotalMb > 0 ? (ramUsedMb / ramTotalMb) * 100 : 0;
+    dashRam.textContent = ramUsedMb.toFixed(0) + ' / ' + ramTotalMb.toFixed(0) + ' MB';
+    dashRamBar.style.width = ramPct.toFixed(1) + '%';
+    setBarColor(dashRamBar, ramPct);
 
-    // Disk
+    // --- Dashboard tab: Storage card ---
     var diskUsed = data.disk_used_gb || 0;
     var diskTotal = data.disk_total_gb || 1;
     var diskPct = (diskUsed / diskTotal) * 100;
-    els.disk.textContent = diskUsed.toFixed(1) + ' / ' + diskTotal.toFixed(1) + ' GB';
-    els.diskBar.style.width = diskPct.toFixed(1) + '%';
-    setBarColor(els.diskBar, diskPct);
+    dashDisk.textContent = diskUsed.toFixed(1) + ' / ' + diskTotal.toFixed(1) + ' GB';
+    dashDiskBar.style.width = diskPct.toFixed(1) + '%';
+    setBarColor(dashDiskBar, diskPct);
+
+    // --- Dashboard tab: Hardware card ---
+    dashCpuModel.textContent = data.cpu_model || '--';
+    dashCpuCores.textContent = typeof data.cpu_cores === 'number' ? data.cpu_cores : '--';
+    dashGpu.textContent = data.gpu_detected ? (data.gpu_name || 'Detected') : 'None';
+    dashAvx2.textContent = data.has_avx2 ? 'Yes' : (data.has_avx2 === false ? 'No' : '--');
+
+    // --- Dashboard tab: Network card ---
+    dashIp.textContent = data.ip || '--';
+    dashMode.textContent = data.mode || '--';
+    dashUptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
+
+    // --- Dashboard tab: Model card ---
+    dashModel.textContent = data.model || '--';
+    dashSpeed.textContent = tokPerSec + ' tok/s';
+
+    // --- System tab ---
+    sysModel.textContent = data.model || '--';
+    sysIp.textContent = data.ip || '--';
+    sysMode.textContent = data.mode || '--';
   }
 
   // --- Helpers ---
