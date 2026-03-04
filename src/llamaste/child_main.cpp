@@ -1315,6 +1315,18 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result.dump(), "application/json");
     });
 
+    // GET /llamaste/debug/resize-log — Read init resize diagnostic log
+    svr.Get("/llamaste/debug/resize-log", [](const httplib::Request& req, httplib::Response& res) {
+        std::ifstream f("/tmp/init-resize.log");
+        if (f.is_open()) {
+            std::string content((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+            res.set_content(content, "text/plain");
+        } else {
+            res.set_content("No resize log found (init did not run resize or not PID 1)\n", "text/plain");
+        }
+    });
+
     // --- Power control routes (protected) ---
     // POST /llamaste/shutdown — Clean shutdown via supervisor (SIGTERM to PID 1)
     svr.Post("/llamaste/shutdown", require_auth([](const httplib::Request& req, httplib::Response& res) {

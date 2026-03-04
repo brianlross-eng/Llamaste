@@ -1,5 +1,6 @@
 #include "init.h"
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <sys/statfs.h>
 #include <linux/fs.h>
+#include <linux/blkpg.h>
 
 // EXT4 online resize ioctl — grows a mounted ext4 filesystem
 #ifndef EXT4_IOC_RESIZE_FS
@@ -90,45 +92,79 @@ static int partition_number_from(const char* dev) {
     return -1;
 }
 
+// Log helper: writes to both stderr and /tmp/init-resize.log
+static FILE* resize_log = nullptr;
+static void rlog(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+
+    if (!resize_log) resize_log = fopen("/tmp/init-resize.log", "w");
+    if (resize_log) {
+        va_list ap2;
+        va_start(ap2, fmt);
+        vfprintf(resize_log, fmt, ap2);
+        va_end(ap2);
+        fflush(resize_log);
+    }
+}
+
 // Try to grow a GPT partition to fill remaining disk space.
 // Only grows if the partition is the last one on disk and there's
 // significant unallocated space after it (>1 MB).
 static void grow_gpt_partition(const char* part_dev) {
+    rlog("[init] grow_gpt_partition: probing %s\n", part_dev);
+
     std::string disk_dev = disk_device_for(part_dev);
-    if (disk_dev.empty()) return;
+    if (disk_dev.empty()) { rlog("[init] GPT: cannot derive disk device\n"); return; }
 
     int part_num = partition_number_from(part_dev);
-    if (part_num < 1) return;
+    if (part_num < 1) { rlog("[init] GPT: invalid partition number\n"); return; }
     int part_index = part_num - 1; // 0-based GPT entry index
+    rlog("[init] GPT: disk=%s part_num=%d index=%d\n",
+         disk_dev.c_str(), part_num, part_index);
 
     int fd = open(disk_dev.c_str(), O_RDWR | O_SYNC);
     if (fd < 0) {
-        fprintf(stderr, "[init] Cannot open %s for GPT resize: %m\n", disk_dev.c_str());
+        rlog("[init] GPT: cannot open %s O_RDWR: %m\n", disk_dev.c_str());
         return;
     }
 
     // Get total disk size
     uint64_t disk_bytes = 0;
     if (ioctl(fd, BLKGETSIZE64, &disk_bytes) != 0 || disk_bytes < 1048576) {
+        rlog("[init] GPT: BLKGETSIZE64 failed or disk too small (%lu bytes)\n",
+             (unsigned long)disk_bytes);
         close(fd);
         return;
     }
     uint64_t disk_sectors = disk_bytes / 512;
+    rlog("[init] GPT: disk_bytes=%lu disk_sectors=%lu (%lu MB)\n",
+         (unsigned long)disk_bytes, (unsigned long)disk_sectors,
+         (unsigned long)(disk_bytes / (1024*1024)));
 
     // Read primary GPT header at LBA 1
     GPTHeader hdr;
     if (pread(fd, &hdr, sizeof(hdr), 512) != sizeof(hdr)) {
+        rlog("[init] GPT: cannot read header at LBA 1\n");
         close(fd);
         return;
     }
     if (memcmp(hdr.signature, "EFI PART", 8) != 0) {
+        rlog("[init] GPT: bad signature (not EFI PART)\n");
         close(fd);
         return;
     }
+    rlog("[init] GPT: header OK, entries=%u entry_size=%u last_usable=%lu\n",
+         hdr.num_partition_entries, hdr.partition_entry_size,
+         (unsigned long)hdr.last_usable_lba);
 
     // Validate entry index in range
     if ((uint32_t)part_index >= hdr.num_partition_entries ||
         hdr.partition_entry_size < sizeof(GPTEntry)) {
+        rlog("[init] GPT: part_index %d out of range (max %u) or entry_size %u too small\n",
+             part_index, hdr.num_partition_entries, hdr.partition_entry_size);
         close(fd);
         return;
     }
@@ -138,6 +174,8 @@ static void grow_gpt_partition(const char* part_dev) {
     std::vector<uint8_t> entries(entries_bytes);
     if (pread(fd, entries.data(), entries_bytes,
               hdr.partition_entry_lba * 512) != (ssize_t)entries_bytes) {
+        rlog("[init] GPT: cannot read %zu bytes of entries at LBA %lu\n",
+             entries_bytes, (unsigned long)hdr.partition_entry_lba);
         close(fd);
         return;
     }
@@ -145,12 +183,21 @@ static void grow_gpt_partition(const char* part_dev) {
     GPTEntry* target = (GPTEntry*)(entries.data() +
                                     (size_t)part_index * hdr.partition_entry_size);
 
+    rlog("[init] GPT: partition %d: start_lba=%lu end_lba=%lu (%lu MB)\n",
+         part_num, (unsigned long)target->starting_lba,
+         (unsigned long)target->ending_lba,
+         (unsigned long)((target->ending_lba - target->starting_lba + 1) * 512 / (1024*1024)));
+
     // Check the partition exists (has a non-zero type GUID)
     bool all_zero = true;
     for (int i = 0; i < 16; i++) {
         if (target->type_guid[i] != 0) { all_zero = false; break; }
     }
-    if (all_zero) { close(fd); return; }
+    if (all_zero) {
+        rlog("[init] GPT: partition %d has zero type GUID (empty)\n", part_num);
+        close(fd);
+        return;
+    }
 
     // Make sure this is the last partition (no other partition ends after it)
     for (uint32_t i = 0; i < hdr.num_partition_entries; i++) {
@@ -158,7 +205,8 @@ static void grow_gpt_partition(const char* part_dev) {
         GPTEntry* other = (GPTEntry*)(entries.data() +
                                        (size_t)i * hdr.partition_entry_size);
         if (other->ending_lba > target->ending_lba) {
-            // Another partition is beyond ours — can't grow safely
+            rlog("[init] GPT: partition %u (end_lba=%lu) is beyond our partition (end_lba=%lu)\n",
+                 i + 1, (unsigned long)other->ending_lba, (unsigned long)target->ending_lba);
             close(fd);
             return;
         }
@@ -170,8 +218,14 @@ static void grow_gpt_partition(const char* part_dev) {
     uint64_t growth = new_last_usable > target->ending_lba
                     ? new_last_usable - target->ending_lba : 0;
 
+    rlog("[init] GPT: new_last_usable=%lu growth=%lu sectors (%lu MB)\n",
+         (unsigned long)new_last_usable, (unsigned long)growth,
+         (unsigned long)(growth * 512 / (1024*1024)));
+
     // Only grow if there's at least 2 MB of room
     if (growth < 4096) { // 4096 sectors = 2 MB
+        rlog("[init] GPT: growth too small (%lu sectors), skipping\n",
+             (unsigned long)growth);
         close(fd);
         return;
     }
@@ -218,55 +272,101 @@ static void grow_gpt_partition(const char* part_dev) {
 
     fsync(fd);
 
-    // Tell kernel to re-read partition table
-    ioctl(fd, BLKRRPART, 0);
+    // Update the kernel's partition table.
+    // BLKRRPART may not update already-visible partitions, so we use BLKPG
+    // to directly resize the specific partition in the kernel's in-memory table.
+    struct blkpg_partition bp;
+    memset(&bp, 0, sizeof(bp));
+    bp.start  = (long long)target->starting_lba * 512;
+    bp.length = (long long)(new_last_usable - target->starting_lba + 1) * 512;
+    bp.pno    = part_num;
+
+    struct blkpg_ioctl_arg ba;
+    memset(&ba, 0, sizeof(ba));
+    ba.op = BLKPG_RESIZE_PARTITION;
+    ba.datalen = sizeof(bp);
+    ba.data = &bp;
+
+    if (ioctl(fd, BLKPG, &ba) != 0) {
+        rlog("[init] GPT: BLKPG_RESIZE_PARTITION failed: %m, trying BLKRRPART\n");
+        // Fallback to BLKRRPART
+        ioctl(fd, BLKRRPART, 0);
+    } else {
+        rlog("[init] GPT: kernel partition %d resized via BLKPG\n", part_num);
+    }
+
     close(fd);
 
     uint64_t grown_mb = (growth * 512) / (1024 * 1024);
-    fprintf(stderr, "[init] Grew DATA partition %s by %lu MB (LBA %lu → %lu)\n",
+    rlog("[init] Grew DATA partition %s by %lu MB (LBA %lu → %lu)\n",
             part_dev, (unsigned long)grown_mb,
             (unsigned long)old_end, (unsigned long)new_last_usable);
 
     // Small delay for kernel to update device nodes
-    usleep(100000);
+    usleep(200000);
 }
 
 // Grow ext4 filesystem online to fill its partition.
 // Uses EXT4_IOC_RESIZE_FS ioctl on the mounted filesystem.
 static void grow_ext4_online(const char* part_dev) {
+    rlog("[init] ext4 resize: checking %s\n", part_dev);
+
     struct statfs sfs;
-    if (statfs("/data", &sfs) != 0) return;
+    if (statfs("/data", &sfs) != 0) {
+        rlog("[init] ext4: statfs /data failed: %m\n");
+        return;
+    }
 
     int partfd = open(part_dev, O_RDONLY);
-    if (partfd < 0) return;
+    if (partfd < 0) {
+        rlog("[init] ext4: cannot open %s: %m\n", part_dev);
+        return;
+    }
 
     uint64_t part_bytes = 0;
     if (ioctl(partfd, BLKGETSIZE64, &part_bytes) != 0) {
+        rlog("[init] ext4: BLKGETSIZE64 on %s failed: %m\n", part_dev);
         close(partfd);
         return;
     }
     close(partfd);
 
-    if (part_bytes == 0 || sfs.f_bsize == 0) return;
+    if (part_bytes == 0 || sfs.f_bsize == 0) {
+        rlog("[init] ext4: part_bytes=%lu bsize=%lu\n",
+             (unsigned long)part_bytes, (unsigned long)sfs.f_bsize);
+        return;
+    }
 
     uint64_t fs_block_size = sfs.f_bsize;
     uint64_t current_blocks = sfs.f_blocks;
     uint64_t max_blocks = part_bytes / fs_block_size;
 
+    rlog("[init] ext4: part=%lu MB, fs=%lu MB (blocks: current=%lu max=%lu bsize=%lu)\n",
+         (unsigned long)(part_bytes / (1024*1024)),
+         (unsigned long)((current_blocks * fs_block_size) / (1024*1024)),
+         (unsigned long)current_blocks, (unsigned long)max_blocks,
+         (unsigned long)fs_block_size);
+
     // Only resize if there's more than 4 MB to gain
-    if (max_blocks <= current_blocks + 1024) return;
+    if (max_blocks <= current_blocks + 1024) {
+        rlog("[init] ext4: no significant growth possible, skipping\n");
+        return;
+    }
 
     int mountfd = open("/data", O_RDONLY);
-    if (mountfd < 0) return;
+    if (mountfd < 0) {
+        rlog("[init] ext4: cannot open /data: %m\n");
+        return;
+    }
 
     if (ioctl(mountfd, EXT4_IOC_RESIZE_FS, &max_blocks) == 0) {
         uint64_t grown_mb = ((max_blocks - current_blocks) * fs_block_size) /
                             (1024 * 1024);
-        fprintf(stderr, "[init] Grew /data filesystem by %lu MB (now %lu MB)\n",
+        rlog("[init] Grew /data filesystem by %lu MB (now %lu MB)\n",
                 (unsigned long)grown_mb,
                 (unsigned long)((max_blocks * fs_block_size) / (1024 * 1024)));
     } else {
-        fprintf(stderr, "[init] ext4 online resize failed: %m\n");
+        rlog("[init] ext4 online resize failed: %m\n");
     }
     close(mountfd);
 }
