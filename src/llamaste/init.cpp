@@ -1,17 +1,288 @@
 #include "init.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
+#include <string>
+#include <vector>
+#include <algorithm>
 #include <unistd.h>
-#include <sys/mount.h>
 #include <sys/stat.h>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/mount.h>
+#include <sys/ioctl.h>
+#include <sys/statfs.h>
+#include <linux/fs.h>
+
+// EXT4 online resize ioctl — grows a mounted ext4 filesystem
+#ifndef EXT4_IOC_RESIZE_FS
+#define EXT4_IOC_RESIZE_FS _IOW('f', 16, __u64)
+#endif
+
+// ---- GPT structures (matches tools_install.cpp) ----
+
+struct __attribute__((packed)) GPTHeader {
+    char     signature[8];      // "EFI PART"
+    uint32_t revision;
+    uint32_t header_size;
+    uint32_t header_crc32;
+    uint32_t reserved;
+    uint64_t my_lba;
+    uint64_t alternate_lba;
+    uint64_t first_usable_lba;
+    uint64_t last_usable_lba;
+    uint8_t  disk_guid[16];
+    uint64_t partition_entry_lba;
+    uint32_t num_partition_entries;
+    uint32_t partition_entry_size;
+    uint32_t partition_array_crc32;
+};
+
+struct __attribute__((packed)) GPTEntry {
+    uint8_t  type_guid[16];
+    uint8_t  unique_guid[16];
+    uint64_t starting_lba;
+    uint64_t ending_lba;
+    uint64_t attributes;
+    uint16_t name[36];
+};
+
+static uint32_t crc32_gpt(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(int32_t)(crc & 1)));
+    }
+    return ~crc;
+}
+
+// Derive whole-disk device from partition device path.
+// /dev/sda5 → /dev/sda, /dev/nvme0n1p5 → /dev/nvme0n1
+static std::string disk_device_for(const char* part_dev) {
+    std::string s(part_dev);
+    if (s.find("nvme") != std::string::npos ||
+        s.find("loop") != std::string::npos ||
+        s.find("mmcblk") != std::string::npos) {
+        // Pattern: /dev/nvme0n1p5 → strip trailing pN
+        auto p = s.rfind('p');
+        if (p != std::string::npos && p > 4)
+            return s.substr(0, p);
+    } else {
+        // Pattern: /dev/sda5 → strip trailing digits
+        size_t end = s.size();
+        while (end > 0 && s[end - 1] >= '0' && s[end - 1] <= '9') end--;
+        if (end > 0 && end < s.size())
+            return s.substr(0, end);
+    }
+    return "";
+}
+
+// Extract partition number from device path.
+// /dev/sda5 → 5, /dev/nvme0n1p5 → 5
+static int partition_number_from(const char* dev) {
+    size_t len = strlen(dev);
+    size_t end = len;
+    while (end > 0 && dev[end - 1] >= '0' && dev[end - 1] <= '9') end--;
+    if (end < len) return atoi(dev + end);
+    return -1;
+}
+
+// Try to grow a GPT partition to fill remaining disk space.
+// Only grows if the partition is the last one on disk and there's
+// significant unallocated space after it (>1 MB).
+static void grow_gpt_partition(const char* part_dev) {
+    std::string disk_dev = disk_device_for(part_dev);
+    if (disk_dev.empty()) return;
+
+    int part_num = partition_number_from(part_dev);
+    if (part_num < 1) return;
+    int part_index = part_num - 1; // 0-based GPT entry index
+
+    int fd = open(disk_dev.c_str(), O_RDWR | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr, "[init] Cannot open %s for GPT resize: %m\n", disk_dev.c_str());
+        return;
+    }
+
+    // Get total disk size
+    uint64_t disk_bytes = 0;
+    if (ioctl(fd, BLKGETSIZE64, &disk_bytes) != 0 || disk_bytes < 1048576) {
+        close(fd);
+        return;
+    }
+    uint64_t disk_sectors = disk_bytes / 512;
+
+    // Read primary GPT header at LBA 1
+    GPTHeader hdr;
+    if (pread(fd, &hdr, sizeof(hdr), 512) != sizeof(hdr)) {
+        close(fd);
+        return;
+    }
+    if (memcmp(hdr.signature, "EFI PART", 8) != 0) {
+        close(fd);
+        return;
+    }
+
+    // Validate entry index in range
+    if ((uint32_t)part_index >= hdr.num_partition_entries ||
+        hdr.partition_entry_size < sizeof(GPTEntry)) {
+        close(fd);
+        return;
+    }
+
+    // Read all partition entries
+    size_t entries_bytes = (size_t)hdr.num_partition_entries * hdr.partition_entry_size;
+    std::vector<uint8_t> entries(entries_bytes);
+    if (pread(fd, entries.data(), entries_bytes,
+              hdr.partition_entry_lba * 512) != (ssize_t)entries_bytes) {
+        close(fd);
+        return;
+    }
+
+    GPTEntry* target = (GPTEntry*)(entries.data() +
+                                    (size_t)part_index * hdr.partition_entry_size);
+
+    // Check the partition exists (has a non-zero type GUID)
+    bool all_zero = true;
+    for (int i = 0; i < 16; i++) {
+        if (target->type_guid[i] != 0) { all_zero = false; break; }
+    }
+    if (all_zero) { close(fd); return; }
+
+    // Make sure this is the last partition (no other partition ends after it)
+    for (uint32_t i = 0; i < hdr.num_partition_entries; i++) {
+        if ((int)i == part_index) continue;
+        GPTEntry* other = (GPTEntry*)(entries.data() +
+                                       (size_t)i * hdr.partition_entry_size);
+        if (other->ending_lba > target->ending_lba) {
+            // Another partition is beyond ours — can't grow safely
+            close(fd);
+            return;
+        }
+    }
+
+    // Calculate maximum expansion
+    // Reserve 33 sectors at end of disk for backup GPT (32 entries + 1 header)
+    uint64_t new_last_usable = disk_sectors - 34;
+    uint64_t growth = new_last_usable > target->ending_lba
+                    ? new_last_usable - target->ending_lba : 0;
+
+    // Only grow if there's at least 2 MB of room
+    if (growth < 4096) { // 4096 sectors = 2 MB
+        close(fd);
+        return;
+    }
+
+    uint64_t old_end = target->ending_lba;
+    target->ending_lba = new_last_usable;
+
+    // Update GPT header
+    hdr.last_usable_lba = new_last_usable;
+    hdr.alternate_lba = disk_sectors - 1;
+
+    // Recalculate CRC32s
+    hdr.partition_array_crc32 = crc32_gpt(entries.data(), entries_bytes);
+    hdr.header_crc32 = 0;
+    hdr.header_crc32 = crc32_gpt((uint8_t*)&hdr, hdr.header_size);
+
+    // Write primary GPT entries and header
+    pwrite(fd, entries.data(), entries_bytes, hdr.partition_entry_lba * 512);
+    pwrite(fd, &hdr, sizeof(hdr), 512);
+
+    // Write backup GPT structures
+    uint64_t backup_entries_lba = disk_sectors - 33;
+    pwrite(fd, entries.data(), entries_bytes, backup_entries_lba * 512);
+
+    GPTHeader backup = hdr;
+    backup.my_lba = disk_sectors - 1;
+    backup.alternate_lba = 1;
+    backup.partition_entry_lba = backup_entries_lba;
+    backup.header_crc32 = 0;
+    backup.header_crc32 = crc32_gpt((uint8_t*)&backup, backup.header_size);
+    pwrite(fd, &backup, sizeof(backup), (disk_sectors - 1) * 512);
+
+    // Update Protective MBR size + CHS end
+    uint8_t mbr[512];
+    if (pread(fd, mbr, 512, 0) == 512) {
+        uint32_t pmbr_size = (uint32_t)std::min(disk_sectors - 1,
+                                                  (uint64_t)0xFFFFFFFF);
+        memcpy(&mbr[458], &pmbr_size, 4);
+        mbr[446 + 5] = 0xFE;  // CHS end: head
+        mbr[446 + 6] = 0xFF;  // CHS end: sector + cyl_hi
+        mbr[446 + 7] = 0xFF;  // CHS end: cyl_lo
+        pwrite(fd, mbr, 512, 0);
+    }
+
+    fsync(fd);
+
+    // Tell kernel to re-read partition table
+    ioctl(fd, BLKRRPART, 0);
+    close(fd);
+
+    uint64_t grown_mb = (growth * 512) / (1024 * 1024);
+    fprintf(stderr, "[init] Grew DATA partition %s by %lu MB (LBA %lu → %lu)\n",
+            part_dev, (unsigned long)grown_mb,
+            (unsigned long)old_end, (unsigned long)new_last_usable);
+
+    // Small delay for kernel to update device nodes
+    usleep(100000);
+}
+
+// Grow ext4 filesystem online to fill its partition.
+// Uses EXT4_IOC_RESIZE_FS ioctl on the mounted filesystem.
+static void grow_ext4_online(const char* part_dev) {
+    struct statfs sfs;
+    if (statfs("/data", &sfs) != 0) return;
+
+    int partfd = open(part_dev, O_RDONLY);
+    if (partfd < 0) return;
+
+    uint64_t part_bytes = 0;
+    if (ioctl(partfd, BLKGETSIZE64, &part_bytes) != 0) {
+        close(partfd);
+        return;
+    }
+    close(partfd);
+
+    if (part_bytes == 0 || sfs.f_bsize == 0) return;
+
+    uint64_t fs_block_size = sfs.f_bsize;
+    uint64_t current_blocks = sfs.f_blocks;
+    uint64_t max_blocks = part_bytes / fs_block_size;
+
+    // Only resize if there's more than 4 MB to gain
+    if (max_blocks <= current_blocks + 1024) return;
+
+    int mountfd = open("/data", O_RDONLY);
+    if (mountfd < 0) return;
+
+    if (ioctl(mountfd, EXT4_IOC_RESIZE_FS, &max_blocks) == 0) {
+        uint64_t grown_mb = ((max_blocks - current_blocks) * fs_block_size) /
+                            (1024 * 1024);
+        fprintf(stderr, "[init] Grew /data filesystem by %lu MB (now %lu MB)\n",
+                (unsigned long)grown_mb,
+                (unsigned long)((max_blocks * fs_block_size) / (1024 * 1024)));
+    } else {
+        fprintf(stderr, "[init] ext4 online resize failed: %m\n");
+    }
+    close(mountfd);
+}
+
+#endif // !_WIN32
+
+// ---- Public API ----
 
 static void try_mount(const char* src, const char* tgt,
                       const char* fs, unsigned long flags,
                       const char* data) {
+#ifndef _WIN32
     mkdir(tgt, 0755);
     if (mount(src, tgt, fs, flags, data) != 0)
         fprintf(stderr, "[init] mount %s failed: %m\n", tgt);
+#endif
 }
 
 void init_mount_filesystems() {
@@ -25,6 +296,7 @@ void init_mount_filesystems() {
 }
 
 bool init_mount_data() {
+#ifndef _WIN32
     const char* candidates[] = {
         "/dev/vda5", "/dev/sda5", "/dev/nvme0n1p5",
         "/dev/vda4", "/dev/sda4", "/dev/nvme0n1p4",
@@ -35,8 +307,15 @@ bool init_mount_data() {
     for (int i = 0; candidates[i]; i++) {
         struct stat st;
         if (stat(candidates[i], &st) == 0) {
+            // Try to grow GPT partition before mounting
+            grow_gpt_partition(candidates[i]);
+
             if (mount(candidates[i], "/data", "ext4", 0, nullptr) == 0) {
                 fprintf(stderr, "[init] Mounted %s on /data\n", candidates[i]);
+
+                // Grow ext4 filesystem to fill partition
+                grow_ext4_online(candidates[i]);
+
                 return true;
             }
         }
@@ -44,6 +323,7 @@ bool init_mount_data() {
 
     fprintf(stderr, "[init] WARNING: No data partition, using tmpfs\n");
     try_mount("tmpfs", "/data", "tmpfs", 0, "size=1G");
+#endif
     return false;
 }
 
