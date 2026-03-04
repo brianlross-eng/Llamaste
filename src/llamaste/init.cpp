@@ -242,13 +242,16 @@ static void grow_gpt_partition(const char* part_dev) {
     hdr.header_crc32 = 0;
     hdr.header_crc32 = crc32_gpt((uint8_t*)&hdr, hdr.header_size);
 
+    rlog("[init] GPT: writing updated partition table...\n");
+
     // Write primary GPT entries and header
-    pwrite(fd, entries.data(), entries_bytes, hdr.partition_entry_lba * 512);
-    pwrite(fd, &hdr, sizeof(hdr), 512);
+    ssize_t w1 = pwrite(fd, entries.data(), entries_bytes, hdr.partition_entry_lba * 512);
+    ssize_t w2 = pwrite(fd, &hdr, sizeof(hdr), 512);
+    rlog("[init] GPT: primary write: entries=%zd header=%zd\n", w1, w2);
 
     // Write backup GPT structures
     uint64_t backup_entries_lba = disk_sectors - 33;
-    pwrite(fd, entries.data(), entries_bytes, backup_entries_lba * 512);
+    ssize_t w3 = pwrite(fd, entries.data(), entries_bytes, backup_entries_lba * 512);
 
     GPTHeader backup = hdr;
     backup.my_lba = disk_sectors - 1;
@@ -256,7 +259,8 @@ static void grow_gpt_partition(const char* part_dev) {
     backup.partition_entry_lba = backup_entries_lba;
     backup.header_crc32 = 0;
     backup.header_crc32 = crc32_gpt((uint8_t*)&backup, backup.header_size);
-    pwrite(fd, &backup, sizeof(backup), (disk_sectors - 1) * 512);
+    ssize_t w4 = pwrite(fd, &backup, sizeof(backup), (disk_sectors - 1) * 512);
+    rlog("[init] GPT: backup write: entries=%zd header=%zd\n", w3, w4);
 
     // Update Protective MBR size + CHS end
     uint8_t mbr[512];
@@ -270,7 +274,8 @@ static void grow_gpt_partition(const char* part_dev) {
         pwrite(fd, mbr, 512, 0);
     }
 
-    fsync(fd);
+    int sync_ret = fsync(fd);
+    rlog("[init] GPT: fsync=%d\n", sync_ret);
 
     // Update the kernel's partition table.
     // BLKRRPART may not update already-visible partitions, so we use BLKPG
