@@ -1353,6 +1353,44 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result, "application/json");
     }));
 
+    // --- Model download route (protected) ---
+    svr.Post("/llamaste/model/download-recommended", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        // Step 1: Get recommended model
+        std::string rec_result = g_tools.dispatch("model.recommended", "{}");
+        json rec = json::parse(rec_result, nullptr, false);
+
+        if (rec.is_discarded() || !rec.value("recommended", false)) {
+            res.set_content(rec_result, "application/json");
+            return;
+        }
+
+        // Check if already downloaded
+        if (rec.value("already_downloaded", false)) {
+            json out;
+            out["status"] = "already_exists";
+            out["model_name"] = rec.value("model_name", "");
+            out["filename"] = rec.value("filename", "");
+            out["message"] = "Recommended model is already downloaded.";
+            res.set_content(out.dump(2), "application/json");
+            return;
+        }
+
+        // Step 2: Start download
+        json dl_args;
+        dl_args["repo_id"] = rec.value("repo_id", "");
+        dl_args["filename"] = rec.value("filename", "");
+        std::string dl_result = g_tools.dispatch("model.download", dl_args.dump());
+
+        res.set_content(dl_result, "application/json");
+    }));
+
+    svr.Get("/llamaste/model/recommended", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string result = g_tools.dispatch("model.recommended", "{}");
+        res.set_content(result, "application/json");
+    }));
+
     // --- Installer routes (live mode only) ---
     if (g_boot_mode == "live") {
         svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {

@@ -173,8 +173,18 @@
     dashUptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
 
     // --- Dashboard tab: Model card ---
-    dashModel.textContent = data.model || '--';
+    dashModel.textContent = data.model || 'No model loaded';
     dashSpeed.textContent = tokPerSec + ' tok/s';
+
+    // Show/hide download button based on model status
+    var dlBtn = document.getElementById('dash-download-btn');
+    if (dlBtn) {
+      if (data.model && data.model !== 'none' && data.model !== '--') {
+        dlBtn.style.display = 'none';
+      } else {
+        dlBtn.style.display = '';
+      }
+    }
 
     // --- System tab ---
     sysModel.textContent = data.model || '--';
@@ -201,5 +211,73 @@
     if (h > 0) return h + 'h ' + m + 'm';
     return m + 'm';
   }
+
+  // --- Model download button ---
+  function initDownloadButton() {
+    var dlBtn = document.getElementById('dash-download-btn');
+    if (!dlBtn) return;
+
+    dlBtn.addEventListener('click', function () {
+      dlBtn.disabled = true;
+      dlBtn.textContent = 'Checking recommended model...';
+
+      // First check what model is recommended
+      fetch('/llamaste/model/recommended')
+        .then(function (r) { return r.json(); })
+        .then(function (rec) {
+          if (!rec.recommended) {
+            dlBtn.textContent = 'Not enough RAM for any model';
+            setTimeout(function () {
+              dlBtn.textContent = 'Download Recommended Model';
+              dlBtn.disabled = false;
+            }, 5000);
+            return;
+          }
+
+          if (rec.already_downloaded) {
+            dlBtn.textContent = rec.model_name + ' already downloaded';
+            setTimeout(function () {
+              dlBtn.textContent = 'Download Recommended Model';
+              dlBtn.disabled = false;
+            }, 5000);
+            return;
+          }
+
+          var sizeMb = rec.approx_download_mb || 0;
+          var sizeStr = sizeMb > 1024
+            ? (sizeMb / 1024).toFixed(1) + ' GB'
+            : sizeMb + ' MB';
+          dlBtn.textContent = 'Downloading ' + rec.model_name + ' (' + sizeStr + ')...';
+
+          // Start the download
+          return fetch('/llamaste/model/download-recommended', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (result) {
+              if (result.status === 'success' || result.status === 'already_exists') {
+                dlBtn.textContent = 'Downloaded! Restart to load.';
+                dlBtn.className = 'btn btn-success';
+              } else {
+                dlBtn.textContent = 'Download failed: ' + (result.error || 'unknown');
+                dlBtn.className = 'btn btn-danger';
+                setTimeout(function () {
+                  dlBtn.textContent = 'Retry Download';
+                  dlBtn.className = 'btn btn-primary';
+                  dlBtn.disabled = false;
+                }, 5000);
+              }
+            });
+        })
+        .catch(function (err) {
+          dlBtn.textContent = 'Error: ' + err.message;
+          setTimeout(function () {
+            dlBtn.textContent = 'Download Recommended Model';
+            dlBtn.className = 'btn btn-primary';
+            dlBtn.disabled = false;
+          }, 5000);
+        });
+    });
+  }
+
+  initDownloadButton();
 
 })();
