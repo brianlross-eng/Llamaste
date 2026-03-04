@@ -179,11 +179,9 @@
     // Show/hide download button based on model status
     var dlBtn = document.getElementById('dash-download-btn');
     if (dlBtn) {
-      if (data.model && data.model !== 'none' && data.model !== '--') {
-        dlBtn.style.display = 'none';
-      } else {
-        dlBtn.style.display = '';
-      }
+      var m = (data.model || '').toLowerCase();
+      var hasModel = m && m !== 'none' && m !== '--' && m.indexOf('stub') === -1 && m.indexOf('no model') === -1;
+      dlBtn.style.display = hasModel ? 'none' : '';
     }
 
     // --- System tab ---
