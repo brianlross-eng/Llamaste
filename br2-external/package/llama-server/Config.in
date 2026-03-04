@@ -1,0 +1,6 @@
+config BR2_PACKAGE_LLAMA_SERVER
+	bool "llama-server"
+	help
+	  llama.cpp inference server. Provides OpenAI-compatible
+	  HTTP API for LLM inference with GGUF models.
+	  https://github.com/ggerganov/llama.cpp
