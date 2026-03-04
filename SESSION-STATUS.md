@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-08 (Desktop mode WORKING in VirtualBox, 118 tests across 8 suites)
+**Last updated**: 2026-03-09 (Model download tools DONE, 128 tests across 9 suites)
 
 ---
 
@@ -18,8 +18,9 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 | 2c: Desktop Compositor | 16-18 | DONE — kernel DRM, Buildroot packages, compositor launch |
 | 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches |
 | 2c: VirtualBox Desktop | — | DONE — Cage+Cog renders web UI, setup flow works, auth works |
-| 2d: Real Inference | 20 | DONE — llama-server package, HTTP proxy, lifecycle mgmt, 118 tests/8 suites |
-| Auth + Console | bcrypt, AuthManager, server display | DONE — 118 host tests, 8/8 suites |
+| 2d: Real Inference | 20 | DONE — llama-server package, HTTP proxy, lifecycle mgmt |
+| 2e: Model Download | — | DONE — 5 tools (recommended, search, files, download, usb_import), dashboard button, libcurl linking |
+| Auth + Console | bcrypt, AuthManager, server display | DONE — 128 host tests, 9/9 suites |
 
 **Phase 2 implementation plan**: `docs/plans/2026-03-03-phase2-implementation-plan.md`
 **Console + Auth design**: `docs/plans/2026-03-05-console-auth-design.md`
@@ -45,15 +46,16 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 - Protected routes: all API endpoints. Unprotected: /health, /login.html, /setup.html, static JS/CSS
 
 ### Test results
-**118 host tests across 8 suites** — ALL PASSING:
+**128 host tests across 9 suites** — ALL PASSING:
 1. Hardware Detection (3 tests)
 2. Tools System (10 tests)
 3. Agent Loop (19 tests)
-4. Tools Integration (27 tests)
+4. Tools Integration (27 tests — 30 tools registered)
 5. HTTP Server (15 tests)
 6. Network/mDNS (17+ tests)
 7. Auth & Console (15 tests)
 8. Inference Integration (10 tests)
+9. Model Download (20 tests — URL builders, validators, recommender)
 
 ### Bug found and fixed
 bcrypt base64 decode table was wrong — built for standard base64 alphabet order but bcrypt uses `./A-Za-z0-9`. Fixed decode table + salt streaming in Eksblowfish key expansion.
@@ -90,7 +92,18 @@ bcrypt base64 decode table was wrong — built for standard base64 alphabet orde
 ## Next Steps
 
 ### Immediate
-1. **Desktop mode bugs fixed** (2026-03-08) — 3 issues found and resolved:
+1. **Model download feature complete** (2026-03-09) — 5 new tools + dashboard button + REST endpoints:
+   - `model.recommended`: RAM-based model recommendation (6 Qwen2.5 tiers)
+   - `model.search`: Search Hugging Face for GGUF models
+   - `model.files`: List files in a HF repository
+   - `model.download`: Download GGUF models from Hugging Face via libcurl
+   - `model.usb_import`: Import GGUF models from USB drives (NTFS3 kernel support)
+   - Dashboard "Download Recommended Model" button with progress states
+   - Buildroot: libcurl+openssl+NTFS3, dynamic linking with static C++ runtime
+   - Design doc: `docs/plans/2026-03-08-model-download-design.md`
+   - Plan: `docs/plans/2026-03-08-model-download-plan.md`
+
+2. **Desktop mode bugs fixed** (2026-03-08) — 3 issues found and resolved:
    - `execlp` → `execl` with full paths (PID 1 has no PATH)
    - `BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y` (cage/wlroots need HAS_UDEV)
    - `CONFIG_HYPERVISOR_GUEST=y` in kernel (vmwgfx needs it for VirtualBox VMSVGA)
@@ -125,9 +138,9 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin
 
 | Artifact | Size | Details |
 |----------|------|---------|
-| llamaste binary | ~6 MB (in squashfs) | Static ELF, x86-64, musl, stripped |
+| llamaste binary | ~1.6 MB | Dynamic ELF, x86-64, musl (static libstdc++/libgcc, dynamic libcurl/liblzma) |
 | bzImage kernel | 7.5 MB | Built-in DRM/GPU drivers, evdev, no modules |
-| rootfs.squashfs | 65 MB | llamaste + WPEWebKit + Mesa + Wayland + Cage + ICU |
+| rootfs.squashfs | 75 MB | llamaste + WPEWebKit + Mesa + Wayland + Cage + ICU + libcurl |
 | llamaste.img | 611 MB | 5-partition GPT disk image |
 | llamaste.iso | ~400 MB (needs rebuild) | Hybrid BIOS+UEFI live ISO with installer |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
@@ -139,7 +152,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin
 ~7,500 LOC original C++ + ~40KB web UI:
 - main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
 - agent.cpp, prompt_builder.cpp
-- tools.cpp + 9 tool files (fs, process, network, system, config, model, install, schedule, auth)
+- tools.cpp + 10 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth)
 - bcrypt.cpp, auth.cpp
 - net_mdns.cpp, scheduler.cpp
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css

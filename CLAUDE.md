@@ -1,10 +1,10 @@
 # Llamaste Project Context
 
 ## What This Project Is
-Llamaste is a bootable Linux image where the LLM IS the operating system. A single static C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
+Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop mode PENDING Buildroot build, 108 host tests
+- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop DONE, Model Download DONE, 128 host tests/9 suites
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
@@ -48,7 +48,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `docs/plans/2026-03-05-console-auth-implementation-plan.md` — Auth + console build plan
 - `research/llamaste-architecture.html` — v2 three-layer architecture SVG diagram
 - `research/` — All research documents (01 through 26)
-- `src/llamaste/` — Production C++ source (~7,500 LOC)
+- `docs/plans/2026-03-08-model-download-design.md` — Model download design doc
+- `docs/plans/2026-03-08-model-download-plan.md` — Model download implementation plan
+- `src/llamaste/` — Production C++ source (~8,000 LOC)
 
 ## Build Patterns & Gotchas
 - **Buildroot invocation**: `cd /root/llamaste-build/output && make` (NOT from buildroot/ source dir)
@@ -66,6 +68,8 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **PMBR updates**: After GPT resize, must update Protective MBR size (offset 458) and CHS end (offsets 451-453)
 - **Installer is pure C++**: No shell available (`BR2_SYSTEM_BIN_SH_NONE=y`), all disk ops via open/read/write/pread/pwrite, fork/execv
 - **Buildroot ICU/C++ linking**: ICU (C++) is in sysroot but libstdc++.so isn't. Fix: symlink libstdc++ into sysroot via `ICU_POST_INSTALL_STAGING_HOOKS` in external.mk. Also `LIBXML2_CONF_OPTS += --without-icu`. `LIBS="-lstdc++"` did NOT work.
+- **Dynamic linking for libcurl**: Full-static (`-static`) doesn't work with libcurl due to transitive deps (nghttp2→libpsl→ICU→libstdc++). Solution: `LLAMASTE_STATIC=OFF` + `-static-libgcc -static-libstdc++` (static C++ runtime, dynamic libcurl). Post-build installs libstdc++.so/libgcc_s.so for ICU.
+- **libcurl CMake detection**: Use `find_library(CURL_LIB NAMES curl)` for shared, or `pkg-config --libs --static libcurl` for full static chain. `CURL_STATICLIB` define needed for static.
 - **bcrypt alphabet**: bcrypt base64 is `./A-Za-z0-9` NOT standard `A-Za-z0-9+/`. Decode table must match.
 - **Eksblowfish salt streaming**: Salt index must be continuous across P-array and S-box expansion (not reset to 0 for S-boxes)
 
