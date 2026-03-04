@@ -10,6 +10,9 @@
 #   4. Tools integration tests (needs /data dir, run as root)
 #   5. HTTP server integration tests
 #   6. Network (mDNS) tests
+#   7. Auth & Console tests
+#   8. Inference integration tests
+#   9. Model download tests
 #
 # Prerequisites:
 #   - g++ with C++17 support
@@ -59,7 +62,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 1: Hardware Detection
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [1/8] Hardware Detection ---${NC}"
+echo -e "${BOLD}--- [1/9] Hardware Detection ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_hwdetect" \
     "${TESTS}/test_hwdetect.cpp" "${SRC}/hwdetect.cpp" 2>&1; then
     if "${BUILD_DIR}/test_hwdetect"; then
@@ -75,7 +78,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 2: Tools System
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [2/8] Tools System ---${NC}"
+echo -e "${BOLD}--- [2/9] Tools System ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_tools" \
     "${TESTS}/test_tools.cpp" \
     "${SRC}/tools.cpp" \
@@ -84,7 +87,8 @@ if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_tools" \
     "${SRC}/tools_network.cpp" \
     "${SRC}/tools_system.cpp" \
     "${SRC}/tools_config.cpp" \
-    "${SRC}/tools_model.cpp" 2>&1; then
+    "${SRC}/tools_model.cpp" \
+    "${SRC}/tools_model_download.cpp" 2>&1; then
     if "${BUILD_DIR}/test_tools"; then
         suite_pass "Tools System"
     else
@@ -98,7 +102,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 3: Agent Loop & Prompt Builder
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [3/8] Agent Loop ---${NC}"
+echo -e "${BOLD}--- [3/9] Agent Loop ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_agent" \
     "${TESTS}/test_agent.cpp" \
     "${SRC}/agent.cpp" \
@@ -110,6 +114,7 @@ if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_agent" \
     "${SRC}/tools_system.cpp" \
     "${SRC}/tools_config.cpp" \
     "${SRC}/tools_model.cpp" \
+    "${SRC}/tools_model_download.cpp" \
     "${SRC}/hwdetect.cpp" 2>&1; then
     if "${BUILD_DIR}/test_agent"; then
         suite_pass "Agent Loop"
@@ -124,7 +129,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 4: Tools Integration
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [4/8] Tools Integration ---${NC}"
+echo -e "${BOLD}--- [4/9] Tools Integration ---${NC}"
 # These tests need /data directory (run as root in WSL2)
 if [ ! -d "/data" ]; then
     echo "Creating /data directory for integration tests..."
@@ -146,7 +151,8 @@ if [ "${SKIP_INTEGRATION:-0}" != "1" ]; then
         "${SRC}/tools_network.cpp" \
         "${SRC}/tools_system.cpp" \
         "${SRC}/tools_config.cpp" \
-        "${SRC}/tools_model.cpp" 2>&1; then
+        "${SRC}/tools_model.cpp" \
+        "${SRC}/tools_model_download.cpp" 2>&1; then
         if "${BUILD_DIR}/test_tools_integration"; then
             suite_pass "Tools Integration"
         else
@@ -161,7 +167,7 @@ fi
 # ---------------------------------------------------------------
 # Suite 5: HTTP Server
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [5/8] HTTP Server ---${NC}"
+echo -e "${BOLD}--- [5/9] HTTP Server ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${TESTS}/test_http.cpp" \
     "${SRC}/child_main.cpp" \
@@ -174,6 +180,7 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_system.cpp" \
     "${SRC}/tools_config.cpp" \
     "${SRC}/tools_model.cpp" \
+    "${SRC}/tools_model_download.cpp" \
     "${SRC}/tools_install.cpp" \
     "${SRC}/tools_schedule.cpp" \
     "${SRC}/tools_auth.cpp" \
@@ -195,7 +202,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 6: Network (mDNS)
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [6/8] Network (mDNS) ---${NC}"
+echo -e "${BOLD}--- [6/9] Network (mDNS) ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_net" \
     "${TESTS}/test_net.cpp" \
     "${SRC}/net_mdns.cpp" 2>&1; then
@@ -212,7 +219,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 7: Auth & Console
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [7/8] Auth & Console ---${NC}"
+echo -e "${BOLD}--- [7/9] Auth & Console ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_auth" \
     "${TESTS}/test_auth.cpp" \
     "${SRC}/bcrypt.cpp" \
@@ -231,7 +238,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 8: Inference Integration
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [8/8] Inference Integration ---${NC}"
+echo -e "${BOLD}--- [8/9] Inference Integration ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${TESTS}/test_inference.cpp" \
     "${SRC}/child_main.cpp" \
@@ -244,6 +251,7 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${SRC}/tools_system.cpp" \
     "${SRC}/tools_config.cpp" \
     "${SRC}/tools_model.cpp" \
+    "${SRC}/tools_model_download.cpp" \
     "${SRC}/tools_install.cpp" \
     "${SRC}/tools_schedule.cpp" \
     "${SRC}/tools_auth.cpp" \
@@ -259,6 +267,23 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     fi
 else
     suite_fail "Inference Integration (compile)"
+fi
+echo ""
+
+# ---------------------------------------------------------------
+# Suite 9: Model Download
+# ---------------------------------------------------------------
+echo -e "${BOLD}--- [9/9] Model Download ---${NC}"
+if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_model_download" \
+    "${TESTS}/test_model_download.cpp" \
+    "${SRC}/tools_model_download.cpp" 2>&1; then
+    if "${BUILD_DIR}/test_model_download"; then
+        suite_pass "Model Download"
+    else
+        suite_fail "Model Download (runtime)"
+    fi
+else
+    suite_fail "Model Download (compile)"
 fi
 echo ""
 

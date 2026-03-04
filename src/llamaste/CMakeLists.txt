@@ -20,6 +20,7 @@ set(LLAMASTE_SOURCES
     tools_install.cpp
     tools_schedule.cpp
     tools_auth.cpp
+    tools_model_download.cpp
     agent.cpp
     prompt_builder.cpp
     net_mdns.cpp
@@ -55,6 +56,28 @@ if(LZMA_LIB)
     target_link_libraries(llamaste PRIVATE ${LZMA_LIB})
 else()
     message(STATUS "liblzma not found - XZ decompression disabled, installer will use raw images only")
+endif()
+
+# libcurl for HTTPS downloads (model download from Hugging Face)
+if(LLAMASTE_STATIC)
+    find_library(CURL_LIB NAMES libcurl.a)
+else()
+    find_library(CURL_LIB NAMES curl)
+endif()
+if(CURL_LIB)
+    message(STATUS "Found libcurl: ${CURL_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_LIBCURL)
+    target_link_libraries(llamaste PRIVATE ${CURL_LIB})
+    # libcurl with OpenSSL needs these when linking statically
+    if(LLAMASTE_STATIC)
+        find_library(SSL_LIB NAMES libssl.a)
+        find_library(CRYPTO_LIB NAMES libcrypto.a)
+        if(SSL_LIB AND CRYPTO_LIB)
+            target_link_libraries(llamaste PRIVATE ${SSL_LIB} ${CRYPTO_LIB})
+        endif()
+    endif()
+else()
+    message(STATUS "libcurl not found - model download disabled, search/browse only with pre-placed models")
 endif()
 
 # Web asset embedding (production builds)

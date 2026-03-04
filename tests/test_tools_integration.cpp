@@ -64,8 +64,8 @@ int main() {
         int count = registry.count();
         printf("(count=%d) ", count);
 
-        // Expected: fs(6) + process(2) + network(4) + system(6) + config(4) + model(3) = 25
-        assert(count == 25);
+        // Expected: fs(6) + process(2) + network(4) + system(6) + config(4) + model(3) + model_download(5) = 30
+        assert(count == 30);
         PASS();
     }
 
@@ -142,7 +142,7 @@ int main() {
         auto parsed = json::parse(tools_json);
 
         assert(parsed.is_array());
-        assert(parsed.size() == 25);
+        assert(parsed.size() == 30);
 
         // Every entry should have type:"function" and function.name
         for (const auto& entry : parsed) {
