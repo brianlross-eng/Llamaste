@@ -18,6 +18,8 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <time.h>
+#include <termios.h>
+#include <poll.h>
 #endif
 
 // ---------- Format helpers (testable on host) ----------
@@ -71,6 +73,11 @@ std::string format_bytes(long kb) {
 static volatile sig_atomic_t g_child_exited = 0;
 static volatile sig_atomic_t g_shutdown_requested = 0;
 static volatile pid_t g_child_pid = 0;
+static volatile sig_atomic_t g_reboot_requested = 0;  // 1 = reboot instead of poweroff
+
+// Console interaction state visible to display thread
+enum ConsolePrompt { PROMPT_NONE, PROMPT_SHUTDOWN, PROMPT_REBOOT };
+static volatile ConsolePrompt g_console_prompt = PROMPT_NONE;
 
 static void supervisor_sigchld(int) {
     g_child_exited = 1;
@@ -242,6 +249,62 @@ static SystemMetrics gather_metrics() {
     return m;
 }
 
+// ---------- Console input thread (keyboard controls) ----------
+
+static void console_input_thread() {
+    fprintf(stderr, "[supervisor] Console input thread started\n");
+
+    // Open /dev/console for reading
+    int fd = open("/dev/console", O_RDONLY | O_NOCTTY);
+    if (fd < 0) {
+        fprintf(stderr, "[supervisor] Cannot open /dev/console for input\n");
+        return;
+    }
+
+    // Set raw terminal mode (no echo, no canonical/line buffering)
+    struct termios raw;
+    if (tcgetattr(fd, &raw) == 0) {
+        raw.c_lflag &= ~(ECHO | ICANON | ISIG);  // No echo, no line buffering, no signals
+        raw.c_cc[VMIN] = 0;   // Non-blocking
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(fd, TCSANOW, &raw);
+    }
+
+    struct pollfd pfd = { fd, POLLIN, 0 };
+
+    while (!g_shutdown_requested) {
+        // Poll with 200ms timeout so we check g_shutdown_requested regularly
+        int ret = poll(&pfd, 1, 200);
+        if (ret <= 0) continue;
+
+        char ch = 0;
+        if (read(fd, &ch, 1) != 1) continue;
+
+        if (g_console_prompt == PROMPT_NONE) {
+            // Normal mode: S=shutdown, R=reboot
+            if (ch == 'S' || ch == 's') {
+                g_console_prompt = PROMPT_SHUTDOWN;
+            } else if (ch == 'R' || ch == 'r') {
+                g_console_prompt = PROMPT_REBOOT;
+            }
+        } else {
+            // Confirmation mode: Y=confirm, N/anything else=cancel
+            if (ch == 'Y' || ch == 'y') {
+                if (g_console_prompt == PROMPT_REBOOT) {
+                    g_reboot_requested = 1;
+                }
+                g_shutdown_requested = 1;
+            } else {
+                // Cancel — any key other than Y cancels
+                g_console_prompt = PROMPT_NONE;
+            }
+        }
+    }
+
+    close(fd);
+    fprintf(stderr, "[supervisor] Console input thread stopped\n");
+}
+
 // ---------- Console display thread ----------
 
 static void console_display_thread(const SupervisorConfig& config) {
@@ -326,11 +389,15 @@ static void console_display_thread(const SupervisorConfig& config) {
 
         int W = 50;  // inner width
 
-        // Title
+        // Title — show actual boot mode
         hline(TL, TR, W);
         {
+            const char* mode_label = "SERVER";
+            if (config.boot_mode == "desktop") mode_label = "DESKTOP";
+            else if (config.boot_mode == "live") mode_label = "LIVE";
+
             char title[64];
-            snprintf(title, sizeof(title), "LLAMASTE 1.0.000a  SERVER");
+            snprintf(title, sizeof(title), "LLAMASTE  %s", mode_label);
             int tlen = (int)strlen(title);
             int pad_left = (W - tlen) / 2;
             int pad_right = W - tlen - pad_left;
@@ -399,10 +466,41 @@ static void console_display_thread(const SupervisorConfig& config) {
 
         hline(ML, MR, W);
 
-        // Bottom info
-        snprintf(line_buf, sizeof(line_buf), "Child PID: %d  |  Restarts: --",
-                 (int)g_child_pid);
-        padded(line_buf, W);
+        // Bottom info — key hints or confirmation prompt
+        ConsolePrompt prompt = g_console_prompt;
+        if (prompt == PROMPT_SHUTDOWN) {
+            // Shutdown confirmation
+            const char* confirm_text = "\033[33m  Shutdown?  Press [Y] to confirm, any key to cancel\033[0m";
+            int visible_len = 53;  // visible chars without ANSI
+            out += V;
+            out += confirm_text;
+            for (int i = visible_len; i < W; i++) out += " ";
+            out += V;
+            out += "\n";
+        } else if (prompt == PROMPT_REBOOT) {
+            // Reboot confirmation
+            const char* confirm_text = "\033[33m  Reboot?    Press [Y] to confirm, any key to cancel\033[0m";
+            int visible_len = 53;
+            out += V;
+            out += confirm_text;
+            for (int i = visible_len; i < W; i++) out += " ";
+            out += V;
+            out += "\n";
+        } else {
+            // Normal: show available controls
+            snprintf(line_buf, sizeof(line_buf), "[S] Shutdown       [R] Reboot");
+            int len = (int)strlen(line_buf);
+            int pad_left = (W - len) / 2;
+            int pad_right = W - len - pad_left;
+            out += V;
+            for (int i = 0; i < pad_left; i++) out += " ";
+            out += "\033[36m";  // Cyan for key hints
+            out += line_buf;
+            out += "\033[0m";
+            for (int i = 0; i < pad_right; i++) out += " ";
+            out += V;
+            out += "\n";
+        }
 
         hline(BL, BR, W);
 
@@ -413,8 +511,9 @@ static void console_display_thread(const SupervisorConfig& config) {
             close(fd);
         }
 
-        // Sleep 5 seconds, checking shutdown every 500ms
-        for (int i = 0; i < 10 && !g_shutdown_requested; i++) {
+        // Sleep interval: fast refresh during confirmation prompt, normal otherwise
+        int sleep_intervals = (g_console_prompt != PROMPT_NONE) ? 2 : 10;  // 1s vs 5s
+        for (int i = 0; i < sleep_intervals && !g_shutdown_requested; i++) {
             usleep(500000);
         }
     }
@@ -439,12 +538,11 @@ static void console_display_thread(const SupervisorConfig& config) {
     int crash_count = 0;
     time_t last_crash = 0;
 
-    // Start console display thread in server mode
-    std::thread console_thread;
-    if (config.boot_mode == "server") {
-        console_thread = std::thread(console_display_thread, config);
-        console_thread.detach();
-    }
+    // Start console display + input threads (all boot modes)
+    std::thread display_thread(console_display_thread, config);
+    display_thread.detach();
+    std::thread input_thread(console_input_thread);
+    input_thread.detach();
 
     while (!g_shutdown_requested) {
         fprintf(stderr, "[supervisor] Spawning inference child...\n");
@@ -495,7 +593,11 @@ static void console_display_thread(const SupervisorConfig& config) {
         }
     }
 
-    fprintf(stderr, "[supervisor] Shutting down...\n");
+    if (g_reboot_requested) {
+        fprintf(stderr, "[supervisor] Rebooting...\n");
+    } else {
+        fprintf(stderr, "[supervisor] Shutting down...\n");
+    }
 
     if (g_child_pid > 0) {
         kill(g_child_pid, SIGTERM);
@@ -512,7 +614,12 @@ static void console_display_thread(const SupervisorConfig& config) {
 
     sync();
     umount2("/data", MNT_DETACH);
-    reboot(RB_POWER_OFF);
+
+    if (g_reboot_requested) {
+        reboot(RB_AUTOBOOT);
+    } else {
+        reboot(RB_POWER_OFF);
+    }
     _exit(0);
 }
 
