@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (Phase 3a complete — STT + always-listening + Flite TTS + Web UI voice integration)
+**Last updated**: 2026-03-05 (Phase 3 MCP server complete — 44 tools exposed via MCP Streamable HTTP)
 
 ---
 
@@ -12,7 +12,9 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 ### Phase 2: COMPLETE
 All sub-phases done: Web UI, scheduler, desktop mode, inference, model download, auth, network config.
 
-### Phase 3a: Voice I/O — IN PROGRESS
+### Phase 3a: Voice I/O — COMPLETE
+
+### Phase 3: MCP Server — COMPLETE (0d418fc)
 
 | Sub-phase | Status |
 |-----------|--------|
@@ -103,16 +105,35 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 
 ---
 
+## Latest Session — Phase 3 MCP Server (0d418fc)
+
+### MCP Server Implementation
+- **Transport**: Streamable HTTP (MCP spec 2025-03-26), single endpoint `POST /mcp`
+- **Protocol**: JSON-RPC 2.0 with session IDs (32-hex, 30-min idle expiry)
+- **Methods**: initialize, ping, tools/list (44 tools), tools/call, resources/list, resources/read, prompts/list, notifications
+- **Tool mapping**: `ToolRegistry.to_openai_tools_json()` → reformat `parameters`→`inputSchema` for MCP
+- **Auth**: same `require_auth` cookie middleware as all other protected routes
+- **System panel**: new MCP card with endpoint URL + pre-filled Claude Desktop config snippet, populated from live device IP
+- **CORS**: full CORS headers for browser-based MCP clients
+- **New files**: mcp_server.h, mcp_server.cpp (~400 LOC), 6 files modified
+
+### Verified (server mode, localhost:8080):
+- `GET /mcp` → `{"server":"llamaste","protocol":"2025-03-26",...}`
+- `initialize` → `Mcp-Session-Id` header, capabilities, instructions
+- `tools/list` → 44 tools (audio, fs, process, network, system, config, model, schedule, auth, install)
+- `tools/call system.info` → `{"isError":false,"content":[{"type":"text","text":"..."}]}`
+- `tools/call fs.list_directory /data/` → lists models, config, tmp, llamaste dirs
+- `resources/read llamaste://system/status` → live system info
+- notifications → 202 Accepted
+- unknown method → `-32601 Method not found`
+
 ## Next Steps
 
 ### Immediate
-1. Test voice pipeline end-to-end (download whisper model, test with VBox mic)
-2. Phase 3a-3: Piper TTS (ONNX Runtime musl build — high risk)
-3. Phase 3a-4: Web UI TTS audio playback
-
-### Future
-4. Inference speed optimization (try 0.5B model, context tuning)
-5. Phase 4: A/B update mechanism, Ed25519 signing, USB sideload
+1. **Phase 3: Mesh clustering** — UDP multicast discovery, llama-rpc-server, coordinator election
+2. **Phase 4: A/B updates** — SYS-B partition already reserved, GRUB `llamaste_slot` variable in design
+3. Upgrade Flite TTS → higher quality voice (sherpa-onnx or Piper if ONNX builds)
+4. MCP API key (dedicated bearer token, no browser session needed for Claude Desktop)
 
 ---
 

@@ -943,6 +943,112 @@ supervisor_run()  (PID 1 stays here, watchdog loop)
 
 ---
 
+## MCP Server (Model Context Protocol)
+
+Llamaste exposes all its tools as an MCP server, allowing Claude Desktop and other MCP clients to invoke system management capabilities directly.
+
+### Transport
+
+**Streamable HTTP** (MCP spec 2025-03-26) — single endpoint, no separate SSE stream:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/mcp` | Discovery / health check |
+| `POST` | `/mcp` | All JSON-RPC 2.0 MCP requests |
+| `OPTIONS` | `/mcp` | CORS preflight |
+
+### Supported MCP Methods
+
+| Method | Status |
+|--------|--------|
+| `initialize` | ✓ Returns session ID in `Mcp-Session-Id` header |
+| `ping` | ✓ Returns `{}` |
+| `tools/list` | ✓ All 44 registered tools |
+| `tools/call` | ✓ Dispatches to ToolRegistry |
+| `resources/list` | ✓ 2 resources |
+| `resources/read` | ✓ `llamaste://system/status`, `llamaste://tools/catalog` |
+| `resources/templates/list` | ✓ Returns empty array |
+| `prompts/list` | ✓ Returns empty array |
+| `notifications/initialized` | ✓ 202 Accepted (no body) |
+
+### Authentication
+
+The `/mcp` endpoint uses the same `require_auth` cookie middleware as all other protected routes. For Claude Desktop:
+
+1. Log in to Llamaste web UI: `http://llamaste.local/`
+2. Open DevTools → Application → Cookies → copy `llamaste_sid` value
+3. Add to Claude Desktop config with a `Cookie` header (see below)
+
+### Claude Desktop Configuration
+
+Edit `~/.config/Claude/claude_desktop_config.json` (Linux/Mac) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "llamaste": {
+      "type": "http",
+      "url": "http://llamaste.local/mcp",
+      "headers": {
+        "Cookie": "llamaste_sid=<your-session-token>"
+      }
+    }
+  }
+}
+```
+
+Replace `llamaste.local` with the device IP if mDNS isn't available. The System panel in the Llamaste web UI shows a pre-filled config snippet for your device.
+
+### Protocol Example
+
+```bash
+# Initialize a session
+curl -X POST http://llamaste.local/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Cookie: llamaste_sid=<token>' \
+  -D - \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26",
+                 "clientInfo":{"name":"test","version":"1.0"},
+                 "capabilities":{}}}'
+# Response headers include: Mcp-Session-Id: <32-hex-char-id>
+
+# List tools (use session ID from initialize)
+curl -X POST http://llamaste.local/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Cookie: llamaste_sid=<token>' \
+  -H 'Mcp-Session-Id: <session-id>' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+# Returns: {"result":{"tools":[{"name":"fs.list_directory",...},...44 total]}}
+
+# Call a tool
+curl -X POST http://llamaste.local/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Cookie: llamaste_sid=<token>' \
+  -H 'Mcp-Session-Id: <session-id>' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
+       "params":{"name":"system.info","arguments":{}}}'
+```
+
+### Session Management
+
+- Sessions created on `initialize`, keyed by 32-hex-char ID
+- Session ID sent in `Mcp-Session-Id` response header
+- Idle sessions expired after 30 minutes
+- Session state is in-memory only (not persisted across restarts)
+
+### Tool Schema Mapping
+
+Tools are derived from the same `ToolRegistry` used by the agent loop. The OpenAI-format `parameters` field is mapped to MCP's `inputSchema`:
+
+| OpenAI format | MCP format |
+|---------------|------------|
+| `function.name` | `name` |
+| `function.description` | `description` |
+| `function.parameters` | `inputSchema` |
+
+---
+
 ## Configuration
 
 ### llamaste.json
