@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 2 IN PROGRESS — Auth/Console DONE, Desktop DONE, Model Download DONE, DATA auto-resize DONE, 128 host tests/9 suites
+- **Phase**: Phase 3a COMPLETE — Voice I/O (STT+always-listening+TTS+Web UI), MCP server (44 tools), mDNS DNS-SD, proactive SSE notifications all done. 138 tests/10 suites.
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 1 build plan**: `D:\Llamaste\docs\plans\2026-02-26-phase1-implementation-plan.md` (12 tasks, done)
@@ -41,7 +41,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `SESSION-STATUS.md` — Detailed progress tracker with next steps
 - `INSTALL.md` — User installation guide
 - `DEVELOPER.md` — Technical reference (architecture, API, tools, build, boot)
-- `llamaste.iso` — 39 MB live ISO with installer (built from scripts/build-iso.sh)
+- `llamaste.iso` — 964 MB live ISO with installer (built from scripts/build-iso.sh)
 - `docs/plans/2026-02-26-phase1-implementation-plan.md` — Phase 1 build plan (complete)
 - `docs/plans/2026-02-26-phase1-implementation-design.md` — Phase 1 design doc
 - `docs/plans/2026-03-05-console-auth-design.md` — Auth + console design doc
@@ -50,7 +50,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `research/` — All research documents (01 through 26)
 - `docs/plans/2026-03-08-model-download-design.md` — Model download design doc
 - `docs/plans/2026-03-08-model-download-plan.md` — Model download implementation plan
-- `src/llamaste/` — Production C++ source (~8,000 LOC)
+- `src/llamaste/` — Production C++ source (~9,000 LOC)
 
 ## Build Patterns & Gotchas
 - **Buildroot invocation**: `cd /root/llamaste-build/output && make` (NOT from buildroot/ source dir)
@@ -81,21 +81,19 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - 16GB VDI with installed system, boots in ~1 second
 - Start: `"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" startvm Llamaste --type gui`
 - Web UI: `http://localhost:8080`
+- **VDI update scripts**: `scripts/deploy-to-vdi.sh` (WSL2, converts VDI→raw→dd partition→new VDI) + `scripts/finish-deploy.sh` (PowerShell copy step)
+- **VBoxHeadless locks VDI**: must stop VM first — check: `powershell.exe -NoProfile -Command "tasklist | Select-String VBox"`, stop: `VBoxManage controlvm Llamaste poweroff`
+- **UUID fix after VDI replace**: `VBoxManage internalcommands sethduuid "D:\Llamaste\vm\Llamaste\llamaste-disk.vdi" "144eeb0b-4df1-4213-ab6e-ac0c3ed35bf0"` — VDI registered UUID must match header
+- **NTFS rename fails from WSL2**: use PowerShell `Copy-Item -Path $new -Destination $old -Force` + `Remove-Item` instead of `mv`/`Move-Item`
 
 ## Known Bugs
-1. **Dashboard download 401**: fetch() to `/llamaste/model/recommended` and `/download-recommended` returns 401 — needs `credentials: 'include'` in dashboard.js
-2. **VirtualBox console blank**: supervisor.cpp `console_display_thread()` writes VT100 to `/dev/console` but nothing visible in VBox GUI — needs debug
+(None currently known)
 
 ## Next Steps
 ### Immediate
-1. Fix dashboard download auth (quick JS fix)
-2. Fix VirtualBox console display
-3. Download test model and test real inference end-to-end
-4. OS installation process reminder
-
-### Phase 2 (continued)
-5. Voice I/O (whisper.cpp + piper)
-6. App management tools
+1. **Phase 3: Mesh clustering** — UDP multicast discovery, llama-rpc-server, coordinator election
+2. **Phase 4: A/B updates** — SYS-B partition reserved, GRUB `llamaste_slot` in design (see research/20)
+3. **Upgrade Flite TTS** — replace `cmu_us_kal` 8kHz voice with sherpa-onnx or Piper for quality
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
