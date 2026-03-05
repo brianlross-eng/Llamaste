@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (Phase 3 MCP server complete — 44 tools exposed via MCP Streamable HTTP)
+**Last updated**: 2026-03-05 (end-of-shift wrap-up: skills, docs, CLAUDE.md, GitHub push)
 
 ---
 
@@ -105,7 +105,26 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 
 ---
 
-## Latest Session — Phase 3 MCP Server (0d418fc)
+## Latest Session — MCP API Key (e8680ce)
+
+### MCP API Key Implementation
+- **Bearer token auth**: `Authorization: Bearer <64-hex-key>` accepted by `/mcp` alongside session cookies
+- **Key persistence**: stored at `/data/llamaste/mcp_key.txt`, generated on first use, survives reboots
+- **`McpAuthCheck`**: changed auth type from handler-wrapping to `function<bool(Request)>` predicate — cleaner, no circular deps
+- **`load_or_create_api_key()`**: reads file, validates 64-hex, generates + persists if missing/invalid
+- **`regenerate_api_key()`**: new 64-hex key, atomically replaces in memory + file, old key rejected immediately
+- **Key management routes** in child_main.cpp (cookie-auth):
+  - `GET /llamaste/mcp/key` → `{"key":"<full>","key_prefix":"<8>...","active":true}`
+  - `POST /llamaste/mcp/key/regenerate` → same JSON with new key
+- **System panel** MCP card: full key shown in blue monospace, Copy button (clipboard + textarea fallback for HTTP), Regen button (confirms → POST → updates display + snippet), config snippet auto-includes `Authorization` header with live key
+
+### Verified (localhost:8080):
+- `Bearer <key>` → 200 on ping, initialize, tools/list (44 tools), tools/call
+- Cookie auth still works for web UI users
+- Regenerate: old key → 401 immediately, new key → 200
+- `GET /llamaste/mcp/key` → correct JSON, key persisted in `/data/llamaste/mcp_key.txt`
+
+## Previous Session — Phase 3 MCP Server (0d418fc)
 
 ### MCP Server Implementation
 - **Transport**: Streamable HTTP (MCP spec 2025-03-26), single endpoint `POST /mcp`
@@ -117,15 +136,39 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 - **CORS**: full CORS headers for browser-based MCP clients
 - **New files**: mcp_server.h, mcp_server.cpp (~400 LOC), 6 files modified
 
-### Verified (server mode, localhost:8080):
-- `GET /mcp` → `{"server":"llamaste","protocol":"2025-03-26",...}`
-- `initialize` → `Mcp-Session-Id` header, capabilities, instructions
-- `tools/list` → 44 tools (audio, fs, process, network, system, config, model, schedule, auth, install)
-- `tools/call system.info` → `{"isError":false,"content":[{"type":"text","text":"..."}]}`
-- `tools/call fs.list_directory /data/` → lists models, config, tmp, llamaste dirs
-- `resources/read llamaste://system/status` → live system info
-- notifications → 202 Accepted
-- unknown method → `-32601 Method not found`
+## Latest Session — mDNS DNS-SD + Proactive Notifications (916b671, 7c75e09)
+
+### mDNS DNS-SD Advertisement (916b671)
+- **`MdnsServiceRecord`** struct + `advertise_service()` method in net_mdns.h/cpp
+- PTR/SRV/TXT/A record support — full DNS-SD (RFC 6763) response building
+- Proactive announcement sent twice on startup (UDP loss tolerance)
+- Query handling: PTR + ANY queries for `_mcp._tcp.local` service
+- `child_main.cpp`: `mdns.advertise_service("_mcp._tcp", 80, {"path=/mcp","version=2025-03-26","auth=bearer"})`
+- Serial log: `[mdns] Advertising llamaste._mcp._tcp.local on port 80 (txt: 3 entries)`
+
+### Proactive Health Notifications (7c75e09)
+- **`push_notification()`**: public method on Scheduler, safe to call from any thread
+- **`set_model_check_fn()`**: callback `std::function<bool()>` → model-loaded check without coupling
+- **Model-not-loaded alert**: fires 60s after startup, at most every 30 min if no model loaded
+  - `type="alert"`, `title="No AI Model Loaded"`, `body="...Dashboard → Download a model..."`
+- **Startup toast**: queued in `pending_notifications_` before `svr.listen()` blocks
+  - `type="info"`, `title="Llamaste Ready"`, `body="Server running at http://<ip>/ — no model loaded yet"`
+- Verified: startup toast drains on first SSE connect; model alert fires at 60s
+
+### VDI Deploy Lesson (this session)
+- VDI can't be overwritten from WSL2 while VM is running (file locked by VBoxHeadless)
+- **Correct flow**: stop VM → update VDI → fix UUID → restart
+- UUID fix: `VBoxManage internalcommands sethduuid <vdi> <uuid>` after replacing VDI file
+- `scripts/deploy-to-vdi.sh`: helper for the VDI update workflow
+- **NTFS rename from WSL2 fails**: use PowerShell `Copy-Item -Force` + `Remove-Item` instead of `mv`
+- Skill saved: `~/.claude/skills/virtualbox-vdi-partition-update/SKILL.md`
+- Git credential bridge: `/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe` (config as global credential.helper)
+
+### End-of-Session Docs (6208570, 86655ec)
+- **DEVELOPER.md**: updated net_mdns DNS-SD, MCP Bearer auth + DNS-SD discovery, scheduler push_notification() API, full version history
+- **INSTALL.md**: What's New rewritten, MCP connection guide, notifications table, tools count 32→44, known limitations refreshed
+- **CLAUDE.md**: Phase status → Phase 3a COMPLETE, VDI workflow, NTFS rename gotcha, UUID fix, known bugs cleared, next steps updated
+- All 22 commits pushed to GitHub (`86655ec`)
 
 ## Next Steps
 
@@ -133,7 +176,6 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 1. **Phase 3: Mesh clustering** — UDP multicast discovery, llama-rpc-server, coordinator election
 2. **Phase 4: A/B updates** — SYS-B partition already reserved, GRUB `llamaste_slot` variable in design
 3. Upgrade Flite TTS → higher quality voice (sherpa-onnx or Piper if ONNX builds)
-4. MCP API key (dedicated bearer token, no browser session needed for Claude Desktop)
 
 ---
 
