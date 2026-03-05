@@ -456,6 +456,60 @@ html, body {
   50% { opacity: 0.5; }
 }
 
+/* TTS (speak responses) button — sits between mic and send */
+#tts-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+#tts-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+#tts-btn.active {
+  background: rgba(88, 166, 255, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#tts-btn.speaking {
+  background: rgba(63, 185, 80, 0.15);
+  border-color: #3fb950;
+  color: #3fb950;
+  animation: tts-pulse 1s ease infinite;
+}
+
+@keyframes tts-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Voice pipeline status indicator in status bar (dot) */
+#voice-indicator {
+  font-size: 9px;
+  margin-right: 6px;
+  display: none; /* hidden until voice pipeline is active */
+  transition: color 0.3s;
+  cursor: default;
+}
+
+#voice-indicator.listening    { color: #3fb950; display: inline; }
+#voice-indicator.recording    { color: var(--danger); display: inline; animation: mic-pulse 1.5s ease infinite; }
+#voice-indicator.transcribing { color: var(--warning); display: inline; }
+#voice-indicator.processing   { color: var(--warning); display: inline; }
+#voice-indicator.speaking     { color: var(--accent); display: inline; animation: tts-pulse 1s ease infinite; }
+#voice-indicator.error        { color: var(--danger); display: inline; }
+
 #send-btn {
   background: var(--accent);
   border: none;

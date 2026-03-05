@@ -175,6 +175,9 @@
       setMessageContent(currentAssistantEl, '<span style="color:var(--text-muted)">No response received.</span>');
     }
 
+    // Speak response if TTS is enabled (capture buffer before clearing)
+    if (currentTextBuffer) speakResponse(currentTextBuffer);
+
     currentAssistantEl = null;
     currentTextBuffer = '';
     setStreaming(false);
@@ -539,6 +542,109 @@
       view.setUint8(offset + i, str.charCodeAt(i));
     }
   }
+
+  // --- TTS: Speak LLM responses aloud ---
+  var ttsEnabled = false;
+  var ttsAudio = null;
+  var ttsBtn = document.getElementById('tts-btn');
+  var voiceIndicator = document.getElementById('voice-indicator');
+
+  window.toggleTts = function () {
+    ttsEnabled = !ttsEnabled;
+    if (ttsBtn) {
+      if (ttsEnabled) {
+        ttsBtn.classList.add('active');
+      } else {
+        ttsBtn.classList.remove('active', 'speaking');
+        if (ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
+      }
+    }
+  };
+
+  // Strip basic markdown to get plain text for TTS synthesis
+  function plainText(text) {
+    return text
+      .replace(/```[\s\S]*?```/g, '')        // remove fenced code blocks
+      .replace(/`([^`]+)`/g, '$1')           // inline code
+      .replace(/\*\*([^*]+)\*\*/g, '$1')     // bold
+      .replace(/\*([^*]+)\*/g, '$1')         // italic
+      .replace(/#+\s/g, '')                  // headers
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // links
+      .replace(/\n+/g, ' ')
+      .trim();
+  }
+
+  function speakResponse(text) {
+    if (!ttsEnabled || !text) return;
+
+    var plain = plainText(text);
+    // Truncate to keep synthesis fast (flite is slow on long text)
+    if (plain.length > 500) plain = plain.substring(0, 500);
+    if (!plain) return;
+
+    if (ttsBtn) ttsBtn.classList.add('speaking');
+
+    fetch('/llamaste/audio/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ text: plain })
+    })
+    .then(function (r) {
+      if (!r.ok) {
+        if (r.status === 503) {
+          // Voice pipeline unavailable (server mode) — disable toggle
+          ttsEnabled = false;
+          if (ttsBtn) ttsBtn.classList.remove('active', 'speaking');
+          appendMessage('system', 'TTS unavailable (desktop mode required). Auto-speak disabled.');
+        }
+        throw new Error('HTTP ' + r.status);
+      }
+      return r.blob();
+    })
+    .then(function (blob) {
+      if (ttsBtn) ttsBtn.classList.remove('speaking');
+      var url = URL.createObjectURL(blob);
+      ttsAudio = new Audio(url);
+      ttsAudio.onended = function () { URL.revokeObjectURL(url); ttsAudio = null; };
+      ttsAudio.onerror = function () { URL.revokeObjectURL(url); ttsAudio = null; };
+      ttsAudio.play().catch(function (e) {
+        // Autoplay blocked by browser policy — silent fail
+        console.warn('[tts] autoplay blocked:', e.message);
+        URL.revokeObjectURL(url);
+        ttsAudio = null;
+      });
+    })
+    .catch(function (err) {
+      if (ttsBtn) ttsBtn.classList.remove('speaking');
+      console.warn('[tts] error:', err.message);
+    });
+  }
+
+  // --- Voice status indicator (polls /llamaste/audio/status every 5s) ---
+  function updateVoiceIndicator() {
+    fetch('/llamaste/audio/status', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !voiceIndicator) return;
+        var state = data.state || 'disabled';
+        // Clear all state classes
+        voiceIndicator.className = '';
+        if (state === 'disabled') {
+          voiceIndicator.style.display = 'none';
+        } else {
+          voiceIndicator.classList.add(state);
+          voiceIndicator.title = 'Voice: ' + state;
+        }
+      })
+      .catch(function () {
+        if (voiceIndicator) voiceIndicator.style.display = 'none';
+      });
+  }
+
+  // Start polling after 2s (let server settle), then every 5s
+  setTimeout(updateVoiceIndicator, 2000);
+  setInterval(updateVoiceIndicator, 5000);
 
   function transcribeAudio(blob) {
     var formData = new FormData();

@@ -1497,6 +1497,34 @@ int child_main(const SupervisorConfig& config) {
     }));
 
     // --- Voice I/O audio endpoints ---
+
+    // Helper: encode int16 PCM samples as in-memory WAV bytes
+    // Used by /llamaste/audio/tts to return audio/wav to the browser.
+    // (Defined as a lambda so it can capture nothing and be self-contained.)
+    auto encode_wav_for_http = [](const std::vector<int16_t>& samples, int sample_rate) -> std::string {
+        uint32_t data_size = (uint32_t)(samples.size() * 2);
+        std::string wav(44 + data_size, '\0');
+        char* p = &wav[0];
+        auto put32 = [&](uint32_t v) { memcpy(p, &v, 4); p += 4; };
+        auto put16 = [&](uint16_t v) { memcpy(p, &v, 2); p += 2; };
+        memcpy(p, "RIFF", 4); p += 4;
+        put32(36 + data_size);
+        memcpy(p, "WAVE", 4); p += 4;
+        memcpy(p, "fmt ", 4); p += 4;
+        put32(16);                              // fmt chunk size
+        put16(1);                               // PCM
+        put16(1);                               // mono
+        put32((uint32_t)sample_rate);           // sample rate
+        put32((uint32_t)sample_rate * 2);       // byte rate (rate * channels * bps/8)
+        put16(2);                               // block align
+        put16(16);                              // bits per sample
+        memcpy(p, "data", 4); p += 4;
+        put32(data_size);
+        memcpy(p, samples.data(), data_size);
+        return wav;
+    };
+
+
     svr.Post("/llamaste/audio/transcribe", require_auth(
         [](const httplib::Request& req, httplib::Response& res) {
             if (req.has_file("audio")) {
@@ -1553,6 +1581,49 @@ int child_main(const SupervisorConfig& config) {
             }
             std::string result = g_tools.dispatch("audio.speak", req.body);
             res.set_content(result, "application/json");
+        }
+    ));
+
+    // POST /llamaste/audio/tts — synthesize text and return WAV binary for browser playback
+    svr.Post("/llamaste/audio/tts", require_auth(
+        [encode_wav_for_http](const httplib::Request& req, httplib::Response& res) {
+#ifndef _WIN32
+            extern VoicePipeline* g_voice;
+            if (!g_voice) {
+                res.status = 503;
+                res.set_content(R"json({"error":"voice pipeline not available (desktop mode required)"})json",
+                                "application/json");
+                return;
+            }
+            auto body = json::parse(req.body, nullptr, false);
+            if (body.is_discarded() || !body.contains("text")) {
+                res.status = 400;
+                res.set_content(R"json({"error":"text field required"})json", "application/json");
+                return;
+            }
+            std::string text = body["text"].get<std::string>();
+            if (text.empty()) {
+                res.status = 400;
+                res.set_content(R"json({"error":"text must not be empty"})json", "application/json");
+                return;
+            }
+            // Cap synthesis length to avoid very long audio
+            if (text.size() > 1000) text = text.substr(0, 1000);
+
+            int sample_rate = 8000; // default; overwritten by flite actual rate
+            auto pcm = g_voice->speak(text, &sample_rate);
+            if (pcm.empty()) {
+                res.status = 500;
+                res.set_content(R"json({"error":"TTS synthesis failed or TTS not configured"})json",
+                                "application/json");
+                return;
+            }
+            std::string wav = encode_wav_for_http(pcm, sample_rate);
+            res.set_content(wav, "audio/wav");
+#else
+            res.status = 501;
+            res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
+#endif
         }
     ));
 
@@ -1715,9 +1786,12 @@ int child_main(const SupervisorConfig& config) {
     }));
 
     // --- Error handler ---
+    // Only sets a default body for responses where the handler didn't set one.
+    // This preserves custom error bodies from API endpoints (e.g. 503 from /tts).
     svr.set_error_handler([](const httplib::Request& /*req*/, httplib::Response& res) {
+        if (!res.body.empty()) return; // handler already set a body — preserve it
         json err;
-        err["error"] = "Not found";
+        err["error"] = (res.status == 404) ? "Not found" : "Error";
         err["status"] = res.status;
         res.set_content(err.dump(), "application/json");
     });

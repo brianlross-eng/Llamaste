@@ -301,7 +301,7 @@ std::string VoicePipeline::transcribe(const std::vector<float>& samples) {
 #endif
 }
 
-std::vector<int16_t> VoicePipeline::speak(const std::string& text) {
+std::vector<int16_t> VoicePipeline::speak(const std::string& text, int* out_sample_rate) {
 #ifdef HAVE_FLITE
     if (!impl_->flite_voice) {
         fprintf(stderr, "[voice] TTS: flite voice not loaded\n");
@@ -326,6 +326,9 @@ std::vector<int16_t> VoicePipeline::speak(const std::string& text) {
 
     fprintf(stderr, "[voice] TTS: %d samples @ %dHz (%.1fs)\n",
             num_samples, sample_rate, (float)num_samples / sample_rate);
+
+    // Expose sample rate to caller (for WAV encoding in HTTP endpoint)
+    if (out_sample_rate) *out_sample_rate = sample_rate;
 
     // Play through ALSA if available
 #ifdef HAVE_ALSA

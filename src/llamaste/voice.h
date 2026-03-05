@@ -61,8 +61,8 @@ public:
     std::string transcribe(const std::vector<float>& samples);
 
     // One-shot TTS: synthesize text to WAV (for HTTP endpoint)
-    // Returns raw PCM samples (16kHz or 22050Hz, mono, int16)
-    std::vector<int16_t> speak(const std::string& text);
+    // Returns raw PCM samples (mono, int16). Sample rate written to out_sample_rate if non-null.
+    std::vector<int16_t> speak(const std::string& text, int* out_sample_rate = nullptr);
 
     // Configuration
     VoiceConfig config() const;
