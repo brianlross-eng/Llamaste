@@ -121,6 +121,31 @@
     }
   }
 
+  // --- MCP card update ---
+  function renderMcpCard(data) {
+    var urlEl = document.getElementById('mcp-endpoint-url');
+    var snippetEl = document.getElementById('mcp-config-snippet');
+    if (!urlEl || !snippetEl) return;
+
+    // Use the device's actual IP if available, fallback to llamaste.local
+    var host = 'llamaste.local';
+    if (data && data.ip && data.ip !== '0.0.0.0' && data.ip !== '--') {
+      host = data.ip;
+    }
+    var mcpUrl = 'http://' + host + '/mcp';
+    urlEl.textContent = mcpUrl;
+
+    // Update the config snippet with the real URL
+    snippetEl.textContent = JSON.stringify({
+      mcpServers: {
+        llamaste: {
+          type: 'http',
+          url: mcpUrl
+        }
+      }
+    }, null, 2);
+  }
+
   function makeDashRow(label, value) {
     var row = document.createElement('div');
     row.className = 'dash-row';
@@ -158,9 +183,11 @@
       })
       .then(function (data) {
         renderAbout(data);
+        renderMcpCard(data);
       })
       .catch(function () {
         renderAbout(null);
+        renderMcpCard(null);
       });
 
     // Fetch scheduled tasks separately

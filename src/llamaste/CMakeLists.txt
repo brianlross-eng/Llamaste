@@ -23,6 +23,7 @@ set(LLAMASTE_SOURCES
     tools_model_download.cpp
     tools_audio.cpp
     voice.cpp
+    mcp_server.cpp
     agent.cpp
     prompt_builder.cpp
     net_mdns.cpp

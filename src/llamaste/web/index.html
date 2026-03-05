@@ -231,6 +231,24 @@
             <p class="text-muted">Llamaste LLM-OS v0.1 — The LLM is your operating system.</p>
           </div>
 
+          <div class="system-card" id="mcp-card">
+            <h3>MCP Server</h3>
+            <p class="text-muted" style="margin-bottom:8px">Connect Claude Desktop or other MCP clients to Llamaste's tools.</p>
+            <div class="dash-row">
+              <span class="label">Endpoint</span>
+              <span class="value" id="mcp-endpoint-url" style="font-family:monospace;font-size:0.8em">http://llamaste.local/mcp</span>
+            </div>
+            <p class="text-muted" style="margin-top:8px;font-size:0.8em">Add to <code>claude_desktop_config.json</code>:</p>
+            <pre id="mcp-config-snippet" style="background:#0d1117;border:1px solid #2a3a4a;border-radius:4px;padding:8px;font-size:0.75em;overflow-x:auto;margin-top:4px;color:#e0e0e0;white-space:pre-wrap">{
+  "mcpServers": {
+    "llamaste": {
+      "type": "http",
+      "url": "http://llamaste.local/mcp"
+    }
+  }
+}</pre>
+          </div>
+
           <div class="system-card">
             <h3>Power</h3>
             <div style="display:flex;gap:12px;margin-top:8px">

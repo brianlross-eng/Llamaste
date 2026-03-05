@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "auth.h"
 #include "voice.h"
+#include "mcp_server.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -1785,6 +1786,15 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(g_scheduler.delete_task(id), "application/json");
     }));
 
+    // --- MCP server (Model Context Protocol, spec 2025-03-26) ---
+    // Exposes all Llamaste tools to Claude Desktop and other MCP clients.
+    // Endpoint: POST /mcp (Streamable HTTP transport)
+    // Claude Desktop config:
+    //   { "mcpServers": { "llamaste": { "type": "http", "url": "http://llamaste.local/mcp",
+    //       "headers": { "Cookie": "session=<value>" } } } }
+    g_mcp = new McpServer(g_tools);
+    g_mcp->add_routes(svr, require_auth);
+
     // --- Error handler ---
     // Only sets a default body for responses where the handler didn't set one.
     // This preserves custom error bodies from API endpoints (e.g. 503 from /tts).
@@ -1811,6 +1821,7 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] HTTP server listening on 0.0.0.0:%d\n", port);
     fprintf(stderr, "[child] Web UI: http://localhost:%d/\n", port);
     fprintf(stderr, "[child] Health: http://localhost:%d/health\n", port);
+    fprintf(stderr, "[child] MCP:    http://localhost:%d/mcp  (Claude Desktop)\n", port);
     fprintf(stderr, "[child] Running in %s mode\n",
             config.model_path.empty() ? "stub (no model)" : "inference");
 
