@@ -21,6 +21,8 @@ set(LLAMASTE_SOURCES
     tools_schedule.cpp
     tools_auth.cpp
     tools_model_download.cpp
+    tools_audio.cpp
+    voice.cpp
     agent.cpp
     prompt_builder.cpp
     net_mdns.cpp
@@ -96,6 +98,40 @@ if(NOT CURL_FOUND)
     else()
         message(STATUS "libcurl not found - model download disabled, search/browse only with pre-placed models")
     endif()
+endif()
+
+# whisper.cpp for speech-to-text (Voice I/O)
+find_library(WHISPER_LIB NAMES whisper)
+find_library(GGML_LIB NAMES ggml)
+find_library(GGML_BASE_LIB NAMES ggml-base)
+find_library(GGML_CPU_LIB NAMES ggml-cpu)
+if(WHISPER_LIB)
+    message(STATUS "Found whisper: ${WHISPER_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_WHISPER)
+    target_link_libraries(llamaste PRIVATE ${WHISPER_LIB})
+    if(GGML_LIB)
+        target_link_libraries(llamaste PRIVATE ${GGML_LIB})
+    endif()
+    if(GGML_CPU_LIB)
+        target_link_libraries(llamaste PRIVATE ${GGML_CPU_LIB})
+    endif()
+    if(GGML_BASE_LIB)
+        target_link_libraries(llamaste PRIVATE ${GGML_BASE_LIB})
+    endif()
+    # whisper/ggml deps
+    target_link_libraries(llamaste PRIVATE m dl)
+else()
+    message(STATUS "whisper not found — speech-to-text disabled")
+endif()
+
+# ALSA for audio capture/playback (Voice I/O)
+find_library(ALSA_LIB NAMES asound)
+if(ALSA_LIB)
+    message(STATUS "Found ALSA: ${ALSA_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_ALSA)
+    target_link_libraries(llamaste PRIVATE ${ALSA_LIB})
+else()
+    message(STATUS "ALSA not found — audio capture disabled")
 endif()
 
 # Web asset embedding (production builds)

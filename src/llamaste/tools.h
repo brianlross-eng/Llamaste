@@ -54,6 +54,7 @@ void register_config_tools(ToolRegistry& reg);
 void register_model_tools(ToolRegistry& reg);
 void register_install_tools(ToolRegistry& reg);
 void register_model_download_tools(ToolRegistry& reg);
+void register_audio_tools(ToolRegistry& reg);
 
 class Scheduler;
 void register_schedule_tools(ToolRegistry& reg, Scheduler& sched);
