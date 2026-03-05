@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (Voice I/O Phase 3a-2, ISO rebuild)
+**Last updated**: 2026-03-05 (Phase 3a complete — STT + always-listening + Flite TTS + Web UI voice integration)
 
 ---
 
@@ -18,14 +18,48 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 |-----------|--------|
 | 3a-1: STT Foundation | DONE — whisper.cpp package, voice.h/cpp, WAV parser, HTTP endpoints, mic button |
 | 3a-2: Always-Listening | DONE — ALSA capture thread, energy VAD, wake phrase detection, agent loop wiring |
-| 3a-3: Piper TTS | NOT STARTED — ONNX Runtime musl build (high risk), espeak-ng, GPL isolation |
-| 3a-4: Web UI Voice | PARTIAL — mic button exists, needs TTS audio playback |
+| 3a-3: Flite TTS | DONE — Flite (BSD) linked into binary, cmu_us_kal voice, ALSA playback, agent auto-speak |
+| 3a-4: Web UI Voice | DONE — /audio/tts WAV endpoint, TTS toggle button, voice status indicator, error handler fix |
 
 **Key design decision**: Voice pipeline only initializes in desktop mode (saves ~200MB RAM on headless server).
 
 ---
 
-## Latest Session (2026-03-05)
+## Latest Session (2026-03-05) — Phase 3a Complete
+
+### Phase 3a-3: Flite TTS
+- **Flite** (BSD-4-Clause) linked directly into binary — no GPL isolation needed
+- `cmu_us_kal` voice (8kHz, robotic but functional)
+- `VoicePipeline::speak()` calls `flite_text_to_wave()`, plays via ALSA `snd_pcm_open(PLAYBACK)`
+- `audio.speak` tool writes WAV to `/data/tmp/tts_*.wav`
+- Agent command callback speaks LLM response after each voice command
+- Squashfs: 91MB (up from 78MB, flite voice data) | Binary: 4.1MB (flite linked dynamically)
+- Commits: `123e66c`
+
+### Phase 3a-4: Web UI Voice Integration
+- **`/llamaste/audio/tts`** — new POST endpoint, returns `audio/wav` binary for browser playback
+- WAV encoding: in-memory (no disk write needed for browser path), uses `voice.speak()` + encode_wav_for_http()
+- **`#tts-btn`** — speaker icon toggle button in chat input area (between mic and send)
+- **Auto-speak**: after stream finishes, if TTS enabled, POSTs response text to /audio/tts and plays via `new Audio()`
+- **Markdown stripping**: plain text extraction before synthesis (removes code blocks, bold, italic, headers)
+- **500 char truncation** to avoid very long synthesis
+- **`#voice-indicator`** — colored dot in status bar, polls `/audio/status` every 5s
+  - Green dot = listening, Red pulsing = recording, Blue = speaking, hidden = disabled
+- **Error handler fix**: `set_error_handler` now preserves custom response bodies (was overwriting all non-200)
+- **voice.speak() API**: added `int* out_sample_rate` parameter (backward compatible)
+- **VDI deployment lesson**: dynamic VDIs need qemu-nbd for partition writes (not raw dd with data offset)
+- Commits: `70561ad`
+
+### Key Commits This Session
+- `123e66c` — Phase 3a-3 Flite TTS
+- `70561ad` — Phase 3a-4 Web UI voice integration
+
+### VDI Recovery Needed
+- Dynamic VDI was briefly corrupted by naive dd (wrong data offset assumption)
+- Recovery: VBoxManage convertfromraw + resize, then qemu-nbd for future updates
+- **Correct update pattern**: `qemu-nbd -c /dev/nbd0 <VDI>` → `dd to /dev/nbd0p3` → `qemu-nbd -d /dev/nbd0`
+
+## Previous Session (Phase 3a-1 + 3a-2)
 
 ### Features Added
 1. **Always-listening voice pipeline** (voice.cpp):
