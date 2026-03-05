@@ -84,6 +84,7 @@ private:
     Impl* impl_ = nullptr;
 
     void voice_thread_fn();
+    void play_audio(const int16_t* samples, size_t count, int sample_rate);
 };
 
 // Convert WAV file bytes to float32 PCM samples for whisper

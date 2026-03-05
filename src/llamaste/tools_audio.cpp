@@ -45,7 +45,13 @@ static std::string handle_audio_status(const std::string& args_json) {
         result["always_listening"] = false;
         result["wake_phrase"] = "llamaste";
     }
-    result["piper_available"] = false;  // Phase 3a-3
+#ifdef HAVE_FLITE
+    result["tts_available"] = true;
+    result["tts_engine"] = "flite";
+#else
+    result["tts_available"] = false;
+    result["tts_engine"] = "none";
+#endif
     return result.dump();
 }
 
@@ -108,21 +114,54 @@ static std::string handle_audio_speak(const std::string& args_json) {
     }
 
     if (!g_voice) {
-        return R"json({"error": "Voice pipeline not initialized — Piper TTS not available"})json";
+        return R"json({"error": "Voice pipeline not initialized"})json";
     }
 
-    // Phase 3a-3: Piper TTS implementation
     auto pcm = g_voice->speak(text);
     if (pcm.empty()) {
-        return R"json({"error": "TTS not yet implemented (Phase 3a-3)"})json";
+        return R"json({"error": "TTS synthesis failed — flite not available"})json";
     }
 
     // Write WAV to /data/tmp/
     std::string out_path = "/data/tmp/tts_" + std::to_string(time(nullptr)) + ".wav";
+#ifndef _WIN32
+    {
+        std::ofstream ofs(out_path, std::ios::binary);
+        if (ofs) {
+            // Write WAV header + PCM data
+            uint32_t data_size = (uint32_t)(pcm.size() * 2);
+            uint32_t file_size = data_size + 36;
+            uint16_t channels = 1;
+            uint32_t sample_rate = 16000; // flite cmu_us_kal outputs 16kHz
+            uint16_t bps = 16;
+            uint32_t byte_rate = sample_rate * channels * bps / 8;
+            uint16_t block_align = channels * bps / 8;
+
+            ofs.write("RIFF", 4);
+            ofs.write(reinterpret_cast<const char*>(&file_size), 4);
+            ofs.write("WAVE", 4);
+            ofs.write("fmt ", 4);
+            uint32_t fmt_size = 16;
+            ofs.write(reinterpret_cast<const char*>(&fmt_size), 4);
+            uint16_t audio_fmt = 1;
+            ofs.write(reinterpret_cast<const char*>(&audio_fmt), 2);
+            ofs.write(reinterpret_cast<const char*>(&channels), 2);
+            ofs.write(reinterpret_cast<const char*>(&sample_rate), 4);
+            ofs.write(reinterpret_cast<const char*>(&byte_rate), 4);
+            ofs.write(reinterpret_cast<const char*>(&block_align), 2);
+            ofs.write(reinterpret_cast<const char*>(&bps), 2);
+            ofs.write("data", 4);
+            ofs.write(reinterpret_cast<const char*>(&data_size), 4);
+            ofs.write(reinterpret_cast<const char*>(pcm.data()), data_size);
+        }
+    }
+#endif
 
     json result;
     result["audio_file"] = out_path;
     result["text"] = text;
+    result["samples"] = (int)pcm.size();
+    result["duration_seconds"] = (double)pcm.size() / 16000.0;
     return result.dump();
 }
 

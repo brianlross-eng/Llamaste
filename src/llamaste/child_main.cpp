@@ -952,7 +952,10 @@ int child_main(const SupervisorConfig& config) {
                                 response.c_str(),
                                 response.size() > 80 ? "..." : "");
 
-                        // TODO Phase 3a-3: pipe response to Piper TTS for audio output
+                        // Speak the response via TTS
+                        if (!response.empty()) {
+                            voice_pipeline.speak(response);
+                        }
                     });
 
                     // Start the always-listening thread (ALSA capture + VAD)

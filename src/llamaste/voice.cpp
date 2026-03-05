@@ -2,7 +2,7 @@
 //
 // Phase 3a-1: WAV parsing + whisper.cpp transcription
 // Phase 3a-2: ALSA capture + energy VAD + always-listening + wake phrase
-// Phase 3a-3: Piper TTS subprocess (future)
+// Phase 3a-3: Flite TTS (BSD, linked directly) + ALSA playback
 
 #include "voice.h"
 #include "json.hpp"
@@ -22,6 +22,14 @@ using json = nlohmann::json;
 
 #ifdef HAVE_ALSA
 #include <alsa/asoundlib.h>
+#endif
+
+#ifdef HAVE_FLITE
+extern "C" {
+#include <flite/flite.h>
+}
+// Flite voice registration (defined in libflite_cmu_us_kal)
+extern "C" cst_voice* register_cmu_us_kal(const char* voxdir);
 #endif
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,10 @@ struct VoicePipeline::Impl {
 #ifdef HAVE_ALSA
     snd_pcm_t* capture_handle = nullptr;
 #endif
+#ifdef HAVE_FLITE
+    cst_voice* flite_voice = nullptr;
+    bool flite_initialized = false;
+#endif
     std::thread voice_thread;
     std::atomic<bool> running{false};
 
@@ -215,14 +227,29 @@ bool VoicePipeline::init(const VoiceConfig& config) {
     }
 
     fprintf(stderr, "[voice] Whisper model loaded successfully\n");
-    state_.store(VoiceState::LISTENING);
-    return true;
 #else
     last_error_ = "whisper.cpp not compiled in (HAVE_WHISPER not defined)";
     fprintf(stderr, "[voice] %s\n", last_error_.c_str());
     state_.store(VoiceState::DISABLED);
     return false;
 #endif
+
+    // Initialize Flite TTS
+#ifdef HAVE_FLITE
+    if (!impl_->flite_initialized) {
+        flite_init();
+        impl_->flite_voice = register_cmu_us_kal(nullptr);
+        if (impl_->flite_voice) {
+            impl_->flite_initialized = true;
+            fprintf(stderr, "[voice] Flite TTS initialized (cmu_us_kal voice)\n");
+        } else {
+            fprintf(stderr, "[voice] Flite TTS: failed to register voice\n");
+        }
+    }
+#endif
+
+    state_.store(VoiceState::LISTENING);
+    return true;
 }
 
 std::string VoicePipeline::transcribe(const std::vector<float>& samples) {
@@ -275,9 +302,106 @@ std::string VoicePipeline::transcribe(const std::vector<float>& samples) {
 }
 
 std::vector<int16_t> VoicePipeline::speak(const std::string& text) {
-    // TODO: Phase 3a-3 — Piper TTS implementation
+#ifdef HAVE_FLITE
+    if (!impl_->flite_voice) {
+        fprintf(stderr, "[voice] TTS: flite voice not loaded\n");
+        return {};
+    }
+
+    state_.store(VoiceState::SPEAKING);
+    fprintf(stderr, "[voice] TTS: synthesizing %zu chars\n", text.size());
+
+    cst_wave* wave = flite_text_to_wave(text.c_str(), impl_->flite_voice);
+    if (!wave) {
+        fprintf(stderr, "[voice] TTS: flite_text_to_wave failed\n");
+        state_.store(VoiceState::LISTENING);
+        return {};
+    }
+
+    // Extract PCM samples from flite wave
+    int num_samples = wave->num_samples;
+    int sample_rate = wave->sample_rate;
+    std::vector<int16_t> pcm(wave->samples, wave->samples + num_samples);
+    delete_wave(wave);
+
+    fprintf(stderr, "[voice] TTS: %d samples @ %dHz (%.1fs)\n",
+            num_samples, sample_rate, (float)num_samples / sample_rate);
+
+    // Play through ALSA if available
+#ifdef HAVE_ALSA
+    play_audio(pcm.data(), pcm.size(), sample_rate);
+#endif
+
+    state_.store(VoiceState::LISTENING);
+    return pcm;
+#else
     (void)text;
     return {};
+#endif
+}
+
+// Play PCM audio through ALSA playback device
+void VoicePipeline::play_audio(const int16_t* samples, size_t count,
+                                int sample_rate) {
+#ifdef HAVE_ALSA
+    snd_pcm_t* playback = nullptr;
+    int err = snd_pcm_open(&playback, "default",
+                            SND_PCM_STREAM_PLAYBACK, 0);
+    if (err < 0) {
+        fprintf(stderr, "[voice] ALSA playback open failed: %s\n",
+                snd_strerror(err));
+        return;
+    }
+
+    // Configure playback: match flite output format
+    snd_pcm_hw_params_t* hw_params;
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(playback, hw_params);
+    snd_pcm_hw_params_set_access(playback, hw_params,
+                                  SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(playback, hw_params,
+                                  SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(playback, hw_params, 1);
+    unsigned int rate = (unsigned int)sample_rate;
+    snd_pcm_hw_params_set_rate_near(playback, hw_params, &rate, nullptr);
+
+    err = snd_pcm_hw_params(playback, hw_params);
+    if (err < 0) {
+        fprintf(stderr, "[voice] ALSA playback hw_params failed: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(playback);
+        return;
+    }
+
+    snd_pcm_prepare(playback);
+
+    // Write audio in chunks
+    const size_t CHUNK = 1024;
+    size_t offset = 0;
+    while (offset < count) {
+        size_t frames = std::min(CHUNK, count - offset);
+        snd_pcm_sframes_t written = snd_pcm_writei(
+            playback, samples + offset, frames);
+        if (written < 0) {
+            written = snd_pcm_recover(playback, (int)written, 1);
+            if (written < 0) {
+                fprintf(stderr, "[voice] ALSA write error: %s\n",
+                        snd_strerror((int)written));
+                break;
+            }
+        }
+        offset += (size_t)written;
+    }
+
+    // Drain remaining audio
+    snd_pcm_drain(playback);
+    snd_pcm_close(playback);
+    fprintf(stderr, "[voice] ALSA playback complete\n");
+#else
+    (void)samples;
+    (void)count;
+    (void)sample_rate;
+#endif
 }
 
 void VoicePipeline::start() {

@@ -134,6 +134,24 @@ else()
     message(STATUS "ALSA not found — audio capture disabled")
 endif()
 
+# Flite TTS (BSD-licensed, linked directly)
+find_library(FLITE_LIB NAMES flite)
+find_library(FLITE_USENGLISH_LIB NAMES flite_usenglish)
+find_library(FLITE_CMULEX_LIB NAMES flite_cmulex)
+find_library(FLITE_CMU_US_KAL_LIB NAMES flite_cmu_us_kal)
+if(FLITE_LIB)
+    message(STATUS "Found flite: ${FLITE_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_FLITE)
+    target_link_libraries(llamaste PRIVATE
+        ${FLITE_CMU_US_KAL_LIB}
+        ${FLITE_USENGLISH_LIB}
+        ${FLITE_CMULEX_LIB}
+        ${FLITE_LIB}
+        m)
+else()
+    message(STATUS "flite not found — text-to-speech disabled")
+endif()
+
 # Web asset embedding (production builds)
 # When web_embed.cpp/h are generated, add them and define LLAMASTE_HAS_EMBED
 set(WEB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web")
