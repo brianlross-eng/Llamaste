@@ -1,0 +1,7 @@
+config BR2_PACKAGE_WHISPER_CPP
+	bool "whisper-cpp"
+	help
+	  whisper.cpp — C/C++ port of OpenAI's Whisper speech
+	  recognition model. Provides static library (libwhisper.a)
+	  for linking into the llamaste binary.
+	  https://github.com/ggml-org/whisper.cpp
