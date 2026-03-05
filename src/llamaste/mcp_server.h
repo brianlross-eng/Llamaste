@@ -8,7 +8,10 @@
 //
 // Endpoint: POST /mcp  (on the main HTTP server, port 80)
 //
-// Configure in Claude Desktop's config:
+// Auth: accepts EITHER a valid session cookie (web UI users) OR
+//       an Authorization: Bearer <api-key> header (headless clients).
+//
+// Configure in Claude Desktop (headless, no browser needed):
 //   ~/.config/Claude/claude_desktop_config.json (Linux/Mac)
 //   %APPDATA%\Claude\claude_desktop_config.json (Windows)
 //
@@ -17,13 +20,13 @@
 //       "llamaste": {
 //         "type": "http",
 //         "url": "http://llamaste.local/mcp",
-//         "headers": { "Cookie": "session=<your-session-token>" }
+//         "headers": { "Authorization": "Bearer <api-key>" }
 //       }
 //     }
 //   }
 //
-// Session tokens can be found in the browser DevTools after logging in.
-// A dedicated MCP API key (future feature) will simplify headless auth.
+// The API key is shown in the System panel and can be regenerated there.
+// It is stored at /data/llamaste/mcp_key.txt and persists across reboots.
 
 #include "tools.h"
 #include "httplib.h"
@@ -41,32 +44,59 @@ using json = nlohmann::json;
 // MCP protocol version this server speaks
 static constexpr const char* MCP_PROTOCOL_VERSION = "2025-03-26";
 
-// Handler type aliases (matching httplib conventions)
-using McpHandler     = std::function<void(const httplib::Request&, httplib::Response&)>;
-using McpAuthWrapper = std::function<McpHandler(McpHandler)>;
+// Handler type alias (matching httplib conventions)
+using McpHandler = std::function<void(const httplib::Request&, httplib::Response&)>;
+
+// Auth check: returns true if the request is from an authenticated user.
+// This is called with each request; the implementation checks the session cookie.
+using McpAuthCheck = std::function<bool(const httplib::Request&)>;
 
 // ---------------------------------------------------------------------------
 // McpServer
 // ---------------------------------------------------------------------------
-// Stateful MCP server.  A single instance is created in child_main and
-// kept alive for the lifetime of the process.  All member functions are
-// thread-safe (httplib serves requests concurrently).
 class McpServer {
 public:
     // tools: reference to the global ToolRegistry (must outlive McpServer)
     explicit McpServer(const ToolRegistry& tools);
 
     // Register /mcp (POST + GET + OPTIONS) on svr.
-    // require_auth: an auth-wrapping callable — the same lambda used for
-    //   all other protected routes in child_main.cpp.
-    void add_routes(httplib::Server& svr, McpAuthWrapper require_auth);
+    // auth_check: callable that returns true if the session cookie is valid.
+    //   The server builds its own wrapper that also accepts Bearer token auth.
+    void add_routes(httplib::Server& svr, McpAuthCheck auth_check);
 
     // Diagnostic: total POST /mcp requests handled
     uint64_t request_count() const { return request_count_.load(); }
 
+    // ---------------------------------------------------------------------------
+    // API key management (called from HTTP management routes in child_main.cpp)
+    // ---------------------------------------------------------------------------
+
+    // Returns JSON: {"key":"<full-key>","key_prefix":"<first8>","active":true}
+    // First call generates and persists the key if it doesn't exist.
+    json get_api_key_info();
+
+    // Generates a new random key, persists it, returns the full key.
+    // Returns JSON: {"key":"<full-key>","key_prefix":"<first8>","active":true}
+    json regenerate_api_key();
+
 private:
     const ToolRegistry& tools_;
     std::atomic<uint64_t> request_count_{0};
+
+    // ---------------------------------------------------------------------------
+    // API key state
+    // ---------------------------------------------------------------------------
+    std::string api_key_;          // 64-hex-char bearer token (empty until first use)
+    std::string api_key_file_;     // "/data/llamaste/mcp_key.txt"
+    mutable std::mutex api_key_mu_;
+    McpAuthCheck auth_check_;      // Cookie-based auth function from child_main.cpp
+
+    // Load key from file, or generate + persist a new one if missing/invalid
+    std::string load_or_create_api_key();
+    // Write key to api_key_file_ and update api_key_
+    std::string write_new_key();
+    // Build the key info JSON (must be called with api_key_mu_ held)
+    json key_info_locked() const;
 
     // ---------------------------------------------------------------------------
     // Session management
@@ -75,8 +105,8 @@ private:
         std::string id;
         bool initialized = false;
         std::chrono::steady_clock::time_point last_access;
-        std::string client_name;    // from clientInfo.name
-        std::string client_version; // from clientInfo.version
+        std::string client_name;
+        std::string client_version;
     };
 
     std::unordered_map<std::string, McpSession> sessions_;
@@ -87,9 +117,6 @@ private:
     // ---------------------------------------------------------------------------
     void handle_post(const httplib::Request& req, httplib::Response& res);
 
-    // Dispatch a single JSON-RPC request.
-    // out_session_id is set by handle_initialize() so the caller can include
-    // the Mcp-Session-Id header in the HTTP response.
     json dispatch_rpc(const json& request,
                       const std::string& session_id,
                       std::string& out_session_id);
@@ -109,22 +136,17 @@ private:
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
-
-    // Build the MCP tools array from the ToolRegistry.
-    // Parses the OpenAI-format tool schemas and reformats for MCP.
     json build_tools_array() const;
 
-    // Session helpers
     std::string create_session(const json& client_info);
     void touch_session(const std::string& id);
     void expire_old_sessions();
 
-    // JSON-RPC response builders
     static json rpc_result(const json& id, const json& result);
     static json rpc_error(const json& id, int code, const std::string& message);
 
-    // Generate a random 32-hex-char session ID
-    static std::string gen_session_id();
+    // Generate a random 64-hex-char key (32 bytes entropy)
+    static std::string gen_random_hex(int bytes = 32);
 };
 
 // Global MCP server instance — created in child_main.cpp, nullptr until

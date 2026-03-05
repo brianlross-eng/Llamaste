@@ -122,6 +122,8 @@
   }
 
   // --- MCP card update ---
+  var g_mcpUrl = 'http://llamaste.local/mcp';  // kept in sync by renderMcpCard
+
   function renderMcpCard(data) {
     var urlEl = document.getElementById('mcp-endpoint-url');
     var snippetEl = document.getElementById('mcp-config-snippet');
@@ -132,18 +134,108 @@
     if (data && data.ip && data.ip !== '0.0.0.0' && data.ip !== '--') {
       host = data.ip;
     }
-    var mcpUrl = 'http://' + host + '/mcp';
-    urlEl.textContent = mcpUrl;
+    g_mcpUrl = 'http://' + host + '/mcp';
+    urlEl.textContent = g_mcpUrl;
 
-    // Update the config snippet with the real URL
-    snippetEl.textContent = JSON.stringify({
+    // Snippet will be fully populated once fetchMcpKey() completes;
+    // set a placeholder with just the URL for now.
+    updateMcpSnippet(null);
+  }
+
+  // Build + set the config snippet.  apiKey may be null (show placeholder).
+  function updateMcpSnippet(apiKey) {
+    var snippetEl = document.getElementById('mcp-config-snippet');
+    if (!snippetEl) return;
+    var cfg = {
       mcpServers: {
         llamaste: {
           type: 'http',
-          url: mcpUrl
+          url: g_mcpUrl,
+          headers: { Authorization: 'Bearer ' + (apiKey || '<api-key>') }
         }
       }
-    }, null, 2);
+    };
+    snippetEl.textContent = JSON.stringify(cfg, null, 2);
+  }
+
+  // Fetch the API key and update the key row + snippet.
+  function fetchMcpKey() {
+    var keyEl   = document.getElementById('mcp-api-key');
+    var copyBtn = document.getElementById('mcp-copy-key');
+    var regenBtn = document.getElementById('mcp-regen-key');
+    if (!keyEl) return;
+
+    fetch('/llamaste/mcp/key', { credentials: 'include' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        var key = d.key || '';
+        keyEl.textContent = key;
+        updateMcpSnippet(key);
+      })
+      .catch(function () {
+        keyEl.textContent = '(unavailable)';
+      });
+
+    // Wire up Copy button (idempotent — guard with a flag)
+    if (copyBtn && !copyBtn._wired) {
+      copyBtn._wired = true;
+      copyBtn.addEventListener('click', function () {
+        var key = (document.getElementById('mcp-api-key') || {}).textContent || '';
+        if (!key || key === '—' || key === '(unavailable)') return;
+        navigator.clipboard.writeText(key).then(function () {
+          var orig = copyBtn.textContent;
+          copyBtn.textContent = 'Copied!';
+          setTimeout(function () { copyBtn.textContent = orig; }, 1500);
+        }).catch(function () {
+          // Fallback for HTTP (no clipboard API)
+          var ta = document.createElement('textarea');
+          ta.value = key;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          var orig = copyBtn.textContent;
+          copyBtn.textContent = 'Copied!';
+          setTimeout(function () { copyBtn.textContent = orig; }, 1500);
+        });
+      });
+    }
+
+    // Wire up Regen button (idempotent)
+    if (regenBtn && !regenBtn._wired) {
+      regenBtn._wired = true;
+      regenBtn.addEventListener('click', function () {
+        if (!confirm('Generate a new API key? The old key will stop working immediately.')) return;
+        regenBtn.disabled = true;
+        regenBtn.textContent = '…';
+        fetch('/llamaste/mcp/key/regenerate', {
+          method: 'POST',
+          credentials: 'include'
+        })
+          .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then(function (d) {
+            var key = d.key || '';
+            var keyEl2 = document.getElementById('mcp-api-key');
+            if (keyEl2) keyEl2.textContent = key;
+            updateMcpSnippet(key);
+            regenBtn.disabled = false;
+            regenBtn.textContent = 'Regen';
+          })
+          .catch(function () {
+            regenBtn.disabled = false;
+            regenBtn.textContent = 'Regen';
+            alert('Failed to regenerate key.');
+          });
+      });
+    }
   }
 
   function makeDashRow(label, value) {
@@ -175,7 +267,7 @@
   // Called when switching to the System tab.
   // Fetches fresh data and updates the sections that dashboard.js does NOT handle.
   function systemRefresh() {
-    // Fetch system info for About section
+    // Fetch system info for About section + MCP URL
     fetch('/llamaste/system', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -184,10 +276,12 @@
       .then(function (data) {
         renderAbout(data);
         renderMcpCard(data);
+        fetchMcpKey();   // populate key row + wire buttons after URL is set
       })
       .catch(function () {
         renderAbout(null);
         renderMcpCard(null);
+        fetchMcpKey();
       });
 
     // Fetch scheduled tasks separately

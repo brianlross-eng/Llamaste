@@ -1788,12 +1788,39 @@ int child_main(const SupervisorConfig& config) {
 
     // --- MCP server (Model Context Protocol, spec 2025-03-26) ---
     // Exposes all Llamaste tools to Claude Desktop and other MCP clients.
+    // Auth: Bearer token (preferred, headless) OR session cookie (web UI users).
     // Endpoint: POST /mcp (Streamable HTTP transport)
     // Claude Desktop config:
     //   { "mcpServers": { "llamaste": { "type": "http", "url": "http://llamaste.local/mcp",
-    //       "headers": { "Cookie": "session=<value>" } } } }
+    //       "headers": { "Authorization": "Bearer <api-key>" } } } }
+    // API key shown in System panel → MCP Server card.
     g_mcp = new McpServer(g_tools);
-    g_mcp->add_routes(svr, require_auth);
+    g_mcp->add_routes(svr, [](const httplib::Request& req) -> bool {
+        return g_auth.is_authenticated(req);
+    });
+
+    // MCP key management (cookie-auth only — used by System panel)
+    svr.Get("/llamaste/mcp/key", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+            if (!g_mcp) {
+                res.status = 503;
+                res.set_content(R"json({"error":"MCP not running"})json", "application/json");
+                return;
+            }
+            res.set_content(g_mcp->get_api_key_info().dump(), "application/json");
+        }
+    ));
+
+    svr.Post("/llamaste/mcp/key/regenerate", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+            if (!g_mcp) {
+                res.status = 503;
+                res.set_content(R"json({"error":"MCP not running"})json", "application/json");
+                return;
+            }
+            res.set_content(g_mcp->regenerate_api_key().dump(), "application/json");
+        }
+    ));
 
     // --- Error handler ---
     // Only sets a default body for responses where the handler didn't set one.

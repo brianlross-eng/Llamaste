@@ -238,12 +238,21 @@
               <span class="label">Endpoint</span>
               <span class="value" id="mcp-endpoint-url" style="font-family:monospace;font-size:0.8em">http://llamaste.local/mcp</span>
             </div>
+            <div class="dash-row" style="margin-top:6px;align-items:center">
+              <span class="label" style="flex-shrink:0">API Key</span>
+              <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
+                <span id="mcp-api-key" style="font-family:monospace;font-size:0.72em;word-break:break-all;flex:1;color:#6ea8fe">—</span>
+                <button id="mcp-copy-key" class="btn" style="padding:2px 10px;font-size:0.75em;flex-shrink:0" title="Copy key to clipboard">Copy</button>
+                <button id="mcp-regen-key" class="btn btn-warning" style="padding:2px 10px;font-size:0.75em;flex-shrink:0" title="Generate a new API key">Regen</button>
+              </div>
+            </div>
             <p class="text-muted" style="margin-top:8px;font-size:0.8em">Add to <code>claude_desktop_config.json</code>:</p>
             <pre id="mcp-config-snippet" style="background:#0d1117;border:1px solid #2a3a4a;border-radius:4px;padding:8px;font-size:0.75em;overflow-x:auto;margin-top:4px;color:#e0e0e0;white-space:pre-wrap">{
   "mcpServers": {
     "llamaste": {
       "type": "http",
-      "url": "http://llamaste.local/mcp"
+      "url": "http://llamaste.local/mcp",
+      "headers": { "Authorization": "Bearer <api-key>" }
     }
   }
 }</pre>

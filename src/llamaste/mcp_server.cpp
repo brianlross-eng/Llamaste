@@ -1,37 +1,42 @@
 // mcp_server.cpp — Model Context Protocol server for Llamaste
 //
-// Implements the MCP Streamable HTTP transport (spec 2025-03-26).
-// All Llamaste tools are exposed as MCP tools.
+// MCP Streamable HTTP transport (2025-03-26):
+//   POST /mcp   — All JSON-RPC 2.0 MCP requests
+//   GET  /mcp   — Discovery / health check
 //
-// Protocol flow (Streamable HTTP):
-//   1. MCP client sends POST /mcp with {"method":"initialize",...}
-//   2. Server responds with capabilities + Mcp-Session-Id header
-//   3. Client sends subsequent requests with the session ID header
-//   4. tools/list   → list of all Llamaste tools
-//   5. tools/call   → dispatch to ToolRegistry.dispatch()
+// Auth (two accepted methods, checked on every /mcp request):
+//   1. Session cookie  — same as web UI (for browser users)
+//   2. Bearer token    — Authorization: Bearer <api-key>
+//                        Key stored in /data/llamaste/mcp_key.txt
+//                        Generated on first use, persists across reboots.
 //
-// See mcp_server.h for configuration instructions.
+// Key management routes (cookie-auth only, in child_main.cpp):
+//   GET  /llamaste/mcp/key          → masked key info (show in System panel)
+//   POST /llamaste/mcp/key/regenerate → generate + return new key
 
 #include "mcp_server.h"
 
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
-#include <random>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <random>
 #include <algorithm>
-#include <cstring>
+#include <chrono>
 
 using json = nlohmann::json;
 
 // Global instance (created and owned by child_main.cpp)
 McpServer* g_mcp = nullptr;
 
-// ---------------------------------------------------------------------------
-// JSON-RPC 2.0 standard error codes
-// ---------------------------------------------------------------------------
+// Default key file path
+static constexpr const char* MCP_KEY_FILE = "/data/llamaste/mcp_key.txt";
+
+// JSON-RPC 2.0 error codes
 static constexpr int JSONRPC_PARSE_ERROR      = -32700;
 static constexpr int JSONRPC_INVALID_REQUEST  = -32600;
 static constexpr int JSONRPC_METHOD_NOT_FOUND = -32601;
@@ -41,32 +46,72 @@ static constexpr int JSONRPC_INTERNAL_ERROR   = -32603;
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
-McpServer::McpServer(const ToolRegistry& tools) : tools_(tools) {}
+McpServer::McpServer(const ToolRegistry& tools)
+    : tools_(tools), api_key_file_(MCP_KEY_FILE) {}
 
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
-void McpServer::add_routes(httplib::Server& svr, McpAuthWrapper require_auth) {
+void McpServer::add_routes(httplib::Server& svr, McpAuthCheck auth_check) {
+    auth_check_ = auth_check;
+
+    // Eagerly load or create the API key so it's ready before first request
+    load_or_create_api_key();
+
     auto self = this;
 
-    // ----- POST /mcp — main MCP endpoint -----
-    svr.Post("/mcp", require_auth([self](const httplib::Request& req, httplib::Response& res) {
+    // Custom auth wrapper: accepts EITHER session cookie OR Bearer token
+    auto mcp_auth = [self](McpHandler handler) -> McpHandler {
+        return [self, handler](const httplib::Request& req, httplib::Response& res) {
+            // --- Check 1: Bearer token ---
+            bool bearer_ok = false;
+            if (req.has_header("Authorization")) {
+                std::string auth_hdr = req.get_header_value("Authorization");
+                // "Bearer <token>" — must be exactly 64 hex chars
+                if (auth_hdr.size() > 7 &&
+                    auth_hdr.substr(0, 7) == "Bearer ") {
+                    std::string token = auth_hdr.substr(7);
+                    std::lock_guard<std::mutex> lock(self->api_key_mu_);
+                    bearer_ok = (!token.empty() && token == self->api_key_);
+                }
+            }
+
+            // --- Check 2: Session cookie ---
+            bool cookie_ok = self->auth_check_ && self->auth_check_(req);
+
+            if (!bearer_ok && !cookie_ok) {
+                res.status = 401;
+                res.set_header("Access-Control-Allow-Origin", "*");
+                json err;
+                err["error"] = "Unauthorized";
+                err["hint"]  = "Use Authorization: Bearer <api-key> or a valid session cookie";
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+
+            handler(req, res);
+        };
+    };
+
+    // ----- POST /mcp -----
+    svr.Post("/mcp", mcp_auth([self](const httplib::Request& req, httplib::Response& res) {
         self->handle_post(req, res);
     }));
 
-    // ----- GET /mcp — discovery / health -----
-    svr.Get("/mcp", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
+    // ----- GET /mcp -----
+    svr.Get("/mcp", mcp_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         json info;
         info["server"]    = "llamaste";
         info["version"]   = "0.1.0";
         info["protocol"]  = MCP_PROTOCOL_VERSION;
         info["transport"] = "streamable-http";
         info["endpoint"]  = "/mcp";
-        info["docs"]      = "POST JSON-RPC 2.0 to /mcp to connect an MCP client";
+        info["auth"]      = "Bearer token or session cookie";
+        info["docs"]      = "POST JSON-RPC 2.0 to /mcp";
         res.set_content(info.dump(), "application/json");
     }));
 
-    // ----- OPTIONS /mcp — CORS preflight (browser-based MCP clients) -----
+    // ----- OPTIONS /mcp -----
     svr.Options("/mcp", [](const httplib::Request& /*req*/, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin",  "*");
         res.set_header("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
@@ -77,48 +122,128 @@ void McpServer::add_routes(httplib::Server& svr, McpAuthWrapper require_auth) {
 }
 
 // ---------------------------------------------------------------------------
+// API key management
+// ---------------------------------------------------------------------------
+std::string McpServer::load_or_create_api_key() {
+    std::lock_guard<std::mutex> lock(api_key_mu_);
+    if (!api_key_.empty()) return api_key_;
+
+    // Try to read existing key from file
+    std::ifstream f(api_key_file_);
+    if (f.good()) {
+        std::string key;
+        f >> key;
+        // Valid key: exactly 64 lowercase hex chars
+        if (key.size() == 64 &&
+            key.find_first_not_of("0123456789abcdef") == std::string::npos) {
+            api_key_ = key;
+            return api_key_;
+        }
+    }
+
+    // File missing or invalid — generate and persist a new key
+    std::string new_key = gen_random_hex(32); // 32 bytes = 64 hex chars
+
+#ifndef _WIN32
+    // Ensure /data/llamaste/ directory exists
+    mkdir("/data/llamaste", 0700);
+#endif
+
+    std::ofstream out(api_key_file_);
+    if (out.good()) {
+        out << new_key << "\n";
+        out.flush();
+    } else {
+        fprintf(stderr, "[mcp] Warning: could not write API key to %s\n",
+                api_key_file_.c_str());
+    }
+
+    api_key_ = new_key;
+    fprintf(stderr, "[mcp] API key generated and saved to %s\n", api_key_file_.c_str());
+    return api_key_;
+}
+
+json McpServer::key_info_locked() const {
+    json info;
+    if (api_key_.empty()) {
+        info["active"] = false;
+        info["key_prefix"] = "";
+        info["key"] = "";
+    } else {
+        info["active"]     = true;
+        info["key_prefix"] = api_key_.substr(0, 8) + "...";
+        info["key"]        = api_key_;  // full key — shown once to user, they copy it
+    }
+    return info;
+}
+
+json McpServer::get_api_key_info() {
+    load_or_create_api_key();
+    std::lock_guard<std::mutex> lock(api_key_mu_);
+    return key_info_locked();
+}
+
+json McpServer::regenerate_api_key() {
+    std::string new_key = gen_random_hex(32);
+
+    {
+        std::lock_guard<std::mutex> lock(api_key_mu_);
+        api_key_ = new_key;
+
+#ifndef _WIN32
+        mkdir("/data/llamaste", 0700);
+#endif
+        std::ofstream out(api_key_file_);
+        if (out.good()) {
+            out << new_key << "\n";
+            out.flush();
+        } else {
+            fprintf(stderr, "[mcp] Warning: could not write regenerated API key to %s\n",
+                    api_key_file_.c_str());
+        }
+
+        fprintf(stderr, "[mcp] API key regenerated\n");
+        return key_info_locked();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core POST handler
 // ---------------------------------------------------------------------------
 void McpServer::handle_post(const httplib::Request& req, httplib::Response& res) {
     ++request_count_;
 
-    // CORS headers so browser clients can reach us
     res.set_header("Access-Control-Allow-Origin",   "*");
     res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
-    // Parse incoming JSON-RPC body
     if (req.body.empty()) {
         auto err = rpc_error(nullptr, JSONRPC_INVALID_REQUEST, "Empty request body");
         res.set_content(err.dump(), "application/json");
         return;
     }
 
-    json body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+    json body = json::parse(req.body, nullptr, false);
     if (body.is_discarded()) {
         auto err = rpc_error(nullptr, JSONRPC_PARSE_ERROR, "JSON parse error");
         res.set_content(err.dump(), "application/json");
         return;
     }
 
-    // Session ID from request header (may be empty for initialize)
     std::string session_id;
     if (req.has_header("Mcp-Session-Id")) {
         session_id = req.get_header_value("Mcp-Session-Id");
         touch_session(session_id);
     }
 
-    // Handle batch requests (array of JSON-RPC objects)
+    // Batch requests
     if (body.is_array()) {
         json batch_response = json::array();
         for (const auto& rpc : body) {
             if (!rpc.is_object()) continue;
-
             if (!rpc.contains("id")) {
-                // Notification — no response
                 handle_notification(rpc, session_id);
                 continue;
             }
-
             std::string new_sid;
             json resp = dispatch_rpc(rpc, session_id, new_sid);
             if (!new_sid.empty()) {
@@ -131,14 +256,13 @@ void McpServer::handle_post(const httplib::Request& req, httplib::Response& res)
         return;
     }
 
-    // Single request
     if (!body.is_object()) {
         auto err = rpc_error(nullptr, JSONRPC_INVALID_REQUEST, "Expected JSON object or array");
         res.set_content(err.dump(), "application/json");
         return;
     }
 
-    // Notification (no id field) — client doesn't expect a response body
+    // Notification
     if (!body.contains("id")) {
         handle_notification(body, session_id);
         res.status = 202;
@@ -147,11 +271,9 @@ void McpServer::handle_post(const httplib::Request& req, httplib::Response& res)
 
     std::string new_session_id;
     json response = dispatch_rpc(body, session_id, new_session_id);
-
     if (!new_session_id.empty()) {
         res.set_header("Mcp-Session-Id", new_session_id);
     }
-
     res.set_content(response.dump(), "application/json");
 }
 
@@ -161,7 +283,6 @@ void McpServer::handle_post(const httplib::Request& req, httplib::Response& res)
 json McpServer::dispatch_rpc(const json& request,
                               const std::string& session_id,
                               std::string& out_session_id) {
-    // Validate jsonrpc field
     if (!request.contains("jsonrpc") || request["jsonrpc"] != "2.0") {
         return rpc_error(request.value("id", json(nullptr)),
                          JSONRPC_INVALID_REQUEST, "Not JSON-RPC 2.0");
@@ -202,7 +323,6 @@ json McpServer::dispatch_rpc(const json& request,
         if (method == "prompts/list") {
             return rpc_result(id, handle_prompts_list(params));
         }
-        // Unrecognised method
         return rpc_error(id, JSONRPC_METHOD_NOT_FOUND,
                          "Method not found: " + method);
 
@@ -214,43 +334,35 @@ json McpServer::dispatch_rpc(const json& request,
     } catch (...) {
         return rpc_error(id, JSONRPC_INTERNAL_ERROR, "Unknown internal error");
     }
+
+    (void)session_id;
 }
 
-void McpServer::handle_notification(const json& request,
-                                    const std::string& session_id) {
-    // Notifications are fire-and-forget; we just acknowledge them silently.
-    std::string method = request.value("method", "");
-    (void)method;
-    (void)session_id;
-    // Future: handle notifications/cancelled to abort long-running tool calls
+void McpServer::handle_notification(const json& /*request*/,
+                                    const std::string& /*session_id*/) {
+    // Notifications are fire-and-forget (e.g. notifications/initialized)
 }
 
 // ---------------------------------------------------------------------------
 // MCP method: initialize
 // ---------------------------------------------------------------------------
 json McpServer::handle_initialize(const json& params, std::string& out_session_id) {
-    // Create a new session for this client
     json client_info = params.value("clientInfo", json::object());
     out_session_id = create_session(client_info);
 
-    // Build the initialize response
     json result;
     result["protocolVersion"] = MCP_PROTOCOL_VERSION;
 
-    // Server capabilities
     json caps;
-    caps["tools"]     = json::object();  // tools/list + tools/call
-    caps["resources"] = json::object();  // resources/list + resources/read
-    // No logging, sampling, or experimental features
+    caps["tools"]     = json::object();
+    caps["resources"] = json::object();
     result["capabilities"] = caps;
 
-    // Server identity
     json server_info;
     server_info["name"]    = "llamaste";
     server_info["version"] = "0.1.0";
     result["serverInfo"] = server_info;
 
-    // Instructions shown to the LLM using this server
     result["instructions"] =
         "Llamaste LLM-OS system management tools. "
         "Manage files, processes, network, configuration, models, and audio on a "
@@ -266,7 +378,7 @@ json McpServer::handle_initialize(const json& params, std::string& out_session_i
 // MCP method: ping
 // ---------------------------------------------------------------------------
 json McpServer::handle_ping(const json& /*params*/) {
-    return json::object();  // Empty object per spec
+    return json::object();
 }
 
 // ---------------------------------------------------------------------------
@@ -289,16 +401,13 @@ json McpServer::handle_tools_call(const json& params) {
     std::string tool_name = params["name"].get<std::string>();
     json args = params.value("arguments", json::object());
 
-    // Dispatch to the ToolRegistry
     std::string result_str = tools_.dispatch(tool_name, args.dump());
 
-    // Check whether the result is an error JSON
     json result_json = json::parse(result_str, nullptr, false);
     bool is_error = !result_json.is_discarded()
                  && result_json.is_object()
                  && result_json.contains("error");
 
-    // Return MCP content array
     json content_item;
     content_item["type"] = "text";
     content_item["text"] = result_str;
@@ -315,7 +424,6 @@ json McpServer::handle_tools_call(const json& params) {
 json McpServer::handle_resources_list(const json& /*params*/) {
     json resources = json::array();
 
-    // System status snapshot
     json sys;
     sys["uri"]         = "llamaste://system/status";
     sys["name"]        = "System Status";
@@ -323,7 +431,6 @@ json McpServer::handle_resources_list(const json& /*params*/) {
     sys["mimeType"]    = "application/json";
     resources.push_back(sys);
 
-    // Tool catalog
     json tools_res;
     tools_res["uri"]         = "llamaste://tools/catalog";
     tools_res["name"]        = "Tool Catalog";
@@ -344,15 +451,11 @@ json McpServer::handle_resources_read(const json& params) {
         throw std::invalid_argument("Missing required parameter: uri (string)");
     }
     std::string uri = params["uri"].get<std::string>();
-
     std::string content_text;
 
     if (uri == "llamaste://system/status") {
-        // Use system.info tool
-        std::string info = tools_.dispatch("system.info", "{}");
-        content_text = info;
+        content_text = tools_.dispatch("system.info", "{}");
     } else if (uri == "llamaste://tools/catalog") {
-        // Return OpenAI-format tool schemas for inspection
         content_text = tools_.to_openai_tools_json();
     } else {
         throw std::invalid_argument("Unknown resource URI: " + uri);
@@ -381,9 +484,6 @@ json McpServer::handle_prompts_list(const json& /*params*/) {
 // Build MCP tools array from ToolRegistry
 // ---------------------------------------------------------------------------
 json McpServer::build_tools_array() const {
-    // Parse OpenAI tool schemas from the registry and reformat for MCP.
-    // OpenAI format: [{"type":"function","function":{"name":..., "description":..., "parameters":...}}]
-    // MCP format:    [{"name":..., "description":..., "inputSchema":...}]
     std::string openai_json = tools_.to_openai_tools_json();
     json openai_tools = json::parse(openai_json, nullptr, false);
 
@@ -397,7 +497,6 @@ json McpServer::build_tools_array() const {
             tool["name"]        = func.value("name",        "");
             tool["description"] = func.value("description", "");
             tool["inputSchema"] = func.value("parameters",  json::object());
-
             mcp_tools.push_back(std::move(tool));
         }
     }
@@ -411,11 +510,11 @@ std::string McpServer::create_session(const json& client_info) {
     expire_old_sessions();
 
     McpSession sess;
-    sess.id            = gen_session_id();
-    sess.initialized   = true;
-    sess.last_access   = std::chrono::steady_clock::now();
-    sess.client_name   = client_info.value("name",    "unknown");
-    sess.client_version= client_info.value("version", "");
+    sess.id             = gen_random_hex(16); // 32-hex session ID
+    sess.initialized    = true;
+    sess.last_access    = std::chrono::steady_clock::now();
+    sess.client_name    = client_info.value("name",    "unknown");
+    sess.client_version = client_info.value("version", "");
 
     std::lock_guard<std::mutex> lock(sessions_mu_);
     std::string id = sess.id;
@@ -454,29 +553,37 @@ json McpServer::rpc_result(const json& id, const json& result) {
 }
 
 json McpServer::rpc_error(const json& id, int code, const std::string& message) {
-    json error_obj;
-    error_obj["code"]    = code;
-    error_obj["message"] = message;
+    json err_obj;
+    err_obj["code"]    = code;
+    err_obj["message"] = message;
 
     json response;
     response["jsonrpc"] = "2.0";
     response["id"]      = id;
-    response["error"]   = error_obj;
+    response["error"]   = err_obj;
     return response;
 }
 
-std::string McpServer::gen_session_id() {
-    // 32 random hex chars = 128 bits of entropy
+// ---------------------------------------------------------------------------
+// Random hex generation
+// ---------------------------------------------------------------------------
+std::string McpServer::gen_random_hex(int bytes) {
     static std::mt19937_64 rng(
         std::chrono::steady_clock::now().time_since_epoch().count()
+#ifndef _WIN32
+        ^ ((uint64_t)getpid() << 32)
+#endif
     );
     static std::mutex rng_mu;
 
     std::lock_guard<std::mutex> lock(rng_mu);
     std::uniform_int_distribution<uint64_t> dist;
     std::ostringstream oss;
-    oss << std::hex << std::setfill('0')
-        << std::setw(16) << dist(rng)
-        << std::setw(16) << dist(rng);
-    return oss.str();
+    oss << std::hex << std::setfill('0');
+    for (int i = 0; i < bytes; i += 8) {
+        oss << std::setw(16) << dist(rng);
+    }
+    std::string s = oss.str();
+    s.resize(bytes * 2);  // trim to exact length
+    return s;
 }
