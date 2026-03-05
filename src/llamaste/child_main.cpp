@@ -1003,6 +1003,9 @@ int child_main(const SupervisorConfig& config) {
     g_scheduler.set_notify_fn([](const Notification& /*notif*/) {
         // Notifications are drained by the SSE endpoint; no-op callback
     });
+    g_scheduler.set_model_check_fn([]() -> bool {
+        return g_model_loaded.load();
+    });
     g_scheduler.start();
 
     // Initialize device authentication
@@ -1854,6 +1857,24 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] MCP:    http://localhost:%d/mcp  (Claude Desktop)\n", port);
     fprintf(stderr, "[child] Running in %s mode\n",
             config.model_path.empty() ? "stub (no model)" : "inference");
+
+    // Push one-time startup notification — shown as a toast when the first
+    // SSE client connects.  Queued here so it's waiting before any browser opens.
+    {
+        std::string local_ip = MdnsResponder::get_local_ip();
+        std::string url = "http://" + local_ip +
+                          (port == 80 ? "" : ":" + std::to_string(port)) + "/";
+        Notification startup_notif;
+        startup_notif.id    = "startup";
+        startup_notif.type  = "info";
+        startup_notif.title = "Llamaste Ready";
+        startup_notif.body  = "Server running at " + url +
+                              (config.model_path.empty()
+                               ? " \u2014 no model loaded yet"
+                               : " \u2014 AI ready");
+        startup_notif.time  = time(nullptr);
+        g_scheduler.push_notification(std::move(startup_notif));
+    }
 
     bool ok = svr.listen("0.0.0.0", port);
     if (!ok && g_running) {

@@ -138,6 +138,26 @@ void Scheduler::set_notify_fn(SchedulerNotifyFn fn) {
     notify_fn_ = std::move(fn);
 }
 
+void Scheduler::set_model_check_fn(SchedulerModelCheckFn fn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    model_check_fn_ = std::move(fn);
+}
+
+void Scheduler::push_notification(Notification notif) {
+    {
+        std::lock_guard<std::mutex> lock(notif_mutex_);
+        pending_notifications_.push_back(notif);
+    }
+    SchedulerNotifyFn local_notify;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        local_notify = notify_fn_;
+    }
+    if (local_notify) {
+        try { local_notify(notif); } catch (...) {}
+    }
+}
+
 void Scheduler::set_alert_config(const AlertConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     alerts_ = config;
@@ -403,6 +423,7 @@ time_t Scheduler::compute_next_cron(const std::string& expr, time_t after) const
 
 void Scheduler::start() {
     if (running_) return;
+    start_time_ = time(nullptr);
     running_ = true;
     thread_ = std::thread(&Scheduler::run_loop, this);
     fprintf(stderr, "[scheduler] Started background thread\n");
@@ -603,6 +624,33 @@ void Scheduler::check_alerts() {
                     push_alert(std::move(notif));
                 }
             }
+        }
+    }
+
+    // --- Model not loaded check ---
+    // After a 60s grace period, alert every 30 minutes if no model is loaded.
+    {
+        SchedulerModelCheckFn model_fn;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            model_fn = model_check_fn_;
+        }
+        if (model_fn && start_time_ > 0 &&
+            (now - start_time_) >= 60 &&          // 60s startup grace
+            !model_fn() &&                          // model not loaded
+            (now - last_model_alert_) >= 1800) {   // at most every 30 min
+
+            last_model_alert_ = now;
+
+            Notification notif;
+            notif.id    = generate_id();
+            notif.type  = "alert";
+            notif.title = "No AI Model Loaded";
+            notif.body  = "Chat is unavailable. Go to Dashboard \u2192 Download a model to enable AI.";
+            notif.time  = now;
+
+            fprintf(stderr, "[scheduler] ALERT: No AI model loaded\n");
+            push_alert(std::move(notif));
         }
     }
 

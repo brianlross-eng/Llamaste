@@ -47,11 +47,19 @@ using SchedulerInferenceFn = std::function<std::string(const std::string& prompt
 // Callback type: called when a notification should be pushed to clients
 using SchedulerNotifyFn = std::function<void(const Notification& notif)>;
 
+// Callback type: returns true if an AI model is currently loaded and ready
+using SchedulerModelCheckFn = std::function<bool()>;
+
 class Scheduler {
 public:
     void set_data_dir(const std::string& dir);
     void set_inference_fn(SchedulerInferenceFn fn);
     void set_notify_fn(SchedulerNotifyFn fn);
+    void set_model_check_fn(SchedulerModelCheckFn fn);
+
+    // Push a notification directly (e.g., startup announcement).
+    // Safe to call from any thread after start().
+    void push_notification(Notification notif);
 
     // Task CRUD
     std::string create_task(const nlohmann::json& params);
@@ -86,6 +94,11 @@ private:
     std::string data_dir_;
     SchedulerInferenceFn inference_fn_;
     SchedulerNotifyFn notify_fn_;
+    SchedulerModelCheckFn model_check_fn_;
+
+    // For startup grace period + model-not-loaded cooldown
+    time_t start_time_ = 0;
+    time_t last_model_alert_ = 0;
 
     std::vector<ScheduledTask> tasks_;
     AlertConfig alerts_;
