@@ -21,6 +21,7 @@
 #include "net_mdns.h"
 #include "scheduler.h"
 #include "auth.h"
+#include "voice.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -926,6 +927,27 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
+    // Initialize voice pipeline (if whisper model available)
+    VoicePipeline voice_pipeline;
+    {
+        extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
+        VoiceConfig vcfg;
+#ifndef _WIN32
+        if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
+            if (voice_pipeline.init(vcfg)) {
+                g_voice = &voice_pipeline;
+                fprintf(stderr, "[child] Voice pipeline initialized (whisper ready)\n");
+            } else {
+                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
+                        voice_pipeline.last_error().c_str());
+            }
+        } else {
+            fprintf(stderr, "[child] Whisper model not found at %s — voice disabled\n",
+                    vcfg.whisper_model.c_str());
+        }
+#endif
+    }
+
     // Build system prompt
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
@@ -1447,6 +1469,87 @@ int child_main(const SupervisorConfig& config) {
         std::string result = g_tools.dispatch("network.set_ip", req.body);
         res.set_content(result, "application/json");
     }));
+
+    // --- Voice I/O audio endpoints ---
+    svr.Post("/llamaste/audio/transcribe", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+            if (req.has_file("audio")) {
+                // Multipart upload
+                const auto& file = req.get_file_value("audio");
+                std::string tmp_path = "/data/tmp/audio_upload_" +
+                    std::to_string(time(nullptr)) + ".wav";
+#ifndef _WIN32
+                {
+                    std::ofstream ofs(tmp_path, std::ios::binary);
+                    ofs.write(file.content.data(), file.content.size());
+                }
+                json args;
+                args["audio_file"] = tmp_path;
+                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
+                unlink(tmp_path.c_str());
+                res.set_content(result, "application/json");
+#else
+                res.status = 501;
+                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
+#endif
+            } else if (!req.body.empty()) {
+                // Raw WAV body
+                std::string tmp_path = "/data/tmp/audio_upload_" +
+                    std::to_string(time(nullptr)) + ".wav";
+#ifndef _WIN32
+                {
+                    std::ofstream ofs(tmp_path, std::ios::binary);
+                    ofs.write(req.body.data(), req.body.size());
+                }
+                json args;
+                args["audio_file"] = tmp_path;
+                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
+                unlink(tmp_path.c_str());
+                res.set_content(result, "application/json");
+#else
+                res.status = 501;
+                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
+#endif
+            } else {
+                res.status = 400;
+                res.set_content(R"json({"error":"No audio data provided"})json", "application/json");
+            }
+        }
+    ));
+
+    svr.Post("/llamaste/audio/speak", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+            auto body = json::parse(req.body, nullptr, false);
+            if (body.is_discarded()) {
+                res.status = 400;
+                res.set_content(R"json({"error":"Invalid JSON"})json", "application/json");
+                return;
+            }
+            std::string result = g_tools.dispatch("audio.speak", req.body);
+            res.set_content(result, "application/json");
+        }
+    ));
+
+    svr.Get("/llamaste/audio/status", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+            std::string result = g_tools.dispatch("audio.status", "{}");
+            res.set_content(result, "application/json");
+        }
+    ));
+
+    svr.Get("/llamaste/audio/config", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+            std::string result = g_tools.dispatch("audio.config", "{}");
+            res.set_content(result, "application/json");
+        }
+    ));
+
+    svr.Post("/llamaste/audio/config", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+            std::string result = g_tools.dispatch("audio.config", req.body);
+            res.set_content(result, "application/json");
+        }
+    ));
 
     // --- Installer routes (live mode only) ---
     if (g_boot_mode == "live") {

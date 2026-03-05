@@ -445,6 +445,7 @@ void init_create_data_dirs() {
         "/data/llamaste/config",
         "/data/llamaste/logs",
         "/data/llamaste/skills",
+        "/data/tmp",
         nullptr
     };
     for (int i = 0; dirs[i]; i++)
