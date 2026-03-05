@@ -1,7 +1,7 @@
 // voice.cpp — Voice I/O pipeline for Llamaste
 //
 // Phase 3a-1: WAV parsing + whisper.cpp transcription
-// Phase 3a-2: ALSA capture + VAD + always-listening (future)
+// Phase 3a-2: ALSA capture + energy VAD + always-listening + wake phrase
 // Phase 3a-3: Piper TTS subprocess (future)
 
 #include "voice.h"
@@ -11,11 +11,17 @@
 #include <cmath>
 #include <fstream>
 #include <thread>
+#include <algorithm>
+#include <chrono>
 
 using json = nlohmann::json;
 
 #ifdef HAVE_WHISPER
 #include <whisper.h>
+#endif
+
+#ifdef HAVE_ALSA
+#include <alsa/asoundlib.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -148,8 +154,18 @@ struct VoicePipeline::Impl {
 #ifdef HAVE_WHISPER
     struct whisper_context* whisper_ctx = nullptr;
 #endif
+#ifdef HAVE_ALSA
+    snd_pcm_t* capture_handle = nullptr;
+#endif
     std::thread voice_thread;
     std::atomic<bool> running{false};
+
+    // Audio buffer for accumulating speech segments
+    std::vector<float> speech_buffer;
+
+    // Energy VAD state
+    int silence_frames = 0;   // consecutive silent frames
+    bool in_speech = false;    // currently detecting speech
 };
 
 VoicePipeline::VoicePipeline() : impl_(new Impl) {}
@@ -160,6 +176,12 @@ VoicePipeline::~VoicePipeline() {
     if (impl_->whisper_ctx) {
         whisper_free(impl_->whisper_ctx);
         impl_->whisper_ctx = nullptr;
+    }
+#endif
+#ifdef HAVE_ALSA
+    if (impl_->capture_handle) {
+        snd_pcm_close(impl_->capture_handle);
+        impl_->capture_handle = nullptr;
     }
 #endif
     delete impl_;
@@ -259,7 +281,71 @@ std::vector<int16_t> VoicePipeline::speak(const std::string& text) {
 }
 
 void VoicePipeline::start() {
-    // TODO: Phase 3a-2 — always-listening thread with ALSA + VAD
+#if defined(HAVE_ALSA) && defined(HAVE_WHISPER)
+    if (impl_->running.load()) return;
+    if (!impl_->whisper_ctx) {
+        fprintf(stderr, "[voice] Cannot start: whisper not loaded\n");
+        return;
+    }
+
+    // Open ALSA capture device
+    int err;
+    std::string device;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        device = config_.alsa_device;
+    }
+
+    err = snd_pcm_open(&impl_->capture_handle, device.c_str(),
+                        SND_PCM_STREAM_CAPTURE, 0);
+    if (err < 0) {
+        last_error_ = std::string("ALSA open failed: ") + snd_strerror(err);
+        fprintf(stderr, "[voice] %s\n", last_error_.c_str());
+        state_.store(VoiceState::ERROR);
+        return;
+    }
+
+    // Configure: 16kHz, mono, 16-bit signed LE
+    snd_pcm_hw_params_t* hw_params;
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(impl_->capture_handle, hw_params);
+    snd_pcm_hw_params_set_access(impl_->capture_handle, hw_params,
+                                  SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(impl_->capture_handle, hw_params,
+                                  SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(impl_->capture_handle, hw_params, 1);
+    unsigned int rate = 16000;
+    snd_pcm_hw_params_set_rate_near(impl_->capture_handle, hw_params,
+                                     &rate, nullptr);
+    // Buffer: 480 frames = 30ms at 16kHz
+    snd_pcm_uframes_t period_frames = 480;
+    snd_pcm_hw_params_set_period_size_near(impl_->capture_handle, hw_params,
+                                            &period_frames, nullptr);
+
+    err = snd_pcm_hw_params(impl_->capture_handle, hw_params);
+    if (err < 0) {
+        last_error_ = std::string("ALSA hw_params failed: ") + snd_strerror(err);
+        fprintf(stderr, "[voice] %s\n", last_error_.c_str());
+        snd_pcm_close(impl_->capture_handle);
+        impl_->capture_handle = nullptr;
+        state_.store(VoiceState::ERROR);
+        return;
+    }
+
+    snd_pcm_prepare(impl_->capture_handle);
+
+    fprintf(stderr, "[voice] ALSA capture opened: %s @ %uHz, period=%lu frames\n",
+            device.c_str(), rate, (unsigned long)period_frames);
+
+    // Start the listening thread
+    impl_->running.store(true);
+    impl_->voice_thread = std::thread(&VoicePipeline::voice_thread_fn, this);
+
+    fprintf(stderr, "[voice] Always-listening thread started\n");
+    state_.store(VoiceState::LISTENING);
+#else
+    fprintf(stderr, "[voice] Cannot start: ALSA and/or whisper not compiled in\n");
+#endif
 }
 
 void VoicePipeline::stop() {
@@ -269,6 +355,13 @@ void VoicePipeline::stop() {
             impl_->voice_thread.join();
         }
     }
+#ifdef HAVE_ALSA
+    if (impl_->capture_handle) {
+        snd_pcm_close(impl_->capture_handle);
+        impl_->capture_handle = nullptr;
+    }
+#endif
+    fprintf(stderr, "[voice] Pipeline stopped\n");
 }
 
 std::string VoicePipeline::state_string() const {
@@ -302,6 +395,192 @@ void VoicePipeline::set_command_callback(
     command_callback_ = std::move(cb);
 }
 
+// Compute RMS energy of a float audio buffer
+static float compute_rms(const float* samples, size_t count) {
+    if (count == 0) return 0.0f;
+    double sum = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        sum += (double)samples[i] * samples[i];
+    }
+    return (float)std::sqrt(sum / count);
+}
+
+// Case-insensitive substring search
+static bool contains_ci(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return true;
+    if (haystack.size() < needle.size()) return false;
+    std::string h = haystack, n = needle;
+    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    return h.find(n) != std::string::npos;
+}
+
+// Extract text after the wake phrase
+static std::string extract_command(const std::string& text,
+                                    const std::string& wake_phrase) {
+    std::string h = text, n = wake_phrase;
+    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    auto pos = h.find(n);
+    if (pos == std::string::npos) return text;
+    std::string cmd = text.substr(pos + n.size());
+    // Trim leading punctuation and whitespace
+    size_t start = cmd.find_first_not_of(" \t\n\r.,!?:;");
+    if (start == std::string::npos) return "";
+    return cmd.substr(start);
+}
+
 void VoicePipeline::voice_thread_fn() {
-    // TODO: Phase 3a-2 — ALSA capture + VAD + always-listening loop
+#if defined(HAVE_ALSA) && defined(HAVE_WHISPER)
+    // ALSA capture buffer: 480 frames = 30ms at 16kHz
+    const int FRAMES_PER_READ = 480;
+    const int SAMPLE_RATE = 16000;
+    const float SPEECH_RMS_THRESHOLD = 0.01f;  // Adjustable energy threshold
+    const int FRAMES_PER_MS = SAMPLE_RATE / 1000;
+
+    std::vector<int16_t> pcm_buf(FRAMES_PER_READ);
+    std::vector<float> float_buf(FRAMES_PER_READ);
+
+    impl_->speech_buffer.clear();
+    impl_->speech_buffer.reserve(SAMPLE_RATE * 10); // pre-alloc 10s
+    impl_->silence_frames = 0;
+    impl_->in_speech = false;
+
+    VoiceConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        cfg = config_;
+    }
+
+    int silence_threshold_frames = (cfg.silence_ms * FRAMES_PER_MS);
+    int max_record_frames = (cfg.max_record_ms * FRAMES_PER_MS);
+
+    fprintf(stderr, "[voice] Listening loop: silence=%dms, max=%dms, RMS=%.4f\n",
+            cfg.silence_ms, cfg.max_record_ms, SPEECH_RMS_THRESHOLD);
+
+    while (impl_->running.load()) {
+        // Read 30ms of audio from ALSA
+        snd_pcm_sframes_t frames = snd_pcm_readi(
+            impl_->capture_handle, pcm_buf.data(), FRAMES_PER_READ);
+
+        if (frames < 0) {
+            // Handle ALSA errors (overrun, etc.)
+            frames = snd_pcm_recover(impl_->capture_handle, (int)frames, 1);
+            if (frames < 0) {
+                fprintf(stderr, "[voice] ALSA read error: %s\n",
+                        snd_strerror((int)frames));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            continue;
+        }
+
+        if (frames == 0) continue;
+
+        // Convert int16 to float32
+        for (snd_pcm_sframes_t i = 0; i < frames; i++) {
+            float_buf[i] = pcm_buf[i] / 32768.0f;
+        }
+
+        // Compute energy (RMS)
+        float rms = compute_rms(float_buf.data(), (size_t)frames);
+        bool is_speech = (rms > SPEECH_RMS_THRESHOLD);
+
+        if (is_speech) {
+            if (!impl_->in_speech) {
+                // Speech onset
+                impl_->in_speech = true;
+                impl_->speech_buffer.clear();
+                state_.store(VoiceState::RECORDING);
+                fprintf(stderr, "[voice] Speech detected (RMS=%.4f)\n", rms);
+            }
+            impl_->silence_frames = 0;
+
+            // Accumulate audio
+            impl_->speech_buffer.insert(impl_->speech_buffer.end(),
+                                         float_buf.begin(),
+                                         float_buf.begin() + frames);
+        } else if (impl_->in_speech) {
+            // Still accumulate during brief silence (for natural pauses)
+            impl_->speech_buffer.insert(impl_->speech_buffer.end(),
+                                         float_buf.begin(),
+                                         float_buf.begin() + frames);
+            impl_->silence_frames += (int)frames;
+
+            // Check if silence exceeded threshold -> end of speech
+            if (impl_->silence_frames >= silence_threshold_frames) {
+                // End of speech segment — run whisper
+                impl_->in_speech = false;
+
+                size_t speech_len = impl_->speech_buffer.size();
+                // Require at least 0.5s of audio (8000 samples at 16kHz)
+                if (speech_len < 8000) {
+                    fprintf(stderr, "[voice] Speech too short (%zu samples), discarding\n",
+                            speech_len);
+                    state_.store(VoiceState::LISTENING);
+                    continue;
+                }
+
+                fprintf(stderr, "[voice] Speech segment: %.1fs (%zu samples)\n",
+                        (float)speech_len / SAMPLE_RATE, speech_len);
+
+                // Transcribe
+                std::string text = transcribe(impl_->speech_buffer);
+                state_.store(VoiceState::LISTENING);
+
+                if (text.empty()) {
+                    fprintf(stderr, "[voice] Empty transcription, continuing\n");
+                    continue;
+                }
+
+                // Check for wake phrase
+                {
+                    std::lock_guard<std::mutex> lock(config_mutex_);
+                    cfg = config_;
+                }
+
+                if (contains_ci(text, cfg.wake_phrase)) {
+                    std::string command = extract_command(text, cfg.wake_phrase);
+                    fprintf(stderr, "[voice] Wake phrase detected! Command: \"%s\"\n",
+                            command.c_str());
+
+                    if (!command.empty() && command_callback_) {
+                        state_.store(VoiceState::PROCESSING);
+                        command_callback_(command);
+                        state_.store(VoiceState::LISTENING);
+                    }
+                } else {
+                    fprintf(stderr, "[voice] No wake phrase in: \"%s\"\n",
+                            text.c_str());
+                }
+            }
+        }
+
+        // Safety: cap recording length
+        if (impl_->in_speech &&
+            (int)impl_->speech_buffer.size() >= max_record_frames) {
+            fprintf(stderr, "[voice] Max recording length reached, processing\n");
+            impl_->in_speech = false;
+
+            std::string text = transcribe(impl_->speech_buffer);
+            state_.store(VoiceState::LISTENING);
+
+            if (!text.empty()) {
+                std::lock_guard<std::mutex> lock(config_mutex_);
+                cfg = config_;
+
+                if (contains_ci(text, cfg.wake_phrase)) {
+                    std::string command = extract_command(text, cfg.wake_phrase);
+                    if (!command.empty() && command_callback_) {
+                        state_.store(VoiceState::PROCESSING);
+                        command_callback_(command);
+                        state_.store(VoiceState::LISTENING);
+                    }
+                }
+            }
+        }
+    }
+
+    fprintf(stderr, "[voice] Listening loop exited\n");
+#endif
 }

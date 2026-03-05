@@ -937,6 +937,26 @@ int child_main(const SupervisorConfig& config) {
             if (voice_pipeline.init(vcfg)) {
                 g_voice = &voice_pipeline;
                 fprintf(stderr, "[child] Voice pipeline initialized (whisper ready)\n");
+
+                // Wire command callback: voice commands go through the agent loop
+                voice_pipeline.set_command_callback([&](const std::string& command) {
+                    fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
+
+                    // Create a conversation for the voice command
+                    ConversationState conv;
+                    conv.system_prompt = g_system_prompt;
+                    conv.add_user_message(command);
+                    std::string response = agent_turn(conv, g_tools, g_inference_fn);
+
+                    fprintf(stderr, "[voice] Agent response: %.80s%s\n",
+                            response.c_str(),
+                            response.size() > 80 ? "..." : "");
+
+                    // TODO Phase 3a-3: pipe response to Piper TTS for audio output
+                });
+
+                // Start the always-listening thread (ALSA capture + VAD)
+                voice_pipeline.start();
             } else {
                 fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
                         voice_pipeline.last_error().c_str());

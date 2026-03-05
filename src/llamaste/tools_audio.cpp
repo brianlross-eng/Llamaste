@@ -23,16 +23,26 @@ static std::string handle_audio_status(const std::string& args_json) {
     (void)args_json;
     json result;
     if (g_voice) {
+        auto st = g_voice->state();
         result["state"] = g_voice->state_string();
-        result["enabled"] = (g_voice->state() != VoiceState::DISABLED);
-        result["whisper_loaded"] = (g_voice->state() >= VoiceState::LISTENING);
+        result["enabled"] = (st != VoiceState::DISABLED);
+        result["whisper_loaded"] = (st >= VoiceState::LISTENING);
+        result["always_listening"] = (st == VoiceState::LISTENING ||
+                                      st == VoiceState::RECORDING ||
+                                      st == VoiceState::TRANSCRIBING ||
+                                      st == VoiceState::PROCESSING);
         auto cfg = g_voice->config();
         result["wake_phrase"] = cfg.wake_phrase;
         result["whisper_model"] = cfg.whisper_model;
+        result["alsa_device"] = cfg.alsa_device;
+        result["silence_ms"] = cfg.silence_ms;
+        std::string err = g_voice->last_error();
+        if (!err.empty()) result["last_error"] = err;
     } else {
         result["state"] = "disabled";
         result["enabled"] = false;
         result["whisper_loaded"] = false;
+        result["always_listening"] = false;
         result["wake_phrase"] = "llamaste";
     }
     result["piper_available"] = false;  // Phase 3a-3
