@@ -39,11 +39,19 @@ static constexpr uint32_t    MDNS_TTL        = 120;  // seconds
 
 // DNS record types / classes
 static constexpr uint16_t DNS_TYPE_A   = 1;
+static constexpr uint16_t DNS_TYPE_PTR = 12;
+static constexpr uint16_t DNS_TYPE_TXT = 16;
+static constexpr uint16_t DNS_TYPE_SRV = 33;
+static constexpr uint16_t DNS_TYPE_ANY = 255;
 static constexpr uint16_t DNS_CLASS_IN = 1;
 
 // DNS header flags for an authoritative response
 static constexpr uint16_t DNS_FLAG_RESPONSE       = 0x8000;
 static constexpr uint16_t DNS_FLAG_AUTHORITATIVE   = 0x0400;
+
+// TTL values: short for address/SRV, long for PTR/TXT (per RFC 6762)
+static constexpr uint32_t MDNS_ADDR_TTL = 120;   // 2 min — address records
+static constexpr uint32_t MDNS_SVC_TTL  = 4500;  // 75 min — service records
 
 // ---------------------------------------------------------------------------
 // Helpers: big-endian (network-order) read/write
@@ -129,6 +137,119 @@ std::string MdnsResponder::decode_dns_name(const uint8_t* pkt, size_t pkt_len,
     }
 
     return name;
+}
+
+// ---------------------------------------------------------------------------
+// Per-record append helpers (used by build_service_response)
+// ---------------------------------------------------------------------------
+
+// Append a PTR record: <browse_name> PTR <instance_name>
+static void append_ptr(std::vector<uint8_t>& p,
+                       const std::string& browse_name,
+                       const std::string& instance_name,
+                       uint32_t ttl = MDNS_SVC_TTL) {
+    auto n = MdnsResponder::encode_dns_name(browse_name);
+    p.insert(p.end(), n.begin(), n.end());
+    put_u16(p, DNS_TYPE_PTR);
+    put_u16(p, DNS_CLASS_IN);        // PTR is shared, no cache-flush bit
+    put_u32(p, ttl);
+    auto target = MdnsResponder::encode_dns_name(instance_name);
+    put_u16(p, static_cast<uint16_t>(target.size()));
+    p.insert(p.end(), target.begin(), target.end());
+}
+
+// Append an SRV record: <instance_name> SRV 0 0 <port> <host>
+static void append_srv(std::vector<uint8_t>& p,
+                       const std::string& instance_name,
+                       const std::string& host_fqdn,
+                       uint16_t port,
+                       uint32_t ttl = MDNS_ADDR_TTL) {
+    auto n = MdnsResponder::encode_dns_name(instance_name);
+    p.insert(p.end(), n.begin(), n.end());
+    put_u16(p, DNS_TYPE_SRV);
+    put_u16(p, DNS_CLASS_IN | 0x8000);  // cache-flush
+    put_u32(p, ttl);
+    auto target = MdnsResponder::encode_dns_name(host_fqdn);
+    put_u16(p, static_cast<uint16_t>(6 + target.size()));
+    put_u16(p, 0);    // priority
+    put_u16(p, 0);    // weight
+    put_u16(p, port);
+    p.insert(p.end(), target.begin(), target.end());
+}
+
+// Append a TXT record: <instance_name> TXT ["key=val", ...]
+static void append_txt(std::vector<uint8_t>& p,
+                       const std::string& instance_name,
+                       const std::vector<std::string>& kvs,
+                       uint32_t ttl = MDNS_SVC_TTL) {
+    auto n = MdnsResponder::encode_dns_name(instance_name);
+    p.insert(p.end(), n.begin(), n.end());
+    put_u16(p, DNS_TYPE_TXT);
+    put_u16(p, DNS_CLASS_IN | 0x8000);
+    put_u32(p, ttl);
+    // TXT RDATA: each string prefixed by 1-byte length
+    std::vector<uint8_t> rdata;
+    if (kvs.empty()) {
+        rdata.push_back(0);  // empty TXT string (required by RFC)
+    } else {
+        for (const auto& kv : kvs) {
+            uint8_t len = static_cast<uint8_t>(std::min(kv.size(), (size_t)255));
+            rdata.push_back(len);
+            rdata.insert(rdata.end(), kv.begin(), kv.begin() + len);
+        }
+    }
+    put_u16(p, static_cast<uint16_t>(rdata.size()));
+    p.insert(p.end(), rdata.begin(), rdata.end());
+}
+
+// Append an A record: <fqdn> A <ip[4]>
+static void append_a(std::vector<uint8_t>& p,
+                     const std::string& fqdn,
+                     const uint8_t ip[4],
+                     uint32_t ttl = MDNS_ADDR_TTL) {
+    auto n = MdnsResponder::encode_dns_name(fqdn);
+    p.insert(p.end(), n.begin(), n.end());
+    put_u16(p, DNS_TYPE_A);
+    put_u16(p, DNS_CLASS_IN | 0x8000);
+    put_u32(p, ttl);
+    put_u16(p, 4);
+    p.push_back(ip[0]); p.push_back(ip[1]);
+    p.push_back(ip[2]); p.push_back(ip[3]);
+}
+
+// ---------------------------------------------------------------------------
+// Build service response: PTR in Answer, SRV+TXT+A in Additional
+// ---------------------------------------------------------------------------
+
+std::vector<uint8_t> MdnsResponder::build_service_response(
+        const MdnsServiceRecord& svc,
+        const std::string& host_fqdn,
+        const uint8_t ip[4],
+        uint16_t query_id) {
+    std::vector<uint8_t> pkt;
+    pkt.reserve(300);
+
+    // Header: 0 questions, 1 answer (PTR), 3 additional (SRV+TXT+A)
+    put_u16(pkt, query_id);
+    put_u16(pkt, DNS_FLAG_RESPONSE | DNS_FLAG_AUTHORITATIVE);
+    put_u16(pkt, 0);  // QDCOUNT
+    put_u16(pkt, 1);  // ANCOUNT
+    put_u16(pkt, 0);  // NSCOUNT
+    put_u16(pkt, 3);  // ARCOUNT: SRV + TXT + A
+
+    // Answer: PTR _mcp._tcp.local -> llamaste._mcp._tcp.local
+    append_ptr(pkt, svc.browse_name, svc.instance_name);
+
+    // Additional: SRV  llamaste._mcp._tcp.local -> host:port
+    append_srv(pkt, svc.instance_name, host_fqdn, svc.port);
+
+    // Additional: TXT  llamaste._mcp._tcp.local -> {path=/mcp, ...}
+    append_txt(pkt, svc.instance_name, svc.txt);
+
+    // Additional: A  llamaste.local -> IP
+    append_a(pkt, host_fqdn, ip);
+
+    return pkt;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +362,48 @@ static bool dns_name_eq(const std::string& a, const std::string& b) {
 // ---------------------------------------------------------------------------
 // MdnsResponder public interface
 // ---------------------------------------------------------------------------
+
+// Send a packet to the mDNS multicast address (224.0.0.251:5353).
+// May be called from any thread; sock_ must be valid.
+void MdnsResponder::send_multicast(const std::vector<uint8_t>& pkt) {
+#ifndef _WIN32
+    if (sock_ < 0 || pkt.empty()) return;
+    struct sockaddr_in dest = {};
+    dest.sin_family = AF_INET;
+    dest.sin_port   = htons(MDNS_PORT);
+    inet_pton(AF_INET, MDNS_MCAST_ADDR, &dest.sin_addr);
+    sendto(sock_, pkt.data(), pkt.size(), 0,
+           reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+#endif
+}
+
+void MdnsResponder::advertise_service(const std::string& service_type,
+                                       uint16_t port,
+                                       const std::vector<std::string>& txt) {
+    MdnsServiceRecord svc;
+    svc.browse_name    = service_type + ".local";         // _mcp._tcp.local
+    svc.instance_name  = hostname_ + "." + svc.browse_name; // llamaste._mcp._tcp.local
+    svc.port           = port;
+    svc.txt            = txt;
+
+    {
+        std::lock_guard<std::mutex> lk(service_mu_);
+        service_     = svc;
+        has_service_ = true;
+    }
+
+    // Send proactive announcement so listeners don't have to query
+    std::string local_ip = get_local_ip();
+    uint8_t ip[4] = {};
+    if (!parse_ipv4(local_ip, ip)) return;
+
+    auto pkt = build_service_response(svc, fqdn_, ip);
+    send_multicast(pkt);  // send twice to handle packet loss
+    send_multicast(pkt);
+
+    fprintf(stderr, "[mdns] Advertising %s on port %u (txt: %zu entries)\n",
+            svc.instance_name.c_str(), port, txt.size());
+}
 
 bool MdnsResponder::start(const std::string& hostname) {
     if (running_) return false;
@@ -396,30 +559,43 @@ void MdnsResponder::run_loop() {
             // Strip cache-flush bit from class
             qclass &= 0x7FFF;
 
-            // Check if this is an A-record query for our name
-            if (qtype == DNS_TYPE_A && qclass == DNS_CLASS_IN &&
-                dns_name_eq(qname, fqdn_)) {
-
-                // Re-detect IP if we got 0.0.0.0 (interface may not have
-                // been up when we started)
+            // Helper: refresh IP if still 0.0.0.0
+            auto ensure_ip = [&]() {
                 if (ip_bytes[0] == 0 && ip_bytes[1] == 0 &&
                     ip_bytes[2] == 0 && ip_bytes[3] == 0) {
                     local_ip = get_local_ip();
                     parse_ipv4(local_ip, ip_bytes);
                 }
+            };
 
-                // Build and send response
+            // --- A-record query for our hostname ---
+            if ((qtype == DNS_TYPE_A || qtype == DNS_TYPE_ANY) &&
+                qclass == DNS_CLASS_IN &&
+                dns_name_eq(qname, fqdn_)) {
+
+                ensure_ip();
                 auto resp = build_response(fqdn_, ip_bytes, tx_id);
+                send_multicast(resp);
+            }
 
-                // Send to the mDNS multicast address (standard behavior)
-                struct sockaddr_in mcast_dest = {};
-                mcast_dest.sin_family = AF_INET;
-                mcast_dest.sin_port = htons(MDNS_PORT);
-                inet_pton(AF_INET, MDNS_MCAST_ADDR, &mcast_dest.sin_addr);
+            // --- PTR query for a service we're advertising ---
+            if ((qtype == DNS_TYPE_PTR || qtype == DNS_TYPE_ANY) &&
+                qclass == DNS_CLASS_IN) {
 
-                sendto(sock_, resp.data(), resp.size(), 0,
-                       reinterpret_cast<struct sockaddr*>(&mcast_dest),
-                       sizeof(mcast_dest));
+                MdnsServiceRecord svc_copy;
+                bool got_svc = false;
+                {
+                    std::lock_guard<std::mutex> lk(service_mu_);
+                    if (has_service_ && dns_name_eq(qname, service_.browse_name)) {
+                        svc_copy = service_;
+                        got_svc  = true;
+                    }
+                }
+                if (got_svc) {
+                    ensure_ip();
+                    auto resp = build_service_response(svc_copy, fqdn_, ip_bytes, tx_id);
+                    send_multicast(resp);
+                }
             }
         }
     }

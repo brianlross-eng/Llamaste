@@ -980,10 +980,13 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
 
     // Start mDNS responder so the box is discoverable as "llamaste.local"
+    // Also advertise the MCP server as _mcp._tcp so DNS-SD clients can find it.
     MdnsResponder mdns;
     if (mdns.start("llamaste")) {
         fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s)\n",
                 MdnsResponder::get_local_ip().c_str());
+        mdns.advertise_service("_mcp._tcp", 80,
+            {"path=/mcp", "version=2025-03-26", "auth=bearer"});
     } else {
         fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
     }

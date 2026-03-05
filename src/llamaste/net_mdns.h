@@ -1,26 +1,42 @@
 #pragma once
 // net_mdns.h -- Minimal mDNS responder for Llamaste
 //
-// Responds to mDNS A-record queries for "<hostname>.local" on the standard
-// multicast group 224.0.0.251:5353.  This lets other machines on the LAN
-// discover the Llamaste box by name (e.g., http://llamaste.local/).
+// Responds to mDNS A-record queries for "<hostname>.local" AND DNS-SD
+// service browsing queries (_<service>._tcp.local PTR) so that tools like
+// avahi-browse can find the Llamaste MCP server without manual config.
 //
-// The responder runs in a background thread and uses raw UDP sockets.
-// It only answers queries for our own name -- it does not implement a full
-// mDNS stack (no browsing, no service discovery, no NSEC, etc.).
+// Multicast group 224.0.0.251:5353 (standard mDNS).
+// Runs in a background thread, raw UDP sockets, no full mDNS stack.
 
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <vector>
 #include <cstdint>
 
+// DNS-SD service record (populated by advertise_service).
+struct MdnsServiceRecord {
+    std::string browse_name;    // e.g. "_mcp._tcp.local"
+    std::string instance_name;  // e.g. "llamaste._mcp._tcp.local"
+    uint16_t    port = 80;
+    std::vector<std::string> txt; // e.g. {"path=/mcp","version=2025-03-26"}
+};
+
 class MdnsResponder {
 public:
-    // Start responding to mDNS queries for the given hostname.
+    // Start responding to mDNS A-record queries for the given hostname.
     // hostname should NOT include the ".local" suffix.
     // Returns true if the socket was opened and the thread started.
     bool start(const std::string& hostname);
+
+    // Announce a DNS-SD service over mDNS (PTR + SRV + TXT + A).
+    // Must be called after start().  Sends a proactive announcement and
+    // begins responding to PTR queries for "<service_type>.local".
+    // service_type: e.g. "_mcp._tcp" (no ".local")
+    void advertise_service(const std::string& service_type,
+                           uint16_t port,
+                           const std::vector<std::string>& txt = {});
 
     // Stop the responder (joins the background thread).
     void stop();
@@ -47,6 +63,13 @@ public:
                                                 const uint8_t ip[4],
                                                 uint16_t query_id = 0);
 
+    // Build a PTR+SRV+TXT+A service response packet.
+    static std::vector<uint8_t> build_service_response(
+        const MdnsServiceRecord& svc,
+        const std::string& host_fqdn,
+        const uint8_t ip[4],
+        uint16_t query_id = 0);
+
     // Get the IPv4 address of the first non-loopback interface.
     // Returns "0.0.0.0" if none found.
     static std::string get_local_ip();
@@ -58,5 +81,11 @@ private:
     std::string hostname_;   // without ".local"
     std::string fqdn_;       // hostname_ + ".local"
 
+    // Service advertisement (set once by advertise_service, read by run_loop)
+    MdnsServiceRecord service_;
+    bool              has_service_ = false;
+    mutable std::mutex service_mu_;
+
     void run_loop();
+    void send_multicast(const std::vector<uint8_t>& pkt);
 };
