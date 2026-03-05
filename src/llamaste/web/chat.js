@@ -57,6 +57,7 @@
     fetch('/llamaste/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         message: text,
         conversation_id: conversationId,
@@ -326,7 +327,7 @@
   }
 
   function loadConversations() {
-    fetch('/llamaste/conversations')
+    fetch('/llamaste/conversations', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();

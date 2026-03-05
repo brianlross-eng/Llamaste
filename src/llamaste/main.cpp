@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
             hw.ram_total_mb, hw.ram_free_mb);
 
     if (pid1) {
+        init_apply_network_config();
         init_tune_performance();
         init_set_hostname("llamaste");
     }

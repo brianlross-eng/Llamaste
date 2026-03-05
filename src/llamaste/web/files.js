@@ -22,7 +22,7 @@
     listEl.innerHTML = '<div class="files-loading">Loading...</div>';
     if (pathEl) pathEl.textContent = currentPath;
 
-    fetch('/llamaste/files?path=' + encodeURIComponent(currentPath))
+    fetch('/llamaste/files?path=' + encodeURIComponent(currentPath), { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -160,7 +160,7 @@
       }
     }
 
-    fetch('/llamaste/files?path=' + encodeURIComponent(filePath) + '&action=read')
+    fetch('/llamaste/files?path=' + encodeURIComponent(filePath) + '&action=read', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();

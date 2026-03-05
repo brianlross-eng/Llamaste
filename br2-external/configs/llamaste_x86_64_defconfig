@@ -47,6 +47,7 @@ BR2_PACKAGE_LLAMA_SERVER=y
 # HTTPS downloads (model download from Hugging Face)
 BR2_PACKAGE_OPENSSL=y
 BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_CA_CERTIFICATES=y
 
 # Scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_build.sh"

@@ -80,7 +80,7 @@
   }
 
   function fetchSchedules() {
-    fetch('/llamaste/schedules')
+    fetch('/llamaste/schedules', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -151,7 +151,7 @@
   // Fetches fresh data and updates the sections that dashboard.js does NOT handle.
   function systemRefresh() {
     // Fetch system info for About section
-    fetch('/llamaste/system')
+    fetch('/llamaste/system', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -178,7 +178,7 @@
     var label = action === 'shutdown' ? 'shut down' : 'reboot';
     if (!confirm('Are you sure you want to ' + label + '?')) return;
 
-    fetch('/llamaste/' + action, { method: 'POST' })
+    fetch('/llamaste/' + action, { method: 'POST', credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -197,5 +197,84 @@
 
   // Initial render with empty state
   renderScheduledTasks([]);
+
+  // --- Network Configuration ---
+  var netModeSelect = document.getElementById('net-mode-select');
+  var netStaticFields = document.getElementById('net-static-fields');
+  var netSaveBtn = document.getElementById('net-save-btn');
+  var netStatus = document.getElementById('net-status');
+
+  if (netModeSelect) {
+    netModeSelect.addEventListener('change', function () {
+      netStaticFields.style.display = netModeSelect.value === 'static' ? '' : 'none';
+    });
+  }
+
+  // Load current network config
+  function loadNetConfig() {
+    fetch('/llamaste/network/config', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.config) return;
+        var cfg = data.config;
+        if (cfg.mode === 'static') {
+          netModeSelect.value = 'static';
+          netStaticFields.style.display = '';
+          if (cfg.ip) document.getElementById('net-ip').value = cfg.ip;
+          if (cfg.netmask) document.getElementById('net-netmask').value = cfg.netmask;
+          if (cfg.gateway) document.getElementById('net-gateway').value = cfg.gateway;
+          if (cfg.dns) document.getElementById('net-dns').value = cfg.dns;
+        }
+        // Show active IP info
+        if (data.active_ip) {
+          document.getElementById('sys-ip').textContent = data.active_ip;
+        }
+      })
+      .catch(function () {});
+  }
+
+  if (netModeSelect) loadNetConfig();
+
+  if (netSaveBtn) {
+    netSaveBtn.addEventListener('click', function () {
+      var mode = netModeSelect.value;
+      var config = { mode: mode };
+
+      if (mode === 'static') {
+        var ip = document.getElementById('net-ip').value.trim();
+        if (!ip) {
+          netStatus.textContent = 'IP address is required';
+          netStatus.style.color = '#ff6b6b';
+          return;
+        }
+        config.ip = ip;
+        config.netmask = document.getElementById('net-netmask').value.trim() || '255.255.255.0';
+        config.gateway = document.getElementById('net-gateway').value.trim();
+        config.dns = document.getElementById('net-dns').value.trim() || '8.8.8.8';
+      }
+
+      // Save via network config API
+      fetch('/llamaste/network/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(config)
+      })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function () {
+          netStatus.textContent = mode === 'dhcp'
+            ? 'Saved. DHCP will be used on next reboot.'
+            : 'Saved. Static IP will be applied on next reboot.';
+          netStatus.style.color = '#00e5a0';
+        })
+        .catch(function (err) {
+          netStatus.textContent = 'Save failed: ' + err.message;
+          netStatus.style.color = '#ff6b6b';
+        });
+    });
+  }
 
 })();

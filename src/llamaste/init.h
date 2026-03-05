@@ -7,3 +7,4 @@ void init_create_data_dirs();
 void init_tune_performance();
 void init_set_hostname(const std::string& default_name);
 std::string init_parse_boot_mode();
+void init_apply_network_config();

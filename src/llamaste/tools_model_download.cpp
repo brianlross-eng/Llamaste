@@ -207,11 +207,17 @@ static std::string http_get(const std::string& url, long timeout_seconds = 15) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
+    if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    }
 
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) return "";
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[http_get] curl error %d: %s (url=%s)\n", (int)res, curl_easy_strerror(res), url.c_str());
+        return "";
+    }
     return response;
 }
 #endif // HAVE_LIBCURL
@@ -406,6 +412,11 @@ static std::string handle_model_download(const std::string& args_json) {
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    // CA cert bundle for HTTPS verification
+    if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    }
+    fprintf(stderr, "[download] Starting download: %s\n", url.c_str());
 
     // Resume if partial file exists
     if (existing_size > 0) {
@@ -425,8 +436,10 @@ static std::string handle_model_download(const std::string& args_json) {
     fclose(fp);
 
     if (res != CURLE_OK) {
+        fprintf(stderr, "[download] curl error %d: %s\n", (int)res, curl_easy_strerror(res));
         json out;
         out["status"] = "error";
+        out["curl_code"] = (int)res;
         out["error"] = curl_easy_strerror(res);
         out["partial_file"] = part_path;
         out["downloaded_bytes"] = progress.downloaded_bytes + existing_size;

@@ -183,7 +183,35 @@
               <span class="label">Mode</span>
               <span class="value" id="sys-mode">--</span>
             </div>
-            <p class="text-muted">Network configuration coming soon.</p>
+            <div id="net-config" style="margin-top:12px">
+              <div style="margin-bottom:8px">
+                <label style="color:#aaa;font-size:0.85em">IP Mode</label>
+                <select id="net-mode-select" style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:4px">
+                  <option value="dhcp">DHCP (automatic)</option>
+                  <option value="static">Static IP</option>
+                </select>
+              </div>
+              <div id="net-static-fields" style="display:none">
+                <div style="margin-bottom:6px">
+                  <label style="color:#aaa;font-size:0.85em">IP Address</label>
+                  <input type="text" id="net-ip" placeholder="192.168.1.100" style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+                </div>
+                <div style="margin-bottom:6px">
+                  <label style="color:#aaa;font-size:0.85em">Netmask</label>
+                  <input type="text" id="net-netmask" value="255.255.255.0" style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+                </div>
+                <div style="margin-bottom:6px">
+                  <label style="color:#aaa;font-size:0.85em">Gateway</label>
+                  <input type="text" id="net-gateway" placeholder="192.168.1.1" style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+                </div>
+                <div style="margin-bottom:6px">
+                  <label style="color:#aaa;font-size:0.85em">DNS Server</label>
+                  <input type="text" id="net-dns" value="8.8.8.8" style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+                </div>
+              </div>
+              <button id="net-save-btn" class="btn btn-primary" style="width:100%;margin-top:8px">Save Network Config</button>
+              <p id="net-status" class="text-muted" style="margin-top:6px"></p>
+            </div>
           </div>
 
           <div class="system-card">

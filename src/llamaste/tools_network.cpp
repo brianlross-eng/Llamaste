@@ -11,7 +11,10 @@
 #include <sstream>
 #include <vector>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -325,6 +328,133 @@ static std::string handle_network_ping(const std::string& args_json) {
 }
 
 // ---------------------------------------------------------------------------
+// network.get_ip — get current IP configuration
+// ---------------------------------------------------------------------------
+static std::string handle_network_get_ip(const std::string& args_json) {
+    (void)args_json;
+    json result;
+
+    // Read saved config
+    std::ifstream f("/data/config/network.json");
+    if (f.is_open()) {
+        std::string content((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+        f.close();
+        auto cfg = json::parse(content, nullptr, false);
+        if (!cfg.is_discarded()) {
+            result["config"] = cfg;
+        }
+    }
+
+    if (!result.contains("config")) {
+        result["config"] = {{"mode", "dhcp"}};
+    }
+
+    // Read current active IP from first non-loopback interface
+    DIR* dir = opendir("/sys/class/net");
+    if (dir) {
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != nullptr) {
+            std::string name = ent->d_name;
+            if (name == "." || name == ".." || name == "lo") continue;
+            std::string state = read_sysfs("/sys/class/net/" + name + "/operstate");
+            if (state != "up") continue;
+
+            // Get IP via ioctl
+            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock >= 0) {
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                strncpy(ifr.ifr_name, name.c_str(), IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
+                    struct sockaddr_in* addr = (struct sockaddr_in*)&ifr.ifr_addr;
+                    result["active_ip"] = inet_ntoa(addr->sin_addr);
+                    result["active_interface"] = name;
+                }
+                if (ioctl(sock, SIOCGIFNETMASK, &ifr) == 0) {
+                    struct sockaddr_in* addr = (struct sockaddr_in*)&ifr.ifr_netmask;
+                    result["active_netmask"] = inet_ntoa(addr->sin_addr);
+                }
+                close(sock);
+            }
+            break;  // Use first active interface
+        }
+        closedir(dir);
+    }
+
+    // Read DNS
+    std::ifstream resolv("/etc/resolv.conf");
+    if (resolv.is_open()) {
+        std::string line;
+        while (std::getline(resolv, line)) {
+            if (line.substr(0, 11) == "nameserver ") {
+                result["active_dns"] = line.substr(11);
+                break;
+            }
+        }
+    }
+
+    return result.dump();
+}
+
+// ---------------------------------------------------------------------------
+// network.set_ip — configure static IP or switch back to DHCP
+// ---------------------------------------------------------------------------
+static std::string handle_network_set_ip(const std::string& args_json) {
+    auto args = json::parse(args_json, nullptr, false);
+    if (args.is_discarded()) return json_error("invalid JSON arguments");
+
+    std::string mode = args.value("mode", "");
+    if (mode != "dhcp" && mode != "static")
+        return json_error("mode must be 'dhcp' or 'static'");
+
+    json config;
+    config["mode"] = mode;
+
+    if (mode == "static") {
+        std::string ip = args.value("ip", "");
+        if (ip.empty()) return json_error("ip is required for static mode");
+
+        // Validate IP format
+        struct in_addr test;
+        if (inet_pton(AF_INET, ip.c_str(), &test) != 1)
+            return json_error("invalid IP address format");
+
+        config["ip"] = ip;
+        config["netmask"] = args.value("netmask", "255.255.255.0");
+        config["gateway"] = args.value("gateway", "");
+        config["dns"] = args.value("dns", "8.8.8.8");
+        config["interface"] = args.value("interface", "eth0");
+
+        // Validate netmask
+        if (inet_pton(AF_INET, config["netmask"].get<std::string>().c_str(), &test) != 1)
+            return json_error("invalid netmask format");
+
+        // Validate gateway if provided
+        std::string gw = config["gateway"].get<std::string>();
+        if (!gw.empty() && inet_pton(AF_INET, gw.c_str(), &test) != 1)
+            return json_error("invalid gateway format");
+    }
+
+    // Save config
+    std::string dir_path = "/data/config";
+    mkdir(dir_path.c_str(), 0755);
+    std::ofstream out(dir_path + "/network.json");
+    if (!out.is_open())
+        return json_error("cannot write network config");
+    out << config.dump(2);
+    out.close();
+
+    json result;
+    result["status"] = "saved";
+    result["config"] = config;
+    result["message"] = (mode == "dhcp")
+        ? "Switched to DHCP. Reboot to apply."
+        : "Static IP configured. Reboot to apply.";
+    return result.dump();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 void register_network_tools(ToolRegistry& reg) {
@@ -365,6 +495,59 @@ void register_network_tools(ToolRegistry& reg) {
             "required": ["hostname"]
         })json",
         .handler = handle_network_dns_lookup
+    });
+
+    reg.register_tool({
+        .name = "network.get_ip",
+        .description = "Get current IP configuration — shows whether DHCP or static IP "
+                       "is configured, the active IP address, netmask, gateway, and DNS.",
+        .parameters = R"json({
+            "type": "object",
+            "properties": {}
+        })json",
+        .handler = handle_network_get_ip
+    });
+
+    reg.register_tool({
+        .name = "network.set_ip",
+        .description = "Configure network IP address. Set mode to 'dhcp' for automatic "
+                       "address or 'static' with ip/netmask/gateway/dns. Changes take "
+                       "effect on next reboot.",
+        .parameters = R"json({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "description": "IP mode: 'dhcp' or 'static'",
+                    "enum": ["dhcp", "static"]
+                },
+                "ip": {
+                    "type": "string",
+                    "description": "Static IP address (e.g., '192.168.1.100')"
+                },
+                "netmask": {
+                    "type": "string",
+                    "description": "Subnet mask (default: '255.255.255.0')",
+                    "default": "255.255.255.0"
+                },
+                "gateway": {
+                    "type": "string",
+                    "description": "Default gateway IP address"
+                },
+                "dns": {
+                    "type": "string",
+                    "description": "DNS server IP (default: '8.8.8.8')",
+                    "default": "8.8.8.8"
+                },
+                "interface": {
+                    "type": "string",
+                    "description": "Network interface name (default: 'eth0')",
+                    "default": "eth0"
+                }
+            },
+            "required": ["mode"]
+        })json",
+        .handler = handle_network_set_ip
     });
 
     reg.register_tool({

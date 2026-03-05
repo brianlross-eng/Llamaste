@@ -73,7 +73,7 @@
 
   // --- Fetch and update ---
   function fetchDashboard() {
-    fetch('/llamaste/system')
+    fetch('/llamaste/system', { credentials: 'include' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -220,7 +220,7 @@
       dlBtn.textContent = 'Checking recommended model...';
 
       // First check what model is recommended
-      fetch('/llamaste/model/recommended')
+      fetch('/llamaste/model/recommended', { credentials: 'include' })
         .then(function (r) { return r.json(); })
         .then(function (rec) {
           if (!rec.recommended) {
@@ -248,7 +248,7 @@
           dlBtn.textContent = 'Downloading ' + rec.model_name + ' (' + sizeStr + ')...';
 
           // Start the download
-          return fetch('/llamaste/model/download-recommended', { method: 'POST' })
+          return fetch('/llamaste/model/download-recommended', { method: 'POST', credentials: 'include' })
             .then(function (r) { return r.json(); })
             .then(function (result) {
               if (result.status === 'success' || result.status === 'already_exists') {

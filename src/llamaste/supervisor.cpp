@@ -259,12 +259,16 @@ static SystemMetrics gather_metrics() {
 static void console_input_thread() {
     fprintf(stderr, "[supervisor] Console input thread started\n");
 
-    // Open /dev/console for reading
-    int fd = open("/dev/console", O_RDONLY | O_NOCTTY);
+    // Open console for reading — try /dev/tty0 (VGA) first
+    int fd = open("/dev/tty0", O_RDONLY | O_NOCTTY);
     if (fd < 0) {
-        fprintf(stderr, "[supervisor] Cannot open /dev/console for input\n");
+        fd = open("/dev/console", O_RDONLY | O_NOCTTY);
+    }
+    if (fd < 0) {
+        fprintf(stderr, "[supervisor] Cannot open any console for input: %m\n");
         return;
     }
+    fprintf(stderr, "[supervisor] Console input fd=%d\n", fd);
 
     // Set raw terminal mode (no echo, no canonical/line buffering)
     struct termios raw;
@@ -317,6 +321,19 @@ static void console_display_thread(const SupervisorConfig& config) {
 
     // Wait a moment for system to settle
     sleep(3);
+
+    // Open console fd once — try /dev/tty0 (VGA) first, then /dev/console
+    int console_fd = open("/dev/tty0", O_WRONLY | O_NOCTTY);
+    if (console_fd < 0) {
+        console_fd = open("/dev/console", O_WRONLY | O_NOCTTY);
+        fprintf(stderr, "[supervisor] /dev/tty0 failed, /dev/console fd=%d\n", console_fd);
+    } else {
+        fprintf(stderr, "[supervisor] Opened /dev/tty0 fd=%d for display\n", console_fd);
+    }
+    if (console_fd < 0) {
+        fprintf(stderr, "[supervisor] Cannot open any console device: %m\n");
+        return;
+    }
 
     // Extract model name from path (e.g. "/data/models/qwen.gguf" -> "qwen.gguf")
     std::string model_name = "none";
@@ -509,11 +526,10 @@ static void console_display_thread(const SupervisorConfig& config) {
 
         hline(BL, BR, W);
 
-        // Write to /dev/console
-        int fd = open("/dev/console", O_WRONLY | O_NOCTTY);
-        if (fd >= 0) {
-            write(fd, out.c_str(), out.size());
-            close(fd);
+        // Write to console
+        ssize_t wr = write(console_fd, out.c_str(), out.size());
+        if (wr < 0) {
+            fprintf(stderr, "[supervisor] Console write failed: %m\n");
         }
 
         // Sleep ~5s normally, but wake immediately if prompt state changes
@@ -523,6 +539,7 @@ static void console_display_thread(const SupervisorConfig& config) {
         }
     }
 
+    close(console_fd);
     fprintf(stderr, "[supervisor] Console display thread stopped\n");
 }
 

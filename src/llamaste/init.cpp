@@ -15,6 +15,11 @@
 #include <sys/mount.h>
 #include <sys/ioctl.h>
 #include <sys/statfs.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <linux/fs.h>
 #include <linux/blkpg.h>
 
@@ -489,4 +494,147 @@ std::string init_parse_boot_mode() {
             return "desktop";
     }
     return "server";
+}
+
+void init_apply_network_config() {
+#ifndef _WIN32
+    // Read /data/config/network.json — if mode=static, apply settings.
+    // If absent or mode=dhcp, write resolv.conf from kernel DHCP info.
+    std::ifstream f("/data/config/network.json");
+    std::string content;
+    std::string mode = "dhcp";
+
+    if (f.is_open()) {
+        content.assign((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+        f.close();
+    }
+
+    // Minimal JSON parsing — look for key fields
+    // Format: {"mode":"static","interface":"eth0","ip":"192.168.1.100",
+    //          "netmask":"255.255.255.0","gateway":"192.168.1.1","dns":"8.8.8.8"}
+    auto get_val = [&](const char* key) -> std::string {
+        std::string needle = std::string("\"") + key + "\"";
+        auto pos = content.find(needle);
+        if (pos == std::string::npos) return "";
+        pos = content.find(':', pos);
+        if (pos == std::string::npos) return "";
+        pos = content.find('"', pos + 1);
+        if (pos == std::string::npos) return "";
+        auto end = content.find('"', pos + 1);
+        if (end == std::string::npos) return "";
+        return content.substr(pos + 1, end - pos - 1);
+    };
+
+    if (!content.empty()) mode = get_val("mode");
+
+    if (mode != "static") {
+        // DHCP mode — kernel ip=dhcp already configured the interface.
+        // Write /etc/resolv.conf from /proc/net/pnp (kernel DHCP result).
+        std::ifstream pnp("/proc/net/pnp");
+        if (pnp.is_open()) {
+            std::ofstream resolv("/etc/resolv.conf");
+            if (resolv.is_open()) {
+                std::string line;
+                while (std::getline(pnp, line)) {
+                    // /proc/net/pnp contains lines like "nameserver 10.0.2.3"
+                    if (line.find("nameserver") == 0 || line.find("domain") == 0) {
+                        resolv << line << "\n";
+                    }
+                }
+                fprintf(stderr, "[init] Wrote /etc/resolv.conf from kernel DHCP\n");
+            }
+        } else {
+            // Fallback: use 8.8.8.8 if no /proc/net/pnp
+            std::ofstream resolv("/etc/resolv.conf");
+            if (resolv.is_open()) {
+                resolv << "nameserver 8.8.8.8\n";
+                fprintf(stderr, "[init] Wrote /etc/resolv.conf (fallback: 8.8.8.8)\n");
+            }
+        }
+        return;
+    }
+
+    std::string iface = get_val("interface");
+    std::string ip = get_val("ip");
+    std::string netmask = get_val("netmask");
+    std::string gateway = get_val("gateway");
+    std::string dns = get_val("dns");
+
+    if (iface.empty()) iface = "eth0";
+    if (ip.empty()) {
+        fprintf(stderr, "[init] Static IP config missing 'ip', skipping\n");
+        return;
+    }
+    if (netmask.empty()) netmask = "255.255.255.0";
+
+    fprintf(stderr, "[init] Applying static IP: %s/%s on %s gw=%s dns=%s\n",
+            ip.c_str(), netmask.c_str(), iface.c_str(),
+            gateway.empty() ? "none" : gateway.c_str(),
+            dns.empty() ? "none" : dns.c_str());
+
+    // Apply IP address via ioctl
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        fprintf(stderr, "[init] Cannot create socket for network config: %m\n");
+        return;
+    }
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+
+    // Set IP address
+    struct sockaddr_in* addr = (struct sockaddr_in*)&ifr.ifr_addr;
+    addr->sin_family = AF_INET;
+    inet_pton(AF_INET, ip.c_str(), &addr->sin_addr);
+    if (ioctl(sock, SIOCSIFADDR, &ifr) < 0)
+        fprintf(stderr, "[init] SIOCSIFADDR failed: %m\n");
+
+    // Set netmask
+    addr = (struct sockaddr_in*)&ifr.ifr_netmask;
+    addr->sin_family = AF_INET;
+    inet_pton(AF_INET, netmask.c_str(), &addr->sin_addr);
+    if (ioctl(sock, SIOCSIFNETMASK, &ifr) < 0)
+        fprintf(stderr, "[init] SIOCSIFNETMASK failed: %m\n");
+
+    // Bring interface up
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+        ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+        ioctl(sock, SIOCSIFFLAGS, &ifr);
+    }
+
+    // Set default gateway
+    if (!gateway.empty()) {
+        struct rtentry rt;
+        memset(&rt, 0, sizeof(rt));
+        addr = (struct sockaddr_in*)&rt.rt_dst;
+        addr->sin_family = AF_INET;
+        addr->sin_addr.s_addr = 0;
+        addr = (struct sockaddr_in*)&rt.rt_gateway;
+        addr->sin_family = AF_INET;
+        inet_pton(AF_INET, gateway.c_str(), &addr->sin_addr);
+        addr = (struct sockaddr_in*)&rt.rt_genmask;
+        addr->sin_family = AF_INET;
+        addr->sin_addr.s_addr = 0;
+        rt.rt_flags = RTF_UP | RTF_GATEWAY;
+
+        // Delete existing default route first (kernel DHCP may have set one)
+        ioctl(sock, SIOCDELRT, &rt);
+        if (ioctl(sock, SIOCADDRT, &rt) < 0)
+            fprintf(stderr, "[init] SIOCADDRT gateway failed: %m\n");
+    }
+
+    close(sock);
+
+    // Set DNS resolver
+    if (!dns.empty()) {
+        std::ofstream resolv("/etc/resolv.conf");
+        if (resolv.is_open()) {
+            resolv << "nameserver " << dns << "\n";
+        }
+    }
+
+    fprintf(stderr, "[init] Static network config applied\n");
+#endif
 }

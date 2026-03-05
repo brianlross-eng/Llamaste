@@ -296,8 +296,11 @@ static std::string llama_inference(const std::string& request_json) {
         msg["role"] = "assistant";
 
         if (!result) {
+            fprintf(stderr, "[inference] llama-server unreachable (no result)\n");
             msg["content"] = "[inference error: llama-server unreachable]";
         } else {
+            fprintf(stderr, "[inference] llama-server HTTP %d: %s\n",
+                    result->status, result->body.substr(0, 500).c_str());
             msg["content"] = "[inference error: llama-server returned HTTP " +
                              std::to_string(result->status) + "]";
         }
@@ -359,8 +362,9 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores, int
               "-tb", tb_str.c_str(),
               "--mlock",
               "-fa",
-              "--log-disable",
+              "--jinja",
               "--chat-template", "chatml",
+              "--log-disable",
               (char*)nullptr);
         // exec failed
         fprintf(stderr, "[child] execl llama-server failed: %s\n", strerror(errno));
@@ -1419,6 +1423,25 @@ int child_main(const SupervisorConfig& config) {
     svr.Get("/llamaste/model/recommended", require_auth(
         [](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string result = g_tools.dispatch("model.recommended", "{}");
+        res.set_content(result, "application/json");
+    }));
+
+    // --- Network config routes (protected) ---
+    svr.Get("/llamaste/network/config", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string result = g_tools.dispatch("network.get_ip", "{}");
+        res.set_content(result, "application/json");
+    }));
+
+    svr.Post("/llamaste/network/config", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded()) {
+            res.status = 400;
+            res.set_content(R"json({"error":"invalid JSON"})json", "application/json");
+            return;
+        }
+        std::string result = g_tools.dispatch("network.set_ip", req.body);
         res.set_content(result, "application/json");
     }));
 
