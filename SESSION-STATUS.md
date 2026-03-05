@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-10 (DATA partition auto-resize + dashboard download button fix)
+**Last updated**: 2026-03-04 (model download fix, network config, inference working)
 
 ---
 
@@ -19,152 +19,68 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 | 2c: QEMU Testing | 19 | DONE — 5/5 server E2E, desktop mode boots, compositor launches |
 | 2c: VirtualBox Desktop | — | DONE — Cage+Cog renders web UI, setup flow works, auth works |
 | 2d: Real Inference | 20 | DONE — llama-server package, HTTP proxy, lifecycle mgmt |
-| 2e: Model Download | — | DONE — 5 tools (recommended, search, files, download, usb_import), dashboard button, libcurl linking |
+| 2e: Model Download | — | DONE — 5 tools, dashboard button, libcurl, CA certs, DNS fix |
 | Auth + Console | bcrypt, AuthManager, server display | DONE — 128 host tests, 9/9 suites |
-
-**Phase 2 implementation plan**: `docs/plans/2026-03-03-phase2-implementation-plan.md`
-**Console + Auth design**: `docs/plans/2026-03-05-console-auth-design.md`
-**Console + Auth plan**: `docs/plans/2026-03-05-console-auth-implementation-plan.md`
+| Network Config | Static/DHCP IP | DONE — init boot apply, REST API, web UI, tools |
+| End-to-End Inference | — | WORKING — model downloads, llama-server loads, inference runs |
 
 ---
 
-## Auth & Server Console (2026-03-05)
+## Latest Session (2026-03-04)
 
-### What was built
-1. **bcrypt password hashing** (`bcrypt.h/cpp` ~500 LOC): Full Blowfish/Eksblowfish implementation, bcrypt-specific base64, /dev/urandom salt, constant-time comparison
-2. **AuthManager** (`auth.h/cpp` ~350 LOC): Device password (set/verify), session cookies (create/validate/expire), API key (Bearer token), brute force protection (5 failures = 30s cooldown), config persistence to /data/config/device.json
-3. **Server console display** (`supervisor.cpp`): VT100 box-drawing status display on /dev/console every 5s — CPU%, RAM, disk, temperature, IP, hostname, model, child PID status
-4. **Auth routes + middleware** (`child_main.cpp`): require_auth lambda wrapper, /llamaste/auth/setup, /login, /logout, /status endpoints, session expiry background thread
-5. **Login + Setup web pages** (`web/login.html`, `web/setup.html`): Dark-theme first-boot setup wizard + login page
-6. **Auth tools** (`tools_auth.cpp`): auth.change_password, auth.get_api_key, auth.set_session_timeout
-7. **Host tests** (`tests/test_auth.cpp`): 15 tests covering bcrypt, AuthManager, and console format helpers
+### Bugs Fixed
+1. **Dashboard download 401** — Added `credentials: 'include'` to all fetch() calls in dashboard.js, chat.js, files.js, system.js
+2. **VirtualBox console blank** — Changed supervisor.cpp to use `/dev/tty0` (VGA) before `/dev/console`, persistent fd instead of open/close per iteration
+3. **Model download fails** — Three root causes found and fixed:
+   - Missing CA certificates (`BR2_PACKAGE_CA_CERTIFICATES=y`)
+   - Missing `CURLOPT_CAINFO` pointing to `/etc/ssl/certs/ca-certificates.crt`
+   - Missing `/etc/resolv.conf` — kernel `ip=dhcp` doesn't write it; added code to read DNS from `/proc/net/pnp` at boot
+4. **Inference returns 500** — llama-server needs `--jinja` flag for tool calling support
+5. **Serial console logging** — Swapped `console=ttyS0 console=tty0` order so ttyS0 is last (userspace stderr goes to last console)
 
-### Auth flow
-- First boot: no password → serves setup.html → user creates password → API key generated → session cookie set → redirect to main UI
-- Subsequent visits: serves login.html → enter password → session cookie → access granted
-- API access: `Authorization: Bearer llm-XXXXXXXXXXXXXXXXXXXX`
-- Protected routes: all API endpoints. Unprotected: /health, /login.html, /setup.html, static JS/CSS
+### Features Added
+1. **Static/DHCP IP configuration**:
+   - `init_apply_network_config()` reads `/data/config/network.json` at boot, applies static IP via ioctl
+   - `network.get_ip` and `network.set_ip` tools
+   - REST API: GET/POST `/llamaste/network/config`
+   - Web UI: DHCP/Static selector with IP/netmask/gateway/DNS fields in System tab
 
-### Test results
-**128 host tests across 9 suites** — ALL PASSING:
-1. Hardware Detection (3 tests)
-2. Tools System (10 tests)
-3. Agent Loop (19 tests)
-4. Tools Integration (27 tests — 30 tools registered)
-5. HTTP Server (15 tests)
-6. Network/mDNS (17+ tests)
-7. Auth & Console (15 tests)
-8. Inference Integration (10 tests)
-9. Model Download (20 tests — URL builders, validators, recommender)
+### Verified Working
+- Model download from HuggingFace: Qwen2.5-1.5B-Instruct (1.0 GB at 8.1 MB/s)
+- llama-server loads model in 6.4 seconds
+- Inference requests accepted (no more 500 errors)
+- Network config API returns active IP + saved config
+- DATA partition auto-resize still works (64MB → 15GB)
 
-### Bug found and fixed
-bcrypt base64 decode table was wrong — built for standard base64 alphabet order but bcrypt uses `./A-Za-z0-9`. Fixed decode table + salt streaming in Eksblowfish key expansion.
-
----
-
-## Phase 2a-2c Details
-
-### Phase 2a (Tasks 1-9): Web UI Redesign
-- index.html: Status bar (clock, model, speed, RAM, IP, notifications), bottom tab nav (Chat/Files/Dashboard/System)
-- dashboard.js: Status bar updates + Dashboard tab (CPU/temp/RAM/disk bars, hardware info, network, model)
-- files.js: File browser with navigation, preview, upload, new folder
-- system.js: System info display + scheduled tasks list
-- notifications.js: Toast notification system + SSE connection + badge
-- chat.js: Refactored for tabbed layout
-- style.css: Complete dark-theme redesign
-- child_main.cpp: /llamaste/files endpoint, web asset routes
-
-### Phase 2b (Tasks 10-15): Heartbeat Scheduler
-- scheduler.h/cpp: Background thread, cron parser, task CRUD, alert monitoring, persistence
-- tools_schedule.cpp: schedule.create/list/delete/update tools
-- child_main.cpp: Scheduler wiring, /llamaste/notifications SSE, /llamaste/schedules REST
-- notifications.js: SSE EventSource connection, badge management
-- system.js: Schedule display with dot indicators, separate fetch
-
-### Phase 2c (Tasks 16-18): Desktop Compositor (source changes done, untested)
-- linux.config: DRM (virtio, vbox, bochs, simpledrm, vmwgfx, i915), evdev, mousedev, futex, sysvipc
-- defconfig: Cage, Wayland, Mesa (swrast+virgl), Cog+WPEWebKit, libdrm, libinput, eudev, libxkbcommon, pixman
-- genimage.cfg: sys-a partition bumped to 256M
-- child_main.cpp: TCP poll for server readiness, access() probe for browser, fork/exec cage+cog
+### Performance Note
+- Inference is slow on 2 VBox CPU cores (expected for CPU-only 1.5B model)
+- For real-world use, need more cores or smaller model (0.5B)
+- Consider reducing context from 16384 to save memory/speed
 
 ---
 
-## Known Bugs (2026-03-10)
+## Known Issues
 
-### BUG 1: Dashboard "Download Recommended Model" button fails
-- **Symptom**: Click button → "Checking recommended model..." → "Download failed" → retry also fails
-- **Root cause**: Dashboard fetch calls to `/llamaste/model/recommended` and `/llamaste/model/download-recommended` return HTTP 401 (auth required). The dashboard JS `fetch()` calls don't include session cookie or auth credentials.
-- **Fix needed**: Either add `credentials: 'include'` to the fetch calls in `dashboard.js`, or exempt these model endpoints from auth, or pass the session cookie properly.
-- **Files**: `src/llamaste/web/dashboard.js` (fetch calls ~lines 223, 251), `src/llamaste/child_main.cpp` (auth middleware)
-
-### BUG 2: VirtualBox console has no status display
-- **Symptom**: VirtualBox GUI window shows blank/no text — no box-drawing status display
-- **Root cause**: Needs investigation. The `console_display_thread()` in `supervisor.cpp` writes to `/dev/console` with VT100 escape codes every 5 seconds. May be: (a) `/dev/console` not writable in VirtualBox, (b) VirtualBox serial/VGA console not interpreting VT100, (c) thread not starting, (d) display going to wrong device.
-- **Files**: `src/llamaste/supervisor.cpp` (lines 315-527, `console_display_thread()`)
-- **Debug approach**: Add logging to confirm thread starts and `/dev/console` opens successfully. Check if output goes to serial vs VGA.
-
----
-
-## Completed Work
-
-### DATA partition auto-resize (2026-03-10)
-- init.cpp: Auto-grow GPT partition 5 at boot (pure C++ GPT manipulation, CRC32, PMBR update)
-- init.cpp: ext4 online resize via EXT4_IOC_RESIZE_FS ioctl after mount
-- init.cpp: BLKPG_RESIZE_PARTITION for reliable kernel partition table update (BLKRRPART unreliable)
-- dashboard.js: Download button now visible when model is "stub" or "no model"
-- Tested on both QEMU and VirtualBox: DATA grows from 64 MB → 15 GB on 16 GB disk
-- Commits: bfdccab, 5496afe, 2bfdc24, 08fcda4
+### WSL2 localhost access
+- VirtualBox port forwarding (host 8080 → guest 80) doesn't work from WSL2 `localhost`
+- Use Windows host IP instead: `172.18.208.1:8080` (or PowerShell from Windows)
+- This is a WSL2 networking issue, not a Llamaste bug
 
 ---
 
 ## Next Steps
 
-### Immediate (next session)
-1. **Fix model download auth** — dashboard fetch needs credentials for protected endpoints
-2. **Fix console status display** — debug why VirtualBox shows no supervisor output
-3. **Test real model download end-to-end** — once auth fix is in, download qwen2.5-0.5b via button
-4. **Test real inference** — load downloaded model, verify llama-server spawns and agent loop works
+### Immediate
+1. ~~**Optimize inference speed**~~ — DONE: reduced context 16384→4096
+2. ~~**Add `quiet` back to Server grub entry**~~ — DONE
+3. ~~**Rebuild ISO**~~ — DONE: 792 MB ISO with CA certs, network config, DNS fix, --jinja
 
-### Recently Completed
-1. **Model download feature complete** (2026-03-09) — 5 new tools + dashboard button + REST endpoints:
-   - `model.recommended`: RAM-based model recommendation (6 Qwen2.5 tiers)
-   - `model.search`: Search Hugging Face for GGUF models
-   - `model.files`: List files in a HF repository
-   - `model.download`: Download GGUF models from Hugging Face via libcurl
-   - `model.usb_import`: Import GGUF models from USB drives (NTFS3 kernel support)
-   - Dashboard "Download Recommended Model" button with progress states
-   - Buildroot: libcurl+openssl+NTFS3, dynamic linking with static C++ runtime
-   - Design doc: `docs/plans/2026-03-08-model-download-design.md`
-   - Plan: `docs/plans/2026-03-08-model-download-plan.md`
+### Phase 2 (continued)
+4. Voice I/O (whisper.cpp + piper)
+5. App management tools
 
-2. **Desktop mode bugs fixed** (2026-03-08) — 3 issues found and resolved:
-   - `execlp` → `execl` with full paths (PID 1 has no PATH)
-   - `BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y` (cage/wlroots need HAS_UDEV)
-   - `CONFIG_HYPERVISOR_GUEST=y` in kernel (vmwgfx needs it for VirtualBox VMSVGA)
-   - Also added `BR2_PACKAGE_SEATD=y` (wlroots dependency)
-   - Squashfs: 73 MB, disk image: 611 MB
-   - Desktop mode: Cage+Cog renders full web UI, first-boot setup works
-
-2. ~~**Task 19**: WSL2 Buildroot build + QEMU desktop mode test~~ **DONE**
-   - Build fixes: libstdc++ symlinks in sysroot (ICU/C++ linking), --without-icu for libxml2
-   - Squashfs: 65 MB (from 5.9 MB — includes WPEWebKit, Mesa, Wayland, Cage, etc.)
-   - Server mode: 5/5 E2E tests pass, boots in 2s
-   - Desktop mode: boots, HTTP server works, compositor launches (exits gracefully without real display)
-
-2. ~~**Task 20**: Real inference integration~~ **DONE**
-   - Design doc: `docs/plans/2026-03-06-inference-integration-design.md`
-   - Implementation plan: `docs/plans/2026-03-07-inference-integration-plan.md`
-   - Buildroot package for llama-server (llama.cpp b5460, static CPU build)
-   - HTTP proxy inference function (llama_inference → localhost:8088)
-   - Process lifecycle: spawn, health poll, crash recovery (3 retries)
-   - g_inference_fn global swap (stub → real when model loads)
-   - Health endpoint reports model_loaded, model_name, inference_ready
-   - ~435 lines new code (C++ + Buildroot + tests)
-
-### Build Commands (WSL2)
-```bash
-MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && export FORCE_UNSAFE_CONFIGURE=1 && cd /root/llamaste-build/output && make llamaste_x86_64_defconfig && make llamaste-dirclean && make llamaste && make"
-```
+### Phase 3/4
+6. Upgrade path: A/B partition swap, Ed25519 signing, USB sideload
 
 ---
 
@@ -174,16 +90,18 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin
 |----------|------|---------|
 | llamaste binary | ~1.6 MB | Dynamic ELF, x86-64, musl (static libstdc++/libgcc, dynamic libcurl/liblzma) |
 | bzImage kernel | 7.5 MB | Built-in DRM/GPU drivers, evdev, no modules |
-| rootfs.squashfs | 75 MB | llamaste + WPEWebKit + Mesa + Wayland + Cage + ICU + libcurl |
+| rootfs.squashfs | 77 MB | llamaste + WPEWebKit + Mesa + Wayland + Cage + ICU + libcurl + CA certs |
 | llamaste.img | 611 MB | 5-partition GPT disk image |
-| llamaste.iso | ~400 MB (needs rebuild) | Hybrid BIOS+UEFI live ISO with installer |
+| llamaste.iso | 792 MB | Live ISO with installer (rebuilt with all fixes) |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
+| Model load | ~6 seconds | Qwen2.5-1.5B-Instruct Q4_K_M |
+| Context size | 4096 | Reduced from 16384 for faster CPU inference |
 
 ---
 
 ## Source Summary
 
-~7,500 LOC original C++ + ~40KB web UI:
+~8,000 LOC original C++ + ~40KB web UI:
 - main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
 - agent.cpp, prompt_builder.cpp
 - tools.cpp + 10 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth)
@@ -191,22 +109,29 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin
 - net_mdns.cpp, scheduler.cpp
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
-## Phase 1 Implementation Summary
+## VirtualBox VM
+- **VM Name**: "Llamaste", Location: `D:\Llamaste\vm\Llamaste\`
+- 4 GB RAM, 2 CPUs, EFI64, VMSVGA, NAT (host 8080 -> guest 80)
+- SATA port 0: `llamaste-disk.vdi` (16 GB with installed system + 1GB model)
+- Serial log: `D:\Llamaste\vm\Llamaste\serial.log`
+- Access from Windows: `http://localhost:8080`
+- Access from WSL2: `http://172.18.208.1:8080`
 
-| Task | Status | Commit | Key Output |
-|------|--------|--------|------------|
-| 0: WSL2 dev environment | DONE | (setup) | Ubuntu 24.04, gcc 13.3, cmake 3.28, qemu 8.2 |
-| 1: Buildroot external tree | DONE | 38678a7 | BR2_EXTERNAL, defconfig, stub.c, package recipe |
-| 2: Minimal kernel config | DONE | aff89d6 | 157-line kernel config, no modules, built-in drivers |
-| 3: Stock llama-server build | DONE | 2ac8a0f | genimage.cfg, grub.cfg, llamaste.mk, llama.cpp cloned |
-| 4: PID 1 supervisor | DONE | 988b9c5 | main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp |
-| 5: Tools system | DONE | 9f7ed2e | 25 tools across 6 categories, 37 tests |
-| 6: Agent loop | DONE | 0cd1d43 + f99e77c | agent.cpp, prompt_builder.cpp, 19 tests |
-| 7: Web UI | DONE | 1aab8bf | index.html, chat.js, dashboard.js, style.css, embed_web.cmake |
-| 8: HTTP server integration | DONE | 00d3219 | child_main.cpp rewritten, httplib.h, 15 tests |
-| 9: Network | DONE | 613cb4b | net_mdns.cpp, kernel DHCP config, 17 tests |
-| 10: GRUB config | DONE | b7675ba | Production dual-boot grub.cfg with A/B slot |
-| 11: Genimage layout | DONE | 36d52fb | 5-partition GPT, post_build.sh, post_image.sh |
-| 12: QEMU test scripts | DONE | 6973c15 | qemu-test.sh, qemu-run.sh, host-test.sh |
-| Build fixes | DONE | cfd83a4 + f2f8936 | C++ toolchain, PCI kernel, genimage/post_image fixes |
-| ISO + installer | DONE | 49766c8 + dd71dba | Live ISO, installer, INSTALL.md, DEVELOPER.md |
+## Build Commands (WSL2)
+```bash
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -- bash -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && export FORCE_UNSAFE_CONFIGURE=1 && cd /root/llamaste-build/output && make llamaste-dirclean && make llamaste && make"
+```
+
+## Reflash VDI (preserving /data partition with model + config)
+```bash
+# Stop VM, detach disk, convert to raw, patch ESP+squashfs, convert back
+VBoxManage controlvm Llamaste poweroff
+VBoxManage storageattach Llamaste --storagectl SATA --port 0 --device 0 --medium none
+VBoxManage closemedium disk llamaste-disk.vdi
+qemu-img convert -f vdi -O raw llamaste-disk.vdi llamaste.raw
+dd if=llamaste.img of=llamaste.raw bs=1M skip=2 seek=2 count=288 conv=notrunc
+rm llamaste-disk.vdi
+VBoxManage convertfromraw llamaste.raw llamaste-disk.vdi --format VDI
+VBoxManage storageattach Llamaste --storagectl SATA --port 0 --device 0 --type hdd --medium llamaste-disk.vdi
+rm llamaste.raw
+```

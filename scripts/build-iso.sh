@@ -99,10 +99,46 @@ else
     exit 1
 fi
 
+# Copy llama-server for live mode inference (if a model is available)
+if [ -f "${TARGET_DIR}/opt/llamaste/llama-server" ]; then
+    echo "[iso] Copying llama-server..."
+    cp "${TARGET_DIR}/opt/llamaste/llama-server" "${ISO_ROOT}/opt/llamaste/llama-server"
+    chmod 755 "${ISO_ROOT}/opt/llamaste/llama-server"
+fi
+
 # Copy web assets if they exist (for development mode fallback)
 if [ -d "${TARGET_DIR}/opt/llamaste/web" ]; then
     cp -r "${TARGET_DIR}/opt/llamaste/web" "${ISO_ROOT}/opt/llamaste/web"
 fi
+
+# --- Step 4b: Copy shared libraries + dynamic linker ---
+# The llamaste binary is dynamically linked (musl libc, libcurl, liblzma).
+# The ISO's iso9660 root filesystem needs the dynamic linker and all shared
+# libs, otherwise the kernel will fail with "init failed (error -2)".
+echo "[iso] Copying shared libraries..."
+mkdir -p "${ISO_ROOT}/lib" "${ISO_ROOT}/usr/lib"
+
+# Dynamic linker (musl)
+cp "${TARGET_DIR}/lib/ld-musl-x86_64.so.1" "${ISO_ROOT}/lib/"
+
+# Copy all .so files from target (includes libc, libcurl, liblzma, libssl,
+# libcrypto, libnghttp2, libpsl, libicuuc, libicudata, libstdc++, etc.)
+for dir in lib usr/lib; do
+    if [ -d "${TARGET_DIR}/${dir}" ]; then
+        # Copy .so symlinks and real files
+        find "${TARGET_DIR}/${dir}" -maxdepth 1 \( -name '*.so' -o -name '*.so.*' \) \
+            -exec cp -a {} "${ISO_ROOT}/${dir}/" \;
+    fi
+done
+
+# Also need CA certificates for model download
+if [ -d "${TARGET_DIR}/etc/ssl" ]; then
+    mkdir -p "${ISO_ROOT}/etc/ssl"
+    cp -r "${TARGET_DIR}/etc/ssl/certs" "${ISO_ROOT}/etc/ssl/"
+fi
+
+LIB_COUNT=$(find "${ISO_ROOT}/lib" "${ISO_ROOT}/usr/lib" -name '*.so*' | wc -l)
+echo "[iso]   Copied ${LIB_COUNT} shared library files"
 
 # --- Step 5: Compress and copy disk image for installer ---
 echo "[iso] Preparing disk image for installer..."

@@ -122,11 +122,14 @@ int compute_batch_thread_count(int cpu_cores) {
     return cpu_cores < 1 ? 1 : cpu_cores;
 }
 
-// Context window size based on free RAM after model loading
+// Context window size based on free RAM after model loading.
+// Smaller contexts = faster inference on CPU. 4096 is plenty for most
+// single-turn conversations; 8192 for multi-turn agent loops.
 int compute_context_size(int free_ram_mb) {
-    if (free_ram_mb >= 2048) return 16384;
-    if (free_ram_mb >= 1024) return 8192;
-    if (free_ram_mb >= 512)  return 4096;
+    if (free_ram_mb >= 4096) return 8192;
+    if (free_ram_mb >= 2048) return 4096;
+    if (free_ram_mb >= 1024) return 4096;
+    if (free_ram_mb >= 512)  return 2048;
     return 2048;
 }
 
