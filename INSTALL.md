@@ -4,20 +4,19 @@ Llamaste is a bootable Linux operating system where the AI IS the operating syst
 
 ---
 
-## What's New in 1.0.000a (Alpha)
+## What's Included in 1.0.000a (Alpha)
 
-This is the first public alpha release. It includes the full OS foundation and a rich web interface, with AI inference integration arriving in the next release.
-
-- **Redesigned web UI** with a persistent status bar, four tabs (Chat, Files, Dashboard, System), and a dark terminal theme
-- **Heartbeat scheduler** for cron-style and interval-based recurring tasks, with live notifications delivered via Server-Sent Events
-- **Desktop mode support** -- boots into a fullscreen kiosk browser (Cage Wayland compositor + Cog browser) on a locally attached display
-- **File browser** with directory navigation, file preview, upload, and folder creation
-- **System dashboard** with live CPU, RAM, disk, and temperature monitoring plus hardware details
-- **32 built-in tools** across 8 categories (filesystem, process, network, system, config, model, schedule, install)
-- **mDNS discovery** -- find Llamaste on your network at `http://llamaste.local`
-- **Dual-boot GRUB** with BIOS and UEFI support, A/B root partitions for future OTA updates
-
-**Note:** AI responses are currently placeholder text (stub mode). Real inference using Qwen2.5 models will be enabled in the next release. All tools, the web UI, the scheduler, and the full OS are functional today.
+- **Real AI inference** -- Qwen2.5 models via llama.cpp. Download from the Dashboard with one click; model auto-selected by RAM tier
+- **MCP server** -- expose all 44 tools to Claude Desktop and other MCP clients via `http://llamaste.local/mcp`
+- **mDNS auto-discovery** -- `http://llamaste.local` on your LAN; MCP clients can also discover via DNS-SD (`_mcp._tcp`)
+- **Voice I/O (desktop mode)** -- say "Llamaste, what time is it?" and hear a spoken response (whisper.cpp STT + Flite TTS)
+- **Redesigned web UI** -- status bar, four tabs (Chat, Files, Dashboard, System), dark terminal theme
+- **Proactive notifications** -- startup toast, health alerts (RAM / disk / temperature / model not loaded)
+- **Heartbeat scheduler** -- cron-style and interval tasks; live SSE notifications
+- **Desktop mode** -- fullscreen kiosk browser (Cage Wayland + Cog) on a locally attached display
+- **44 built-in tools** across 11 categories
+- **Device authentication** -- password-protected web UI and API, bcrypt hashing, session tokens
+- **A/B root partitions** -- reserved for future OTA updates
 
 ---
 
@@ -176,17 +175,19 @@ Boot takes roughly 1--2 seconds on real hardware. The console displays the machi
 - `http://llamaste.local` (mDNS -- works on most networks), or
 - `http://localhost:8080` (if using VirtualBox/QEMU with port forwarding)
 
-### Stub Mode
+### First Login
 
-In this alpha release, Llamaste runs in **stub mode**. The AI responds with contextual placeholder text rather than real inference output. Everything else works: the web UI, all 32 tools, file management, system monitoring, the scheduler, and the installer. Real AI inference is coming in the next release.
+The first time you access the web UI you will be prompted to set a device password. This password protects the web interface and API. After setting it, log in and you are ready to use Llamaste.
 
 ### Adding a Model
 
-When inference support is enabled (next release), Llamaste will auto-detect model files:
+On first boot with no model present, a **"No AI Model Loaded"** alert will appear. Download a model from the Dashboard tab:
 
-1. Download a GGUF model file (for example, `qwen2.5-7b-instruct-q4_k_m.gguf`).
-2. Place it in `/data/models/` on the Llamaste machine.
-3. Reboot. Llamaste selects the best model for your available RAM automatically.
+1. Click the **Dashboard** tab → **Download Recommended Model** button.
+2. Llamaste downloads the best Qwen2.5 model for your RAM (1.5 B, 3 B, 7 B, or 14 B) from Hugging Face.
+3. After download completes, the server restarts inference automatically.
+
+Alternatively, copy a GGUF file to `/data/models/` and reboot — Llamaste selects the best model for your available RAM.
 
 ---
 
@@ -247,32 +248,76 @@ A live system health overview with auto-refreshing cards:
 Administrative information and settings:
 
 - **Model Management** -- shows the active model
+- **MCP Server** -- API endpoint URL, full Bearer token (copy button), Claude Desktop config snippet, key regeneration
 - **Scheduled Tasks** -- lists recurring tasks created via the scheduler
-- **Network** -- IP address and boot mode details
+- **Network** -- static/DHCP configuration
 - **About** -- version and project information
 
 ### Notifications
 
-When the scheduler fires a task or a system alert triggers (high RAM, low disk, high temperature), a **toast notification** slides in from the top-right corner. A badge on the notification bell in the status bar shows the count of unread notifications.
+Toast notifications slide in from the top-right corner. A badge on the notification bell shows the unread count.
+
+| Notification | When |
+|---|---|
+| **Llamaste Ready** | Once at startup — shows the server URL |
+| **No AI Model Loaded** | 60 seconds after boot if no model is present (repeats every 30 min) |
+| **High RAM / Disk / Temperature** | When usage exceeds threshold (RAM > 85%, Disk > 90%, Temp > 80 °C) |
+| **Scheduled task fired** | When a recurring task runs and produces output |
 
 ---
 
 ## Built-In Tools
 
-Llamaste includes 32 tools across 8 categories. The AI calls these automatically during conversation, or you can ask for specific operations.
+Llamaste includes 44 tools across 11 categories. The AI calls these automatically during conversation, or you can ask for specific operations.
 
-| Category     | Tools                                                                 |
-|--------------|-----------------------------------------------------------------------|
-| **fs.**      | list_directory, read_file, write_file, delete_file, disk_usage, search |
-| **process.** | list, info                                                            |
-| **network.** | interfaces, connections, dns_lookup, ping                             |
-| **system.**  | info, uptime, memory, temperature, shutdown, reboot                   |
-| **config.**  | get, set, list, reset                                                 |
-| **model.**   | list, info, current                                                   |
-| **schedule.**| create, list, delete, update                                          |
-| **install.** | detect_disks, to_disk, progress                                      |
-
+| Category      | Tools |
+|---------------|-------|
+| **fs.**       | list_directory, read_file, write_file, delete_file, disk_usage, search |
+| **process.**  | list, info |
+| **network.**  | interfaces, connections, dns_lookup, ping, set_ip_static, set_ip_dhcp |
+| **system.**   | info, uptime, memory, temperature, shutdown, reboot |
+| **config.**   | get, set, list, reset |
+| **model.**    | list, info, current, recommended, search, files, download, usb_import |
+| **schedule.** | create, list, delete, update |
+| **auth.**     | set_password, get_status |
+| **audio.**    | status, transcribe, speak, config, download_model |
+| **install.**  | list_disks, install, progress |
 Destructive operations (shutdown, reboot, delete_file, install.to_disk) require a confirmation flag to execute.
+
+---
+
+## Connecting Claude Desktop (MCP)
+
+Llamaste exposes all 44 tools to Claude Desktop and other MCP clients via the Model Context Protocol.
+
+### Quick Setup
+
+1. Open the Llamaste web UI → **System** tab → **MCP Server** card.
+2. Copy the pre-filled **Claude Desktop configuration snippet** (it includes the live API key and device IP).
+3. Paste it into `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/.config/Claude/claude_desktop_config.json` (Mac/Linux).
+4. Restart Claude Desktop.
+
+### Manual Configuration
+
+```json
+{
+  "mcpServers": {
+    "llamaste": {
+      "type": "http",
+      "url": "http://llamaste.local/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-64-hex-api-key>"
+      }
+    }
+  }
+}
+```
+
+Get your API key from **System → MCP Server** in the web UI. Replace `llamaste.local` with the device IP if mDNS is unavailable on your network.
+
+### Auto-Discovery
+
+MCP clients that support DNS-SD can discover Llamaste automatically — it advertises as `_mcp._tcp.local` on your LAN.
 
 ---
 
@@ -432,15 +477,12 @@ For detailed build instructions, architecture documentation, and the API referen
 
 ## Known Limitations (Alpha)
 
-This is an alpha release. The following limitations are expected and will be addressed in upcoming releases:
-
-- **Stub mode**: AI responses are placeholder text. Real inference (Qwen2.5 models via llama.cpp) is coming in the next release.
-- **No authentication**: The web UI and API are open to anyone on the network. Use on a trusted LAN only.
-- **No WiFi**: Only wired Ethernet is supported.
-- **No audio or voice**: Speech input/output is planned for Phase 3.
-- **Desktop mode untested**: The Wayland compositor code is written but awaits a full Buildroot image build for end-to-end testing.
-- **Single-user**: There are no user accounts or multi-user sessions.
-- **No HTTPS**: The HTTP server does not support TLS. Do not expose it to the public internet.
+- **No WiFi**: Only wired Ethernet is supported. WiFi drivers are not included.
+- **Voice requires desktop mode**: The whisper + Flite voice pipeline only activates in desktop mode (boots into kiosk browser). Server mode (headless) has no voice to save RAM.
+- **Single-user**: There are no multi-user accounts. One device password protects everything.
+- **No HTTPS**: The HTTP server does not support TLS. Do not expose it to the public internet without a reverse proxy.
+- **CPU inference only**: No GPU acceleration in this release. Inference speed scales with CPU cores and AVX2 support.
+- **No OTA updates yet**: A/B partitions are reserved; update mechanism is planned for Phase 4.
 
 ---
 

@@ -86,8 +86,8 @@ The child process runs several background threads:
 | `tools_schedule.cpp` | ~165 | Schedule tools: `schedule.create`, `schedule.list`, `schedule.delete`, `schedule.update`. Thin wrappers that delegate to the `Scheduler` class. |
 | `scheduler.h` | ~105 | `ScheduledTask`, `AlertConfig`, `Notification` structs, `Scheduler` class declaration. |
 | `scheduler.cpp` | ~850 | Scheduler implementation: background thread, cron parser, task CRUD, alert monitoring (RAM/disk/temp), persistence, notification queue. |
-| `net_mdns.cpp` | ~350 | Multicast DNS responder for `llamaste.local` discovery. Listens on UDP 5353, responds to A-record queries. Includes `get_local_ip()` static method. |
-| `net_mdns.h` | ~30 | `MdnsResponder` class. |
+| `net_mdns.cpp` | ~450 | Multicast DNS responder. Responds to A-record queries for `llamaste.local` and DNS-SD (RFC 6763) PTR/SRV/TXT queries for registered services. Sends proactive announcements on startup. Includes `get_local_ip()`. |
+| `net_mdns.h` | ~55 | `MdnsResponder` class + `MdnsServiceRecord` struct. `advertise_service(type, port, txt)` registers and announces a DNS-SD service. |
 | `embed_web.cmake` | ~95 | CMake script that converts web assets to C byte arrays (`const unsigned char[]`) for compile-time embedding. |
 | `CMakeLists.txt` | ~85 | Build configuration: sources list, static linking option, liblzma detection, web embedding, install target. |
 | `httplib.h` | ~8000 | cpp-httplib v0.18.3 single-header HTTP library (vendored). |
@@ -632,30 +632,53 @@ The scheduler checks system health on every 10-second cycle:
 |-------|--------|-------------------|----------|
 | High RAM | `read_meminfo_kb("MemTotal"/"MemAvailable")` | 85% used | 300s (5 min) |
 | High Disk | `statvfs("/data")` | 90% used | 300s (5 min) |
-| High Temperature | `/sys/class/thermal/thermal_zone0/temp` | 80 C | 300s (5 min) |
+| High Temperature | `/sys/class/thermal/thermal_zone0/temp` | 80 °C | 300s (5 min) |
+| No AI Model | `model_check_fn_()` callback | model not loaded | 60s startup grace, 1800s (30 min) |
 
-Alert thresholds and cooldowns are configurable via `AlertConfig`. Each alert type has an independent cooldown timer (`last_ram_alert_`, `last_disk_alert_`, `last_temp_alert_`).
+The **model-not-loaded alert** fires 60 seconds after startup (grace period for model loading) and at most every 30 minutes while no model is present. The check function is injected via `set_model_check_fn(fn)` — this avoids direct coupling between the scheduler and child_main globals.
+
+Alert thresholds and cooldowns are configurable via `AlertConfig`. Each alert type has an independent cooldown timer.
 
 ### Notification Queue
 
 When a scheduled task fires or an alert triggers, a `Notification` struct is pushed to `pending_notifications_`. The SSE endpoint (`/llamaste/notifications`) calls `drain_notifications()` every 500ms to deliver them to connected clients.
 
+Notifications can also be pushed directly from any thread via the public `push_notification()` method — used for the startup toast before `svr.listen()` blocks:
+
+```cpp
+// Push a notification from any thread (e.g. at server startup)
+Notification n;
+n.id    = "startup";
+n.type  = "info";
+n.title = "Llamaste Ready";
+n.body  = "Server running at http://10.0.2.15/";
+n.time  = time(nullptr);
+g_scheduler.push_notification(std::move(n));
+```
+
 Notification structure:
 ```json
 {
     "id": "e5f6a7b8",
-    "type": "alert|scheduled|reminder",
-    "title": "High RAM Usage",
-    "body": "RAM usage at 87% (3584 MB / 4096 MB used)",
+    "type": "info|alert|scheduled|reminder",
+    "title": "Llamaste Ready",
+    "body": "Server running at http://10.0.2.15/ — AI ready",
     "time": 1741036800
 }
 ```
+
+| `type` | Meaning |
+|--------|---------|
+| `info` | Informational toast (green) — e.g. startup, model loaded |
+| `alert` | System health warning (red) — RAM/disk/temp/model |
+| `scheduled` | Scheduled task result |
+| `reminder` | User-set reminder |
 
 ### Thread Safety
 
 The scheduler uses a two-mutex pattern:
 
-- `mutex_` protects `tasks_`, `alerts_`, `inference_fn_`, `notify_fn_`, and `data_dir_`
+- `mutex_` protects `tasks_`, `alerts_`, `inference_fn_`, `notify_fn_`, `model_check_fn_`, and `data_dir_`
 - `notif_mutex_` protects `pending_notifications_`
 
 The `check_tasks()` method uses a three-phase pattern to avoid holding `mutex_` during inference (which can take minutes):
@@ -973,11 +996,34 @@ Llamaste exposes all its tools as an MCP server, allowing Claude Desktop and oth
 
 ### Authentication
 
-The `/mcp` endpoint uses the same `require_auth` cookie middleware as all other protected routes. For Claude Desktop:
+Two auth methods are accepted on `/mcp`:
 
-1. Log in to Llamaste web UI: `http://llamaste.local/`
-2. Open DevTools → Application → Cookies → copy `llamaste_sid` value
-3. Add to Claude Desktop config with a `Cookie` header (see below)
+| Method | Header | Best For |
+|--------|--------|---------|
+| **Bearer token** (recommended) | `Authorization: Bearer <64-hex-key>` | Headless clients (Claude Desktop, scripts) — no browser login needed |
+| **Session cookie** | `Cookie: llamaste_sid=<token>` | Browser-based tools / same-origin requests |
+
+#### Bearer Token (API Key)
+
+A persistent 64-character hex key is generated on first use and stored at `/data/llamaste/mcp_key.txt`. It survives reboots.
+
+Manage via the System panel → MCP card, or via the API:
+
+```bash
+# Get current key
+curl -s -b "llamaste_sid=<token>" http://llamaste.local/llamaste/mcp/key
+
+# Regenerate key (old key immediately rejected)
+curl -s -X POST -b "llamaste_sid=<token>" http://llamaste.local/llamaste/mcp/key/regenerate
+```
+
+#### DNS-SD Auto-Discovery
+
+Llamaste advertises itself as an MCP server via mDNS DNS-SD (RFC 6763). MCP clients that support DNS-SD can discover it automatically:
+
+- **Service type:** `_mcp._tcp.local`
+- **Instance:** `llamaste._mcp._tcp.local`
+- **TXT records:** `path=/mcp`, `version=2025-03-26`, `auth=bearer`
 
 ### Claude Desktop Configuration
 
@@ -990,42 +1036,44 @@ Edit `~/.config/Claude/claude_desktop_config.json` (Linux/Mac) or `%APPDATA%\Cla
       "type": "http",
       "url": "http://llamaste.local/mcp",
       "headers": {
-        "Cookie": "llamaste_sid=<your-session-token>"
+        "Authorization": "Bearer <your-64-hex-api-key>"
       }
     }
   }
 }
 ```
 
-Replace `llamaste.local` with the device IP if mDNS isn't available. The System panel in the Llamaste web UI shows a pre-filled config snippet for your device.
+The System panel in the Llamaste web UI shows a pre-filled config snippet with the live key and device IP.
 
 ### Protocol Example
 
 ```bash
+API_KEY="<your-64-hex-api-key>"
+
 # Initialize a session
-curl -X POST http://llamaste.local/mcp \
+SESSION=$(curl -s -X POST http://llamaste.local/mcp \
   -H 'Content-Type: application/json' \
-  -H 'Cookie: llamaste_sid=<token>' \
+  -H "Authorization: Bearer $API_KEY" \
   -D - \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
        "params":{"protocolVersion":"2025-03-26",
                  "clientInfo":{"name":"test","version":"1.0"},
-                 "capabilities":{}}}'
-# Response headers include: Mcp-Session-Id: <32-hex-char-id>
+                 "capabilities":{}}}' \
+  | grep -i '^Mcp-Session-Id:' | tr -d '\r' | cut -d' ' -f2)
 
-# List tools (use session ID from initialize)
-curl -X POST http://llamaste.local/mcp \
+# List tools
+curl -s -X POST http://llamaste.local/mcp \
   -H 'Content-Type: application/json' \
-  -H 'Cookie: llamaste_sid=<token>' \
-  -H 'Mcp-Session-Id: <session-id>' \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Mcp-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 # Returns: {"result":{"tools":[{"name":"fs.list_directory",...},...44 total]}}
 
 # Call a tool
-curl -X POST http://llamaste.local/mcp \
+curl -s -X POST http://llamaste.local/mcp \
   -H 'Content-Type: application/json' \
-  -H 'Cookie: llamaste_sid=<token>' \
-  -H 'Mcp-Session-Id: <session-id>' \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Mcp-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"system.info","arguments":{}}}'
 ```
@@ -1426,6 +1474,50 @@ A pre-configured VM exists for testing:
 - Compositor launch: TCP poll, browser probe, fork/exec with fallback chain
 - sys-a partition increased to 256 MB
 
-**Pending:**
-- Task 19: WSL2 Buildroot build with desktop packages, QEMU desktop mode testing
-- Task 20: Real llama.cpp inference integration (replace stub_inference)
+**Phase 2d: Inference Integration (Task 20, complete)**
+- llama-server Buildroot package (llama.cpp b5460, static CPU build)
+- `llama_inference()` HTTP proxy to localhost:8088 `/v1/chat/completions`
+- Lifecycle: fork/exec, health poll (60s timeout), crash recovery (3 retries), SIGTERM cleanup
+- `g_inference_fn` hot-swap from stub to real inference on model load
+
+**Phase 2e: Model Download (complete)**
+- 5 tools: `model.recommended`, `model.search`, `model.files`, `model.download`, `model.usb_import`
+- Dashboard download button with progress bar
+- libcurl for HTTPS downloads with CA certificate support
+- `/data/models/` storage with model selection on next restart
+
+**Phase 2: Auth + Network (complete)**
+- bcrypt password hashing, session tokens, `require_auth` middleware
+- First-boot setup flow (setup.html), device password management
+- Static/DHCP network config via REST API + web UI + init apply at boot
+- 128 host tests across 9 suites
+
+**Phase 3a: Voice I/O (complete)**
+- whisper.cpp v1.8.3 static library, ALSA capture (16 kHz, mono, S16_LE)
+- Energy-based VAD: RMS threshold, 300ms silence = end of utterance
+- Wake phrase detection: "llamaste" in transcription → agent loop
+- Flite TTS (BSD) linked in binary: `cmu_us_kal` voice, ALSA playback
+- 5 audio tools: `audio.status/transcribe/speak/config/download_model`
+- Web UI: microphone button (WebAudio capture), TTS toggle, voice status indicator
+- Voice pipeline gated on desktop mode (saves ~200 MB RAM on server)
+
+**Phase 3: MCP Server (complete)**
+- Streamable HTTP transport (MCP spec 2025-03-26), single `POST /mcp` endpoint
+- JSON-RPC 2.0 with session IDs (32-hex, 30-min idle expiry)
+- All 44 tools exposed; `initialize`, `ping`, `tools/list/call`, `resources/*`, `prompts/*`
+- CORS headers for browser-based clients
+
+**Phase 3: MCP API Key (complete)**
+- Persistent 64-hex Bearer token stored at `/data/llamaste/mcp_key.txt`
+- `Authorization: Bearer <key>` accepted alongside session cookies
+- Key management: `GET /llamaste/mcp/key`, `POST /llamaste/mcp/key/regenerate`
+- System panel shows live key and pre-filled Claude Desktop config snippet
+
+**Phase 3: mDNS DNS-SD + Proactive Notifications (complete)**
+- `MdnsServiceRecord` + `advertise_service()`: PTR/SRV/TXT/A DNS-SD (RFC 6763)
+- MCP service advertised as `_mcp._tcp.local` with TXT `path=/mcp auth=bearer`
+- Proactive announcement sent twice on startup (UDP loss tolerance)
+- `push_notification()`: thread-safe public API on Scheduler
+- `set_model_check_fn()`: injected callback for model-loaded check
+- Model-not-loaded alert: 60s grace, 30-min cooldown
+- Startup toast: queued before `svr.listen()`, delivered to first SSE client
