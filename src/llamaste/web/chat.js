@@ -421,4 +421,155 @@
     return id;
   }
 
+  // --- Microphone Recording (captures raw PCM, uploads as WAV) ---
+  var micBtn = document.getElementById('mic-btn');
+  var recording = false;
+  var micStream = null;
+  var audioCtx = null;
+  var scriptNode = null;
+  var pcmBuffers = [];
+
+  window.toggleMic = function () {
+    if (recording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      appendMessage('system', 'Microphone not available in this browser.');
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } })
+      .then(function (stream) {
+        recording = true;
+        pcmBuffers = [];
+        micStream = stream;
+        micBtn.classList.add('recording');
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        var source = audioCtx.createMediaStreamSource(stream);
+
+        // ScriptProcessorNode to capture raw PCM (4096 buffer, mono)
+        scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+        scriptNode.onaudioprocess = function (e) {
+          var data = e.inputBuffer.getChannelData(0);
+          pcmBuffers.push(new Float32Array(data));
+        };
+
+        source.connect(scriptNode);
+        scriptNode.connect(audioCtx.destination);
+      })
+      .catch(function (err) {
+        appendMessage('system', 'Microphone access denied: ' + err.message);
+      });
+  }
+
+  function stopRecording() {
+    recording = false;
+
+    if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
+    if (audioCtx) { audioCtx.close(); }
+    if (micStream) {
+      micStream.getTracks().forEach(function (t) { t.stop(); });
+      micStream = null;
+    }
+
+    micBtn.classList.remove('recording');
+
+    if (pcmBuffers.length === 0) return;
+
+    micBtn.classList.add('transcribing');
+
+    // Merge PCM buffers into a single Float32Array
+    var totalLen = 0;
+    for (var i = 0; i < pcmBuffers.length; i++) totalLen += pcmBuffers[i].length;
+    var pcm = new Float32Array(totalLen);
+    var offset = 0;
+    for (var i = 0; i < pcmBuffers.length; i++) {
+      pcm.set(pcmBuffers[i], offset);
+      offset += pcmBuffers[i].length;
+    }
+    pcmBuffers = [];
+
+    // Encode as 16-bit PCM WAV
+    var wavBlob = encodeWav(pcm, audioCtx ? audioCtx.sampleRate : 16000);
+    audioCtx = null;
+
+    transcribeAudio(wavBlob);
+  }
+
+  function encodeWav(samples, sampleRate) {
+    var buffer = new ArrayBuffer(44 + samples.length * 2);
+    var view = new DataView(buffer);
+
+    // RIFF header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(view, 8, 'WAVE');
+
+    // fmt chunk
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);           // chunk size
+    view.setUint16(20, 1, true);            // PCM format
+    view.setUint16(22, 1, true);            // mono
+    view.setUint32(24, sampleRate, true);    // sample rate
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true);            // block align
+    view.setUint16(34, 16, true);           // bits per sample
+
+    // data chunk
+    writeString(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    // Convert Float32 [-1,1] to Int16
+    for (var i = 0, off = 44; i < samples.length; i++, off += 2) {
+      var s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  }
+
+  function writeString(view, offset, str) {
+    for (var i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  function transcribeAudio(blob) {
+    var formData = new FormData();
+    formData.append('audio', blob, 'recording.wav');
+
+    fetch('/llamaste/audio/transcribe', {
+      method: 'POST',
+      credentials: 'include',
+      body: formData
+    })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      micBtn.classList.remove('transcribing');
+      if (data.text && data.text.trim()) {
+        // Put transcribed text in the input for user to review/edit before sending
+        inputEl.value = (inputEl.value ? inputEl.value + ' ' : '') + data.text.trim();
+        inputEl.focus();
+        inputEl.dispatchEvent(new Event('input'));
+      } else if (data.error) {
+        appendMessage('system', 'Transcription error: ' + data.error);
+      } else {
+        appendMessage('system', 'No speech detected.');
+      }
+    })
+    .catch(function (err) {
+      micBtn.classList.remove('transcribing');
+      appendMessage('system', 'Transcription failed: ' + err.message);
+    });
+  }
+
 })();
