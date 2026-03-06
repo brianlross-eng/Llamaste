@@ -28,7 +28,7 @@ LLAMA_SERVER_CONF_OPTS = \
 define LLAMA_SERVER_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/bin/llama-server \
 		$(TARGET_DIR)/opt/llamaste/llama-server
-	$(INSTALL) -D -m 0755 $(@D)/bin/llama-rpc-server \
+	$(INSTALL) -D -m 0755 $(@D)/bin/rpc-server \
 		$(TARGET_DIR)/opt/llamaste/llama-rpc-server
 endef
 
