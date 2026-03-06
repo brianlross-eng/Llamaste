@@ -18,7 +18,7 @@ LLAMA_SERVER_CONF_OPTS = \
 	-DGGML_CUDA=OFF \
 	-DGGML_VULKAN=OFF \
 	-DGGML_METAL=OFF \
-	-DGGML_RPC=OFF \
+	-DGGML_RPC=ON \
 	-DGGML_BLAS=OFF \
 	-DLLAMA_CURL=OFF \
 	-DLLAMA_BUILD_TESTS=OFF \
@@ -28,6 +28,8 @@ LLAMA_SERVER_CONF_OPTS = \
 define LLAMA_SERVER_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/bin/llama-server \
 		$(TARGET_DIR)/opt/llamaste/llama-server
+	$(INSTALL) -D -m 0755 $(@D)/bin/llama-rpc-server \
+		$(TARGET_DIR)/opt/llamaste/llama-rpc-server
 endef
 
 $(eval $(cmake-package))
