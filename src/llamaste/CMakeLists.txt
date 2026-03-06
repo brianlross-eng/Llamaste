@@ -22,6 +22,8 @@ set(LLAMASTE_SOURCES
     tools_auth.cpp
     tools_model_download.cpp
     tools_audio.cpp
+    tools_cluster.cpp
+    cluster.cpp
     voice.cpp
     mcp_server.cpp
     agent.cpp
