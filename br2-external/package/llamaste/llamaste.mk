@@ -28,7 +28,11 @@ LLAMASTE_CONF_OPTS = \
 	-DLLAMASTE_STATIC=OFF \
 	-DLLAMASTE_EMBED_WEB=ON
 
-LLAMASTE_DEPENDENCIES = libcurl openssl whisper-cpp alsa-lib espeak-ng sherpa-onnx
+# sherpa-onnx added when BR2_PACKAGE_SHERPA_ONNX=y is enabled in .config
+LLAMASTE_DEPENDENCIES = libcurl openssl whisper-cpp alsa-lib espeak-ng
+ifeq ($(BR2_PACKAGE_SHERPA_ONNX),y)
+LLAMASTE_DEPENDENCIES += sherpa-onnx
+endif
 
 define LLAMASTE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \
