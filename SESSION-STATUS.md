@@ -62,11 +62,25 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | Build ORT + sherpa-onnx in Buildroot (musl) | DONE (e0e0bf0) |
 | Hash files updated with real values | DONE (5866523) |
 | Deploy to VDI, llamaste links sherpa-onnx | DONE |
-| Piper voice model download tool | PENDING |
+| Piper voice model download tool (voice.list_tts, voice.download_tts) | DONE (9dca894) |
 
 ---
 
-## Latest Session (2026-03-07) -- Phase 5 + Phase B: Build, Test, Deploy
+## Latest Session (2026-03-07) -- TTS Voice Model Download Tools
+
+### voice.list_tts + voice.download_tts — 55 tools total (9dca894)
+
+- Added 2 new tools: `voice.list_tts` (list Piper voices), `voice.download_tts` (download from HuggingFace)
+- TTS voice table: amy-low (16MB, female), lessac-medium (63MB, male)
+- Download helper with curl resume support, `.part` file pattern
+- Fixed `voice.h` default `tts_data_dir`: `/usr/share/espeak-ng-data` (was wrong path)
+- 13/13 audio tests pass (3 new tests for TTS tools)
+- Deployed to VDI: 55 tools confirmed via `/health` endpoint
+- voice.cpp sherpa-onnx integration fully scaffolded — will auto-activate when model is downloaded
+
+---
+
+## Previous Session (2026-03-07) -- Phase 5 + Phase B: Build, Test, Deploy
 
 ### Phase 5: Mesh Auto-Offload — Built & Verified on VDI
 
@@ -176,9 +190,9 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 ## Next Steps
 
 ### Immediate
-1. **Piper voice model download tool** -- Create tool/script for first-boot TTS model setup (downloads .onnx + tokens from HuggingFace)
-2. **Activate neural TTS in voice.cpp** -- Wire up sherpa-onnx C API for Piper VITS synthesis (scaffolding exists)
-3. **Multi-node integration test** -- Test auto-offload with 2+ VMs on same network
+1. **End-to-end neural TTS test** -- Download amy-low model on VM, verify sherpa-onnx activates and speaks
+2. **Multi-node integration test** -- Test auto-offload with 2+ VMs on same network
+3. **More TTS voices** -- Add additional Piper voices to the voice table (e.g. British, other quality levels)
 
 ---
 
@@ -210,7 +224,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
 ## Test Suites
-12 suites, ~179 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster (16 tests), updater
+12 suites, ~182 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio (13 tests), cluster (16 tests), updater
 
 ## VirtualBox VM
 - **VM Name**: "Llamaste2", Location: `D:\Llamaste\vm\Llamaste2\`
