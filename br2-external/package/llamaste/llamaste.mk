@@ -28,7 +28,7 @@ LLAMASTE_CONF_OPTS = \
 	-DLLAMASTE_STATIC=OFF \
 	-DLLAMASTE_EMBED_WEB=ON
 
-LLAMASTE_DEPENDENCIES = libcurl openssl whisper-cpp alsa-lib sherpa-onnx
+LLAMASTE_DEPENDENCIES = libcurl openssl whisper-cpp alsa-lib espeak-ng
 
 define LLAMASTE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \

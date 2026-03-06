@@ -35,6 +35,10 @@ extern "C" {
 extern "C" cst_voice* register_cmu_us_kal(const char* voxdir);
 #endif
 
+#ifdef HAVE_ESPEAK_NG
+#include <espeak-ng/speak_lib.h>
+#endif
+
 #ifdef HAVE_SHERPA_ONNX
 #include <sherpa-onnx/c-api/c-api.h>
 #endif
@@ -176,6 +180,10 @@ struct VoicePipeline::Impl {
     cst_voice* flite_voice = nullptr;
     bool flite_initialized = false;
 #endif
+#ifdef HAVE_ESPEAK_NG
+    bool espeak_initialized = false;
+    int espeak_sample_rate = 22050;
+#endif
 #ifdef HAVE_SHERPA_ONNX
     const SherpaOnnxOfflineTts* sherpa_tts = nullptr;
     bool sherpa_initialized = false;
@@ -208,6 +216,12 @@ VoicePipeline::~VoicePipeline() {
         impl_->capture_handle = nullptr;
     }
 #endif
+#ifdef HAVE_ESPEAK_NG
+    if (impl_->espeak_initialized) {
+        espeak_Terminate();
+        impl_->espeak_initialized = false;
+    }
+#endif
 #ifdef HAVE_SHERPA_ONNX
     if (impl_->sherpa_tts) {
         SherpaOnnxDestroyOfflineTts(impl_->sherpa_tts);
@@ -229,27 +243,27 @@ bool VoicePipeline::init(const VoiceConfig& config) {
     state_.store(VoiceState::INITIALIZING);
 
 #ifdef HAVE_WHISPER
-    // Load whisper model
-    fprintf(stderr, "[voice] Loading whisper model: %s\n",
-            config_.whisper_model.c_str());
-
-    struct whisper_context_params cparams = whisper_context_default_params();
-    impl_->whisper_ctx = whisper_init_from_file_with_params(
-        config_.whisper_model.c_str(), cparams);
-
-    if (!impl_->whisper_ctx) {
-        last_error_ = "Failed to load whisper model: " + config_.whisper_model;
-        fprintf(stderr, "[voice] %s\n", last_error_.c_str());
-        state_.store(VoiceState::ERROR);
-        return false;
+    // Load whisper model (optional — TTS works without it)
+    {
+        struct whisper_context_params cparams = whisper_context_default_params();
+#ifndef _WIN32
+        if (access(config_.whisper_model.c_str(), R_OK) == 0) {
+            fprintf(stderr, "[voice] Loading whisper model: %s\n",
+                    config_.whisper_model.c_str());
+            impl_->whisper_ctx = whisper_init_from_file_with_params(
+                config_.whisper_model.c_str(), cparams);
+            if (impl_->whisper_ctx) {
+                fprintf(stderr, "[voice] Whisper model loaded successfully\n");
+            } else {
+                fprintf(stderr, "[voice] Whisper model failed to load — STT disabled\n");
+            }
+        } else {
+            fprintf(stderr, "[voice] Whisper model not found — STT disabled, TTS-only\n");
+        }
+#endif
     }
-
-    fprintf(stderr, "[voice] Whisper model loaded successfully\n");
 #else
-    last_error_ = "whisper.cpp not compiled in (HAVE_WHISPER not defined)";
-    fprintf(stderr, "[voice] %s\n", last_error_.c_str());
-    state_.store(VoiceState::DISABLED);
-    return false;
+    fprintf(stderr, "[voice] whisper.cpp not compiled — STT disabled, TTS-only\n");
 #endif
 
     // ---------------------------------------------------------------
@@ -312,7 +326,33 @@ bool VoicePipeline::init(const VoiceConfig& config) {
     }
 #endif
 
-    // Fallback to Flite
+    // Fallback to espeak-ng (22kHz formant synthesis)
+#ifdef HAVE_ESPEAK_NG
+    if (!tts_initialized && !impl_->espeak_initialized) {
+        // espeak-ng data path: try bundled location, then system path
+        const char* data_path = "/usr/share/espeak-ng-data";
+#ifndef _WIN32
+        if (access(data_path, R_OK) != 0)
+            data_path = nullptr;  // let espeak-ng use its compiled-in default
+#endif
+        int rate = espeak_Initialize(AUDIO_OUTPUT_RETRIEVAL, 0, data_path, 0);
+        if (rate > 0) {
+            impl_->espeak_sample_rate = rate;
+            espeak_SetVoiceByName("en");
+            espeak_SetParameter(espeakRATE, 175, 0);     // normal speed
+            espeak_SetParameter(espeakVOLUME, 100, 0);   // full volume
+            espeak_SetParameter(espeakPITCH, 50, 0);     // default pitch
+            impl_->espeak_initialized = true;
+            impl_->tts_engine_name = "espeak-ng";
+            tts_initialized = true;
+            fprintf(stderr, "[voice] espeak-ng TTS initialized (%dHz)\n", rate);
+        } else {
+            fprintf(stderr, "[voice] espeak-ng init failed (error %d)\n", rate);
+        }
+    }
+#endif
+
+    // Fallback to Flite (8kHz, last resort)
 #ifdef HAVE_FLITE
     if (!tts_initialized && !impl_->flite_initialized) {
         flite_init();
@@ -423,6 +463,43 @@ std::vector<int16_t> VoicePipeline::speak(const std::string& text, int* out_samp
         }
         if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
         fprintf(stderr, "[voice] TTS: sherpa-onnx generate returned empty\n");
+    }
+#endif
+
+#ifdef HAVE_ESPEAK_NG
+    if (impl_->espeak_initialized) {
+        // espeak-ng synthesis via callback — accumulate PCM samples
+        std::vector<int16_t> pcm;
+
+        espeak_SetSynthCallback([](short* wav, int numsamples,
+                                    espeak_EVENT* events) -> int {
+            if (!wav || numsamples <= 0) return 0;
+            if (events && events->user_data) {
+                auto* p = static_cast<std::vector<int16_t>*>(events->user_data);
+                p->insert(p->end(), wav, wav + numsamples);
+            }
+            return 0;
+        });
+
+        espeak_Synth(text.c_str(), text.size() + 1, 0, POS_CHARACTER, 0,
+                     espeakCHARS_AUTO, nullptr, &pcm);
+        espeak_Synchronize();
+
+        if (!pcm.empty()) {
+            int sample_rate = impl_->espeak_sample_rate;
+            fprintf(stderr, "[voice] TTS: %zu samples @ %dHz (%.1fs)\n",
+                    pcm.size(), sample_rate,
+                    (float)pcm.size() / sample_rate);
+
+            if (out_sample_rate) *out_sample_rate = sample_rate;
+
+#ifdef HAVE_ALSA
+            play_audio(pcm.data(), pcm.size(), sample_rate);
+#endif
+            state_.store(VoiceState::LISTENING);
+            return pcm;
+        }
+        fprintf(stderr, "[voice] TTS: espeak-ng synthesis returned empty\n");
     }
 #endif
 

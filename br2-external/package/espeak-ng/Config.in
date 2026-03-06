@@ -1,0 +1,9 @@
+config BR2_PACKAGE_ESPEAK_NG
+	bool "espeak-ng"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  eSpeak NG is an open source speech synthesizer that supports
+	  more than hundred languages and accents. It uses formant
+	  synthesis, producing clear speech at 22kHz sample rate.
+
+	  https://github.com/espeak-ng/espeak-ng
