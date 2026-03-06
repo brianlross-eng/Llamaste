@@ -231,6 +231,33 @@
             <p class="text-muted">Llamaste LLM-OS v0.1 — The LLM is your operating system.</p>
           </div>
 
+          <!-- System Update -->
+          <div class="system-card" id="update-card">
+            <h3>System Update</h3>
+            <div class="dash-row">
+              <span class="label">Version</span>
+              <span id="update-version" class="value">—</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Active Slot</span>
+              <span id="update-slot" class="value">—</span>
+            </div>
+            <div class="dash-row" id="update-available-row" style="display:none">
+              <span class="label">Available</span>
+              <span id="update-available" class="value" style="color:#00e5a0"></span>
+            </div>
+            <div id="update-progress-row" style="display:none">
+              <div style="height:6px;background:#333;border-radius:3px;margin:8px 0">
+                <div id="update-progress-bar" style="height:100%;width:0%;background:#00e5a0;border-radius:3px;transition:width 0.3s"></div>
+              </div>
+              <p id="update-progress-text" class="text-muted" style="font-size:0.8em"></p>
+            </div>
+            <div class="system-actions" style="margin-top:8px">
+              <button id="update-check-btn" class="btn-sm">Check for Updates</button>
+              <button id="update-rollback-btn" class="btn-sm" style="display:none">Rollback</button>
+            </div>
+          </div>
+
           <div class="system-card" id="mcp-card">
             <h3>MCP Server</h3>
             <p class="text-muted" style="margin-bottom:8px">Connect Claude Desktop or other MCP clients to Llamaste's tools.</p>

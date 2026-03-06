@@ -263,6 +263,92 @@
     return m + 'm';
   }
 
+  // --- Update card ---
+  function updateUpdateCard() {
+    fetch('/llamaste/update/status', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        var verEl = document.getElementById('update-version');
+        var slotEl = document.getElementById('update-slot');
+        var rollbackBtn = document.getElementById('update-rollback-btn');
+        var progressRow = document.getElementById('update-progress-row');
+
+        if (verEl) verEl.textContent = data.version || '—';
+        if (slotEl) slotEl.textContent = data.active_slot || '—';
+
+        // Show rollback if inactive has a version
+        if (data.inactive_version && rollbackBtn) {
+          rollbackBtn.style.display = '';
+          rollbackBtn.textContent = 'Rollback to ' + data.inactive_version;
+        }
+
+        // Progress during install
+        if (progressRow && data.update_state && data.update_state !== 'idle') {
+          progressRow.style.display = '';
+          var bar = document.getElementById('update-progress-bar');
+          var text = document.getElementById('update-progress-text');
+          if (bar) bar.style.width = (data.update_progress || 0) + '%';
+          if (text) text.textContent = data.update_state + ' (' + (data.update_progress || 0) + '%)';
+        } else if (progressRow) {
+          progressRow.style.display = 'none';
+        }
+      })
+      .catch(function () {});
+  }
+
+  // Wire update buttons (once)
+  var checkBtn = document.getElementById('update-check-btn');
+  var rollbackBtn2 = document.getElementById('update-rollback-btn');
+
+  if (checkBtn && !checkBtn._wired) {
+    checkBtn._wired = true;
+    checkBtn.addEventListener('click', function () {
+      checkBtn.disabled = true;
+      checkBtn.textContent = 'Checking...';
+      fetch('/llamaste/update/check', { method: 'POST', credentials: 'include' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          checkBtn.disabled = false;
+          checkBtn.textContent = 'Check for Updates';
+          if (data.available) {
+            var availRow = document.getElementById('update-available-row');
+            var availEl = document.getElementById('update-available');
+            if (availRow) availRow.style.display = '';
+            if (availEl) availEl.textContent = 'v' + data.latest_version;
+          } else {
+            alert(data.message || 'No updates available');
+          }
+        })
+        .catch(function () {
+          checkBtn.disabled = false;
+          checkBtn.textContent = 'Check for Updates';
+        });
+    });
+  }
+
+  if (rollbackBtn2 && !rollbackBtn2._wired) {
+    rollbackBtn2._wired = true;
+    rollbackBtn2.addEventListener('click', function () {
+      if (!confirm('Roll back to the previous version? The system will need to reboot.')) return;
+      rollbackBtn2.disabled = true;
+      fetch('/llamaste/update/rollback', { method: 'POST', credentials: 'include' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          rollbackBtn2.disabled = false;
+          if (data.success) {
+            alert(data.message || 'Rollback prepared. Reboot to activate.');
+          } else {
+            alert('Rollback failed: ' + (data.error || 'unknown error'));
+          }
+        })
+        .catch(function () {
+          rollbackBtn2.disabled = false;
+          alert('Rollback request failed.');
+        });
+    });
+  }
+
   // --- Cluster status ---
   function updateClusterCard() {
     fetch('/llamaste/cluster/status', { credentials: 'include' })
@@ -333,6 +419,9 @@
 
     // Update cluster card
     updateClusterCard();
+
+    // Update update card
+    updateUpdateCard();
   }
 
   // Export to window so switchTab can call it
