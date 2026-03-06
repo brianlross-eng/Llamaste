@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-05 (end-of-shift wrap-up: skills, docs, CLAUDE.md, GitHub push)
+**Last updated**: 2026-03-06 (Phase 3 Mesh Clustering COMPLETE)
 
 ---
 
@@ -16,18 +16,75 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 
 ### Phase 3: MCP Server — COMPLETE (0d418fc)
 
+### Phase 3b: Mesh Clustering — COMPLETE (0adfdb0)
+
 | Sub-phase | Status |
 |-----------|--------|
 | 3a-1: STT Foundation | DONE — whisper.cpp package, voice.h/cpp, WAV parser, HTTP endpoints, mic button |
 | 3a-2: Always-Listening | DONE — ALSA capture thread, energy VAD, wake phrase detection, agent loop wiring |
 | 3a-3: Flite TTS | DONE — Flite (BSD) linked into binary, cmu_us_kal voice, ALSA playback, agent auto-speak |
 | 3a-4: Web UI Voice | DONE — /audio/tts WAV endpoint, TTS toggle button, voice status indicator, error handler fix |
+| 3a-5: TTS Upgrade | DONE — espeak-ng 22kHz replaces Flite 8kHz as primary TTS engine (f8835ef) |
 
-**Key design decision**: Voice pipeline only initializes in desktop mode (saves ~200MB RAM on headless server).
+**Key design decisions**:
+- Voice pipeline (TTS + STT) only initializes in desktop mode — server mode stays lean
+- STT/always-listening only when whisper model is available (whisper model is ~200MB)
+- TTS engine priority: sherpa-onnx (future) > espeak-ng (22kHz) > Flite (8kHz fallback)
 
 ---
 
-## Latest Session (2026-03-05) — Phase 3a Complete
+## Latest Session (2026-03-06) — Phase 3b Mesh Clustering
+
+### Phase 3b: Mesh Clustering (10 tasks, ~900 LOC)
+- **Design doc**: `docs/plans/2026-03-06-mesh-clustering-design.md`
+- **Implementation plan**: `docs/plans/2026-03-06-mesh-clustering-plan.md`
+- **Architecture**: llama.cpp RPC backend (tensor-level distribution), mDNS DNS-SD discovery, composite election score
+- **New files**: cluster.h, cluster.cpp (~120 LOC), tools_cluster.cpp (~120 LOC)
+- **Modified files**: child_main.cpp (~200 LOC), net_mdns.h/cpp (~250 LOC discovery), llama-server.mk, CMakeLists.txt, host-test.sh, index.html, system.js
+
+**Key features**:
+- `llama-rpc-server` (port 50052) spawned at boot on all nodes, exposing local compute
+- mDNS discovery: `_llama-rpc._tcp.local` PTR queries + response parsing + deduplication
+- ClusterManager: PeerInfo struct, election score `(ram_mb/1024)*10 + cpu_cores`, lowest IP tiebreak
+- State machine: STANDALONE → COORDINATOR/WORKER based on election result
+- Heartbeat thread: re-announce service + expire stale peers (90s) + re-discover every 30s
+- Topology change callback: coordinator restarts llama-server with `--rpc ip1:port,ip2:port,...`
+- 3 cluster tools: `cluster.status`, `cluster.peers`, `cluster.reload`
+- Web UI cluster card: role badge (green=coordinator, blue=worker), peer count, pooled RAM
+- `/llamaste/cluster/status` HTTP endpoint + cluster info in `/llamaste/system`
+- **Build fix**: llama.cpp binary is `rpc-server` not `llama-rpc-server` — install cmd corrected
+
+**Test suites**: 11 suites, 155 tests (8 new cluster tests)
+
+**Verified on VDI**:
+- 47 tools registered (37 base + 5 schedule + 2 auth + 3 cluster)
+- llama-rpc-server spawned on port 50052, reports 3917 MB backend memory
+- mDNS advertising `_llama-rpc._tcp.local` with TXT records (ram, cores, rpc_port, model)
+- Cluster role: standalone (single node, expected)
+- `/llamaste/cluster/status` returns correct JSON
+
+**Commits**: `551ab39`, `bb33e0d`, `e92baea`, `c797a81`, `10d2a7b`, `0e45628`, `3b821e7`, `0adfdb0`
+
+---
+
+## Previous Session (2026-03-05) — TTS Upgrade to espeak-ng
+
+### Phase 3a-5: TTS Upgrade (f8835ef)
+- **espeak-ng** (GPL-3.0+, csukuangfj CMake fork) replaces Flite as primary TTS
+- **22kHz sample rate** (2.75x improvement over Flite 8kHz)
+- **Buildroot package**: cross-compiles library, native-builds phoneme data (arch-independent)
+- **Voice pipeline**: TTS now initializes in all boot modes (not just desktop)
+  - Whisper STT remains optional — failure no longer blocks TTS init
+  - espeak-ng callback API: `espeak_SetSynthCallback` accumulates PCM samples
+- **Strategic pivot**: sherpa-onnx (neural TTS) deferred — onnxruntime pre-built binaries are glibc-linked, incompatible with musl. Code retained behind `#ifdef HAVE_SHERPA_ONNX` for future Phase B (build onnxruntime from source)
+- **espeak-ng footprint**: 307KB lib + 214KB libucd + 1.5MB phoneme data = ~2MB total
+- Squashfs: 155MB (includes desktop packages from defconfig regeneration)
+- Verified: `/llamaste/audio/tts` returns 22kHz 16-bit mono WAV audio
+- Commit: `f8835ef`
+
+---
+
+## Previous Session (2026-03-05) — Phase 3a Complete
 
 ### Phase 3a-3: Flite TTS
 - **Flite** (BSD-4-Clause) linked directly into binary — no GPL isolation needed
@@ -173,9 +230,8 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 ## Next Steps
 
 ### Immediate
-1. **Phase 3: Mesh clustering** — UDP multicast discovery, llama-rpc-server, coordinator election
-2. **Phase 4: A/B updates** — SYS-B partition already reserved, GRUB `llamaste_slot` variable in design
-3. Upgrade Flite TTS → higher quality voice (sherpa-onnx or Piper if ONNX builds)
+1. **Phase 4: A/B updates** — SYS-B partition already reserved, GRUB `llamaste_slot` variable in design
+2. **Future: Neural TTS** — Build onnxruntime from source for musl, then enable sherpa-onnx + Piper VITS
 
 ---
 
@@ -183,9 +239,9 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 
 | Artifact | Size | Details |
 |----------|------|---------|
-| llamaste binary | 4.9 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA |
+| llamaste binary | 4.1 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA + espeak-ng |
 | bzImage kernel | 7.5 MB | Built-in DRM/GPU/audio drivers, no modules |
-| rootfs.squashfs | 78 MB | llamaste + WPEWebKit + Mesa + Wayland + whisper + alsa-lib |
+| rootfs.squashfs | 155 MB | llamaste + WPEWebKit + Mesa + Wayland + whisper + alsa-lib + espeak-ng |
 | llamaste.img | 611 MB | 5-partition GPT disk image |
 | llamaste.iso | 964 MB | Live ISO with installer |
 | Boot time | ~2 seconds | Kernel → HTTP server ready |
@@ -198,14 +254,15 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 ~9,000 LOC original C++ + ~45KB web UI:
 - main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
 - agent.cpp, prompt_builder.cpp
-- tools.cpp + 11 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth, audio)
+- tools.cpp + 12 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth, audio, cluster)
 - voice.h, voice.cpp
+- cluster.h, cluster.cpp
 - bcrypt.cpp, auth.cpp
-- net_mdns.cpp, scheduler.cpp
+- net_mdns.cpp, scheduler.cpp, mcp_server.cpp
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
 ## Test Suites
-10 suites, ~138 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio
+11 suites, ~155 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster
 
 ## VirtualBox VM
 - **VM Name**: "Llamaste", Location: `D:\Llamaste\vm\Llamaste\`
