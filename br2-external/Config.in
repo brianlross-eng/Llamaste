@@ -1,3 +1,4 @@
 source "$BR2_EXTERNAL_LLAMASTE_PATH/package/llamaste/Config.in"
 source "$BR2_EXTERNAL_LLAMASTE_PATH/package/llama-server/Config.in"
 source "$BR2_EXTERNAL_LLAMASTE_PATH/package/whisper-cpp/Config.in"
+source "$BR2_EXTERNAL_LLAMASTE_PATH/package/sherpa-onnx/Config.in"
