@@ -71,12 +71,18 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 ### voice.list_tts + voice.download_tts — 55 tools total (9dca894)
 
 - Added 2 new tools: `voice.list_tts` (list Piper voices), `voice.download_tts` (download from HuggingFace)
-- TTS voice table: amy-low (16MB, female), lessac-medium (63MB, male)
+- TTS voice table: 12 Piper voices (US + GB, male + female, low/medium/high)
 - Download helper with curl resume support, `.part` file pattern
 - Fixed `voice.h` default `tts_data_dir`: `/usr/share/espeak-ng-data` (was wrong path)
 - 13/13 audio tests pass (3 new tests for TTS tools)
 - Deployed to VDI: 55 tools confirmed via `/health` endpoint
 - voice.cpp sherpa-onnx integration fully scaffolded — will auto-activate when model is downloaded
+
+### Expanded Voice Table — 12 voices (cb962be)
+
+- US: amy-low, lessac-medium/high, ryan-low/high, danny-low, hfc_female-medium
+- GB: alba-medium, cori-high, alan-low, northern_english_male-medium, southern_english_female-low
+- Low ~63MB 16kHz | Medium ~63MB 22kHz | High ~114-121MB 22kHz
 
 ---
 
