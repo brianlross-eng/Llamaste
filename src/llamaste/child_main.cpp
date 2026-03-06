@@ -928,49 +928,49 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline
-    // TTS is always available (espeak-ng/flite are lightweight).
-    // STT + always-listening only in desktop mode (whisper model is ~200MB).
+    // Initialize voice pipeline (desktop mode only — server mode stays lean)
     VoicePipeline voice_pipeline;
     {
         extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
 #ifndef _WIN32
-        VoiceConfig vcfg;
-        bool has_whisper = (access(vcfg.whisper_model.c_str(), R_OK) == 0);
+        if (g_boot_mode == "desktop") {
+            VoiceConfig vcfg;
 
-        if (voice_pipeline.init(vcfg)) {
-            g_voice = &voice_pipeline;
-            fprintf(stderr, "[child] Voice pipeline initialized (tts=%s, whisper=%s)\n",
-                    voice_pipeline.tts_engine_name().c_str(),
-                    has_whisper ? "ready" : "unavailable");
+            if (voice_pipeline.init(vcfg)) {
+                g_voice = &voice_pipeline;
+                fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
+                        voice_pipeline.tts_engine_name().c_str());
 
-            // Only start always-listening in desktop mode with whisper available
-            if (g_boot_mode == "desktop" && has_whisper) {
-                // Wire command callback: voice commands go through the agent loop
-                voice_pipeline.set_command_callback([&](const std::string& command) {
-                    fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
+                // Start always-listening if whisper model is available
+                if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
+                    // Wire command callback: voice commands go through the agent loop
+                    voice_pipeline.set_command_callback([&](const std::string& command) {
+                        fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
 
-                    ConversationState conv;
-                    conv.system_prompt = g_system_prompt;
-                    conv.add_user_message(command);
-                    std::string response = agent_turn(conv, g_tools, g_inference_fn);
+                        ConversationState conv;
+                        conv.system_prompt = g_system_prompt;
+                        conv.add_user_message(command);
+                        std::string response = agent_turn(conv, g_tools, g_inference_fn);
 
-                    fprintf(stderr, "[voice] Agent response: %.80s%s\n",
-                            response.c_str(),
-                            response.size() > 80 ? "..." : "");
+                        fprintf(stderr, "[voice] Agent response: %.80s%s\n",
+                                response.c_str(),
+                                response.size() > 80 ? "..." : "");
 
-                    // Speak the response via TTS
-                    if (!response.empty()) {
-                        voice_pipeline.speak(response);
-                    }
-                });
+                        // Speak the response via TTS
+                        if (!response.empty()) {
+                            voice_pipeline.speak(response);
+                        }
+                    });
 
-                // Start the always-listening thread (ALSA capture + VAD)
-                voice_pipeline.start();
+                    // Start the always-listening thread (ALSA capture + VAD)
+                    voice_pipeline.start();
+                }
+            } else {
+                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
+                        voice_pipeline.last_error().c_str());
             }
         } else {
-            fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
-                    voice_pipeline.last_error().c_str());
+            fprintf(stderr, "[child] Voice pipeline disabled (server mode)\n");
         }
 #endif
     }
