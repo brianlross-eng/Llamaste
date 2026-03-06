@@ -192,6 +192,7 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/voice.cpp" \
+    "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
     "${SRC}/net_mdns.cpp" \
     "${SRC}/scheduler.cpp" \
@@ -265,6 +266,7 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/voice.cpp" \
+    "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
     "${SRC}/net_mdns.cpp" \
     "${SRC}/scheduler.cpp" \

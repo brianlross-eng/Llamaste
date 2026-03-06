@@ -90,21 +90,21 @@ static void test_context_low_ram() {
 }
 
 static void test_context_medium_ram() {
-    TEST("compute_context_size(512-1024) == 4096");
+    TEST("compute_context_size(512-1024) == 2048");
     int c = compute_context_size(768);
-    if (c == 4096) PASS(); else FAIL("expected 4096");
+    if (c == 2048) PASS(); else FAIL("expected 2048");
 }
 
 static void test_context_high_ram() {
-    TEST("compute_context_size(1024-2048) == 8192");
+    TEST("compute_context_size(1024-2048) == 4096");
     int c = compute_context_size(1500);
-    if (c == 8192) PASS(); else FAIL("expected 8192");
+    if (c == 4096) PASS(); else FAIL("expected 4096");
 }
 
 static void test_context_very_high_ram() {
-    TEST("compute_context_size(>2048) == 16384");
+    TEST("compute_context_size(>4096) == 8192");
     int c = compute_context_size(4096);
-    if (c == 16384) PASS(); else FAIL("expected 16384");
+    if (c == 8192) PASS(); else FAIL("expected 8192");
 }
 
 int main() {
