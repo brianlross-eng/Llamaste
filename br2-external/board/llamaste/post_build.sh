@@ -100,4 +100,23 @@ if [ -f "${TOOLCHAIN_SYSROOT}/libgcc_s.so.1" ]; then
     echo "[post-build] Installed libgcc_s.so.1"
 fi
 
+# --- TTS voice model (sherpa-onnx Piper VITS) ---
+# Bundle the default voice model for out-of-box TTS experience.
+# Model is downloaded once to the build machine, then baked into squashfs.
+# Users can download higher-quality models at runtime to /data/models/tts/.
+TTS_MODEL_DIR="/root/llamaste-build/tts-models/vits-piper-en_US-amy-low"
+if [ -d "$TTS_MODEL_DIR" ]; then
+    mkdir -p "${TARGET_DIR}/data/models/tts"
+    cp "$TTS_MODEL_DIR/en_US-amy-low.onnx" "${TARGET_DIR}/data/models/tts/"
+    cp "$TTS_MODEL_DIR/tokens.txt" "${TARGET_DIR}/data/models/tts/"
+    # espeak-ng-data for phoneme conversion
+    if [ -d "$TTS_MODEL_DIR/espeak-ng-data" ]; then
+        cp -r "$TTS_MODEL_DIR/espeak-ng-data" "${TARGET_DIR}/data/models/tts/"
+    fi
+    echo "[post-build] Installed TTS model: en_US-amy-low (Piper VITS)"
+else
+    echo "[post-build] NOTE: TTS model not found at $TTS_MODEL_DIR"
+    echo "             Download with: wget https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-low.tar.bz2"
+fi
+
 echo "[post-build] Target filesystem preparation complete"
