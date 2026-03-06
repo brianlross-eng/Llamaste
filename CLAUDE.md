@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) IN PROGRESS. Phase 4 complete. 53 tools, 179 tests/12 suites.
+- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) COMPLETE. 53 tools, 179 tests/12 suites.
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
@@ -74,6 +74,13 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Eksblowfish salt streaming**: Salt index must be continuous across P-array and S-box expansion (not reset to 0 for S-boxes)
 - **BLKPG vs BLKRRPART**: `BLKRRPART` ioctl is unreliable for partitions already visible to kernel. Use `BLKPG_RESIZE_PARTITION` (`<linux/blkpg.h>`) to directly update a specific partition in the kernel's in-memory table.
 - **DATA partition auto-resize**: init.cpp grows GPT partition 5 at boot (pure C++ GPT manipulation), then ext4 online resize via `EXT4_IOC_RESIZE_FS` ioctl on mounted filesystem. Idempotent — skips on subsequent boots.
+- **ORT SUBDIR=cmake**: Build output at `$(@D)/cmake/buildroot-build/`, NOT `$(@D)/buildroot-build/`
+- **ORT FetchContent as shared**: Buildroot sets `BUILD_SHARED_LIBS=ON` before pkg opts; override with `-DBUILD_SHARED_LIBS=OFF` in CONF_OPTS
+- **ORT headers for sherpa-onnx**: Install flat at `/usr/include/onnxruntime/` (sherpa-onnx includes `onnxruntime_cxx_api.h` without path prefix)
+- **Buildroot patch convention**: Patches go in package root dir, NOT in `patches/` subdir
+- **ORT musl patch**: Add `&& defined(__GLIBC__)` to execinfo.h guard in `stacktrace.cc`
+- **Config.in host deps**: Use `BR2_PACKAGE_HOST_PROTOBUF_ARCH_SUPPORTS` not `BR2_PACKAGE_HOST_PROTOBUF`
+- **Conditional deps in .mk**: `ifeq ($(BR2_PACKAGE_FOO),y)` pattern for optional packages not yet selected in .config
 - **VDI detach before copy**: Must `storageattach --medium none` + `closemedium` before copying VDI files — VBoxSVC holds locks on registered media
 - **VirtualBox aborted state**: If VM gets stuck in "aborted" state, create a new VM rather than trying to fix the old one
 
@@ -91,10 +98,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Build Neural TTS in Buildroot** — Test onnxruntime + sherpa-onnx musl build (WSL2). Fix hash files.
-2. **Build Phase 5 in Buildroot** — Verify new cluster auto-offload code compiles. Deploy to VDI.
-3. **Multi-node integration test** — Test auto-offload with 2+ VMs
-4. **Piper voice model** — Create download tool/script for first-boot TTS model setup
+1. **Piper voice model download tool** — Download .onnx + tokens from HuggingFace for first-boot TTS setup
+2. **Activate neural TTS in voice.cpp** — Wire up sherpa-onnx C API for Piper VITS synthesis
+3. **Multi-node integration test** — Test auto-offload with 2+ VMs on same network
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.

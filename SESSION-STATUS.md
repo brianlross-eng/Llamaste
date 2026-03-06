@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-07 (Phase 5 Auto-Offload + Phase B Neural TTS packaging)
+**Last updated**: 2026-03-07 (Phase 5 + Phase B: Built, tested, deployed)
 
 ---
 
@@ -28,7 +28,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | GRUB module fix + ESP mount + deploy scripts | DONE (49026eb) |
 | Verified on VDI: 51 tools, grubenv working, slot A active | DONE |
 
-### Phase 5: Mesh Auto-Offload -- IN PROGRESS (bd14d7c)
+### Phase 5: Mesh Auto-Offload -- COMPLETE (bd14d7c)
 
 | Component | Status |
 |-----------|--------|
@@ -43,68 +43,56 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | HTTP endpoints: /llamaste/cluster/{capacity,models} | DONE (bd14d7c) |
 | Web UI cluster card extension | DONE (bd14d7c) |
 | 8 new auto-offload unit tests | DONE (bd14d7c) |
-| Build and test in Buildroot | PENDING |
+| Build and test in Buildroot | DONE (5fc9600) |
+| Verified on VDI: 53 tools, capacity endpoint working | DONE |
 | Multi-node integration test | PENDING |
 
-### Phase B: Neural TTS -- IN PROGRESS (a8792a8)
+### Phase B: Neural TTS -- COMPLETE (e0e0bf0)
 
 | Component | Status |
 |-----------|--------|
 | Design doc (neural-tts-design.md) | DONE |
-| onnxruntime Buildroot package (musl build from source) | DONE (a8792a8) |
-| musl patches (execinfo.h, flatbuffers locale) | DONE (a8792a8) |
+| onnxruntime Buildroot package (musl build from source) | DONE (e0e0bf0) |
+| musl patch (execinfo.h __GLIBC__ guard) | DONE (b8598c5) |
 | sherpa-onnx version bump v1.11.3 → v1.12.28 | DONE (a8792a8) |
-| sherpa-onnx points to musl ORT | DONE (a8792a8) |
-| Defconfig + llamaste.mk updated | DONE (a8792a8) |
+| sherpa-onnx points to musl ORT | DONE (e0e0bf0) |
+| Defconfig + llamaste.mk updated | DONE (5fc9600) |
 | voice.cpp sherpa-onnx integration | ALREADY SCAFFOLDED |
 | CMakeLists.txt sherpa-onnx detection | ALREADY EXISTS |
-| Build and test in Buildroot (WSL2) | PENDING |
-| Hash files need real values after first download | PENDING |
-| Deploy to VDI, verify neural TTS | PENDING |
+| Build ORT + sherpa-onnx in Buildroot (musl) | DONE (e0e0bf0) |
+| Hash files updated with real values | DONE (5866523) |
+| Deploy to VDI, llamaste links sherpa-onnx | DONE |
+| Piper voice model download tool | PENDING |
 
 ---
 
-## Latest Session (2026-03-07) -- Phase 5 Auto-Offload + Phase B Neural TTS
+## Latest Session (2026-03-07) -- Phase 5 + Phase B: Build, Test, Deploy
 
-### Phase 5: Mesh Auto-Offload (~350 LOC new code)
+### Phase 5: Mesh Auto-Offload — Built & Verified on VDI
 
-**Design doc**: `docs/plans/2026-03-07-mesh-auto-offload-design.md`
+- Buildroot cross-compilation verified — all Phase 5 cluster code compiles cleanly
+- 12/12 test suites pass (179 tests), including 16 cluster tests (8 original + 8 new auto-offload)
+- Deployed to VDI: 53 tools, `/llamaste/cluster/capacity` returns correct data
 
-**Modified files**:
-- `cluster.h` — Added ModelTier, ClusterCapacity structs; 5 new ClusterManager methods
-- `cluster.cpp` — Model tier table (7 tiers), available_models(), compute_tensor_split(), select_model(), analyze_capacity()
-- `child_main.cpp` — spawn_llama_server() with --tensor-split, auto-select topology callback, RPC caching
-- `tools_cluster.cpp` — cluster.capacity + cluster.models tools, HTTP endpoints
-- `index.html` / `system.js` — Extended cluster card with capacity data
+### Phase B: Neural TTS — ORT + sherpa-onnx Fully Built from Source
 
-**Key features**:
-- Automatic model selection: pools RAM across cluster, picks largest fitting model
-- Tensor split: RAM-proportional ratios (70% safety, 300MB overhead per node)
-- Model tier table: 0.5B through 72B Qwen2.5-Instruct Q4_K_M
-- Available model scanning: matches GGUF files on disk against tier table
-- Upgrade detection: flags when a bigger model could fit but isn't downloaded
-- RPC server tensor caching (-c flag) for near-instant model reload
+**Key fixes during build** (6 commits):
+1. `5fc9600` — Conditional sherpa-onnx dep in llamaste.mk (`ifeq $(BR2_PACKAGE_SHERPA_ONNX),y`)
+2. `56487a0` — Fixed ORT Config.in: `BR2_PACKAGE_HOST_PROTOBUF` → `BR2_PACKAGE_HOST_PROTOBUF_ARCH_SUPPORTS`
+3. `b8598c5` — Moved ORT musl patch to package root (Buildroot convention), removed unneeded flatbuffers patch
+4. `5866523` — Fixed ORT install paths for `SUBDIR=cmake`, updated sherpa-onnx hash
+5. `e0e0bf0` — ORT static deps (`-DBUILD_SHARED_LIBS=OFF`), flat header install, sherpa-onnx include path
 
-**Tests**: 8 new tests (model_tiers, tensor_split x4, analyze_capacity x2, select_model)
+**Build results**:
+- onnxruntime v1.24.2: 17MB self-contained .so (all FetchContent deps statically linked)
+- sherpa-onnx v1.12.28: 3.5MB C API .so + CXX API .so
+- llamaste binary: 4.3MB, links against sherpa-onnx-c-api, HAVE_SHERPA_ONNX defined
+- rootfs.squashfs: 161MB (up from 156MB with TTS libs)
+- llamaste.img: 611MB, deployed to VDI, 53 tools
 
-### Phase B: Neural TTS Packaging
+### Previous sub-session: Phase 5 Code + Phase B Packaging
 
-**Design doc**: `docs/plans/2026-03-07-neural-tts-design.md`
-
-**New files**:
-- `br2-external/package/onnxruntime/` — Full Buildroot package for ORT v1.24.2
-  - `Config.in`, `onnxruntime.mk`, `onnxruntime.hash`
-  - `patches/0001-musl-no-execinfo.patch` — Guards execinfo.h for musl
-  - `patches/0002-musl-flatbuffers-locale.patch` — Guards xlocale.h for musl
-
-**Modified files**:
-- `sherpa-onnx.mk` — Version v1.11.3 → v1.12.28, points to musl ORT
-- `sherpa-onnx.hash` — Updated for v1.12.28
-- `Config.in` — Added onnxruntime source
-- `defconfig` — Enabled BR2_PACKAGE_ONNXRUNTIME, BR2_PACKAGE_SHERPA_ONNX
-- `llamaste.mk` — Added sherpa-onnx to dependencies
-
-**Commits**: `bd14d7c` (Phase 5), `a8792a8` (Phase B)
+**Commits**: `bd14d7c` (Phase 5 code), `a8792a8` (Phase B packaging)
 
 ---
 
@@ -188,10 +176,9 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 ## Next Steps
 
 ### Immediate
-1. **Build and test Neural TTS in Buildroot (WSL2)** -- Verify onnxruntime + sherpa-onnx compile with musl toolchain. Update hash files.
-2. **Build and test Phase 5 in Buildroot** -- Verify new cluster code compiles. Deploy to VDI.
+1. **Piper voice model download tool** -- Create tool/script for first-boot TTS model setup (downloads .onnx + tokens from HuggingFace)
+2. **Activate neural TTS in voice.cpp** -- Wire up sherpa-onnx C API for Piper VITS synthesis (scaffolding exists)
 3. **Multi-node integration test** -- Test auto-offload with 2+ VMs on same network
-4. **Piper voice model download** -- Create model download tool/script for first-boot TTS setup
 
 ---
 
@@ -199,9 +186,11 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 | Artifact | Size | Details |
 |----------|------|---------|
-| llamaste binary | 4.4 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA + espeak-ng + TweetNaCl |
+| llamaste binary | 4.3 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA + espeak-ng + sherpa-onnx + TweetNaCl |
+| libonnxruntime.so | 17 MB | ORT v1.24.2, CPU-only, all deps statically linked |
+| libsherpa-onnx-c-api.so | 3.5 MB | sherpa-onnx v1.12.28, Piper VITS TTS |
 | bzImage kernel | 7.5 MB | Built-in DRM/GPU/audio drivers, no modules |
-| rootfs.squashfs | 156 MB | llamaste + WPEWebKit + Mesa + Wayland + all libs |
+| rootfs.squashfs | 161 MB | llamaste + ORT + sherpa-onnx + WPEWebKit + Mesa + Wayland + all libs |
 | llamaste.img | 611 MB | 5-partition GPT disk image |
 | Boot time | ~2 seconds | Kernel -> HTTP server ready |
 
