@@ -191,11 +191,13 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_schedule.cpp" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
+    "${SRC}/tools_cluster.cpp" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
     "${SRC}/net_mdns.cpp" \
     "${SRC}/scheduler.cpp" \
+    "${SRC}/cluster.cpp" \
     "${SRC}/bcrypt.cpp" \
     "${SRC}/auth.cpp" 2>&1; then
     if "${BUILD_DIR}/test_http" 2>/dev/null; then
@@ -265,11 +267,13 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${SRC}/tools_schedule.cpp" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
+    "${SRC}/tools_cluster.cpp" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
     "${SRC}/net_mdns.cpp" \
     "${SRC}/scheduler.cpp" \
+    "${SRC}/cluster.cpp" \
     "${SRC}/bcrypt.cpp" \
     "${SRC}/auth.cpp" 2>&1; then
     if "${BUILD_DIR}/test_inference"; then

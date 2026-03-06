@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "auth.h"
 #include "voice.h"
+#include "cluster.h"
 #include "mcp_server.h"
 #include "json.hpp"
 
@@ -88,6 +89,9 @@ static Scheduler g_scheduler;
 
 // Device authentication
 static AuthManager g_auth;
+
+// Mesh clustering
+static ClusterManager g_cluster;
 
 // Desktop compositor PID (set by compositor launch thread)
 #ifndef _WIN32
@@ -635,6 +639,19 @@ static json gather_system_info(const SupervisorConfig& config) {
     auto next_sched = g_scheduler.next_scheduled_time();
     info["next_scheduled_time"] = next_sched > 0 ? static_cast<long>(next_sched) : 0;
 
+    // Cluster info
+    json cluster_info;
+    cluster_info["role"] = g_cluster.role_name();
+    cluster_info["peer_count"] = g_cluster.peer_count();
+    if (g_cluster.peer_count() > 0) {
+        cluster_info["coordinator"] = g_cluster.coordinator().hostname;
+        cluster_info["rpc_endpoints"] = g_cluster.rpc_endpoint_list();
+        uint64_t total_ram = g_cluster.self_info().ram_mb;
+        for (const auto& p : g_cluster.peers()) total_ram += p.ram_mb;
+        cluster_info["total_ram_mb"] = total_ram;
+    }
+    info["cluster"] = cluster_info;
+
     return info;
 }
 
@@ -924,6 +941,7 @@ int child_main(const SupervisorConfig& config) {
     }
     register_schedule_tools(g_tools, g_scheduler);
     register_auth_tools(g_tools, g_auth);
+    register_cluster_tools(g_tools, g_cluster);
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware
@@ -1043,6 +1061,105 @@ int child_main(const SupervisorConfig& config) {
     } else {
         fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
     }
+
+    // --- Mesh clustering ---
+    // Advertise RPC service for peer discovery
+    {
+        std::vector<std::string> rpc_txt;
+        rpc_txt.push_back("ram=" + std::to_string(g_hwinfo.ram_total_mb));
+        rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
+        rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
+        rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
+
+        mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+
+        // Set self info for election
+        PeerInfo self;
+        self.hostname = config.device_name.empty() ? "llamaste" : config.device_name;
+        self.ip = MdnsResponder::get_local_ip();
+        self.rpc_port = (uint16_t)g_rpc_port;
+        self.ram_mb = (uint32_t)g_hwinfo.ram_total_mb;
+        self.cpu_cores = (uint32_t)g_hwinfo.cpu_cores;
+        self.model = g_model_name.empty() ? "none" : g_model_name;
+        g_cluster.set_self_info(self);
+
+        // Discover peers (2-second window)
+        auto discovered = mdns.discover_services("_llama-rpc._tcp", 2000);
+        for (const auto& d : discovered) {
+            if (d.ip == self.ip) continue;  // skip self
+            PeerInfo peer;
+            peer.hostname = d.hostname;
+            peer.ip = d.ip;
+            peer.rpc_port = d.port;
+            // Parse TXT records
+            for (const auto& t : d.txt) {
+                auto eq = t.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = t.substr(0, eq);
+                std::string val = t.substr(eq + 1);
+                if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
+                else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
+                else if (key == "model") peer.model = val;
+            }
+            g_cluster.add_peer(peer);
+            fprintf(stderr, "[cluster] Discovered peer: %s (%s) ram=%uMB cores=%u\n",
+                    peer.hostname.c_str(), peer.ip.c_str(), peer.ram_mb, peer.cpu_cores);
+        }
+
+        // Run election
+        g_cluster.run_election();
+        fprintf(stderr, "[cluster] Role: %s | Peers: %zu\n",
+                g_cluster.role_name().c_str(), g_cluster.peer_count());
+
+        if (g_cluster.is_coordinator() && g_cluster.peer_count() > 0) {
+            fprintf(stderr, "[cluster] Coordinator — RPC endpoints: %s\n",
+                    g_cluster.rpc_endpoint_list().c_str());
+        }
+    }
+
+    // Cluster heartbeat: re-announce service and expire stale peers every 30s
+    std::thread cluster_heartbeat_thread([&mdns]() {
+        while (g_running.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            if (!g_running.load()) break;
+
+            // Re-announce our RPC service
+            std::vector<std::string> rpc_txt;
+            rpc_txt.push_back("ram=" + std::to_string(g_hwinfo.ram_total_mb));
+            rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
+            rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
+            rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
+            mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+
+            // Expire peers not seen in 90 seconds
+            g_cluster.expire_peers(90);
+
+            // Re-discover peers
+            auto discovered = mdns.discover_services("_llama-rpc._tcp", 1000);
+            auto self = g_cluster.self_info();
+            for (const auto& d : discovered) {
+                if (d.ip == self.ip) continue;
+                PeerInfo peer;
+                peer.hostname = d.hostname;
+                peer.ip = d.ip;
+                peer.rpc_port = d.port;
+                for (const auto& t : d.txt) {
+                    auto eq = t.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string key = t.substr(0, eq);
+                    std::string val = t.substr(eq + 1);
+                    if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
+                    else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
+                    else if (key == "model") peer.model = val;
+                }
+                g_cluster.add_peer(peer);
+            }
+
+            // Re-run election (topology may have changed)
+            g_cluster.run_election();
+        }
+    });
+    cluster_heartbeat_thread.detach();
 
     // Start heartbeat scheduler
     g_scheduler.set_data_dir("/data/llamaste");
@@ -1843,6 +1960,13 @@ int child_main(const SupervisorConfig& config) {
     svr.Delete(R"(/llamaste/schedules/(.+))", require_auth([](const httplib::Request& req, httplib::Response& res) {
         std::string id = req.matches[1];
         res.set_content(g_scheduler.delete_task(id), "application/json");
+    }));
+
+    // --- Cluster status endpoint (protected) ---
+    svr.Get("/llamaste/cluster/status", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("cluster.status", "{}"),
+                        "application/json");
     }));
 
     // --- MCP server (Model Context Protocol, spec 2025-03-26) ---
