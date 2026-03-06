@@ -437,6 +437,33 @@ bool init_mount_data() {
     return false;
 }
 
+void init_mount_esp() {
+#ifndef _WIN32
+    // Mount ESP (EFI System Partition) at /boot/efi for grubenv access.
+    // ESP holds the GRUB environment block used for A/B slot switching.
+    const char* candidates[] = {
+        "/dev/sda2", "/dev/vda2", "/dev/nvme0n1p2", nullptr
+    };
+
+    mkdir("/boot", 0755);
+    mkdir("/boot/efi", 0755);
+
+    for (int i = 0; candidates[i]; i++) {
+        struct stat st;
+        if (stat(candidates[i], &st) == 0) {
+            if (mount(candidates[i], "/boot/efi", "vfat", MS_NOATIME, "") == 0) {
+                fprintf(stderr, "[init] Mounted %s on /boot/efi (ESP)\n", candidates[i]);
+                return;
+            } else {
+                fprintf(stderr, "[init] ESP mount %s failed: %m\n", candidates[i]);
+            }
+        }
+    }
+
+    fprintf(stderr, "[init] WARNING: Could not mount ESP (grubenv unavailable)\n");
+#endif
+}
+
 void init_create_data_dirs() {
     const char* dirs[] = {
         "/data/models",

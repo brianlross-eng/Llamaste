@@ -62,6 +62,7 @@ int main(int argc, char** argv) {
             init_mount_data();
         }
         init_create_data_dirs();
+        init_mount_esp();   // Mount ESP for grubenv (A/B update slot management)
     }
 
     HardwareInfo hw = detect_hardware();

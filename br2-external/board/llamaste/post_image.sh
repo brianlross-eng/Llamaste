@@ -41,7 +41,7 @@ if [ -f "${HOST_DIR}/lib/grub/i386-pc/boot.img" ]; then
         -o "${GRUB_BIOS_IMG}" \
         -p "(hd0,gpt2)/grub" \
         part_gpt fat ext2 normal boot linux configfile search \
-        search_fs_uuid search_label test echo
+        search_fs_uuid search_label loadenv test echo
 else
     echo "[post-image] GRUB i386-pc not available, creating empty BIOS boot image"
     dd if=/dev/zero of="${GRUB_BIOS_IMG}" bs=1024 count=1024 2>/dev/null

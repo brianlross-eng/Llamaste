@@ -29,6 +29,11 @@ mkdir -p "${TARGET_DIR}/run"
 # The DATA partition (ext4, partition 5) will be mounted here
 mkdir -p "${TARGET_DIR}/data"
 
+# --- ESP and misc mount points ---
+# ESP (EFI System Partition) holds grubenv for A/B update slot management
+mkdir -p "${TARGET_DIR}/boot/efi"
+mkdir -p "${TARGET_DIR}/mnt"
+
 # --- GRUB configuration ---
 # Install grub.cfg into the target's /boot/grub/ directory
 # This is also copied to the EFI partition by post_image.sh, but

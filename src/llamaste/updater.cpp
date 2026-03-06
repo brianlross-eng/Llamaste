@@ -217,9 +217,11 @@ static bool file_exists(const std::string& path) {
 std::string find_grubenv_path() {
     static const char* candidates[] = {
         "/boot/efi/EFI/BOOT/grubenv",
+        "/boot/efi/grub/grubenv",
         "/boot/efi/boot/grub/grubenv",
         "/boot/grub/grubenv",
         "/mnt/esp/EFI/BOOT/grubenv",
+        "/mnt/esp/grub/grubenv",
         "/mnt/esp/boot/grub/grubenv",
     };
     for (const char* path : candidates) {
