@@ -35,7 +35,7 @@ SHERPA_ONNX_CONF_OPTS = \
 # Point sherpa-onnx to our musl-built onnxruntime instead of downloading glibc prebuilt
 SHERPA_ONNX_CONF_ENV = \
 	SHERPA_ONNXRUNTIME_LIB_DIR=$(STAGING_DIR)/usr/lib \
-	SHERPA_ONNXRUNTIME_INCLUDE_DIR=$(STAGING_DIR)/usr/include
+	SHERPA_ONNXRUNTIME_INCLUDE_DIR=$(STAGING_DIR)/usr/include/onnxruntime
 
 # Install shared libs + C API header to staging for llamaste linking
 define SHERPA_ONNX_INSTALL_STAGING_CMDS

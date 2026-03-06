@@ -21,6 +21,7 @@ ONNXRUNTIME_SUBDIR = cmake
 
 ONNXRUNTIME_CONF_OPTS = \
 	-DCMAKE_BUILD_TYPE=MinSizeRel \
+	-DBUILD_SHARED_LIBS=OFF \
 	-Donnxruntime_BUILD_SHARED_LIB=ON \
 	-Donnxruntime_BUILD_UNIT_TESTS=OFF \
 	-Donnxruntime_BUILD_BENCHMARKS=OFF \
@@ -59,17 +60,10 @@ define ONNXRUNTIME_INSTALL_STAGING_CMDS
 	# Shared library
 	find $(@D)/cmake/buildroot-build -name "libonnxruntime.so*" -exec \
 		cp -a {} $(STAGING_DIR)/usr/lib/ \;
-	# C API header
-	$(INSTALL) -D -m 0644 \
-		$(@D)/include/onnxruntime/core/session/onnxruntime_c_api.h \
-		$(STAGING_DIR)/usr/include/onnxruntime/core/session/onnxruntime_c_api.h
-	# Additional headers sherpa-onnx may need
-	for h in onnxruntime_session_options_config_keys.h onnxruntime_run_options_config_keys.h; do \
-		if [ -f "$(@D)/include/onnxruntime/core/session/$$h" ]; then \
-			$(INSTALL) -D -m 0644 \
-				"$(@D)/include/onnxruntime/core/session/$$h" \
-				"$(STAGING_DIR)/usr/include/onnxruntime/core/session/$$h"; \
-		fi; \
+	# All headers — sherpa-onnx expects flat include path (onnxruntime_cxx_api.h etc.)
+	mkdir -p $(STAGING_DIR)/usr/include/onnxruntime
+	for h in $(@D)/include/onnxruntime/core/session/*.h; do \
+		$(INSTALL) -m 0644 "$$h" $(STAGING_DIR)/usr/include/onnxruntime/; \
 	done
 endef
 
