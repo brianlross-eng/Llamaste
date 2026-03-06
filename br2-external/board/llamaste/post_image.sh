@@ -60,6 +60,21 @@ if [ -f "${BOARD_DIR}/grub.cfg" ]; then
     cp "${BOARD_DIR}/grub.cfg" "${BINARIES_DIR}/efi-part/EFI/BOOT/grub.cfg"
 fi
 
+# --- Step 3b: Create GRUB environment block (1024 bytes) ---
+# grubenv stores A/B slot state. GRUB's load_env/save_env reads/writes this file.
+# Format: header line + key=value lines + '#' padding to exactly 1024 bytes.
+echo "[post-image] Creating grubenv for A/B boot..."
+GRUBENV_CONTENT="# GRUB Environment Block\nactive_slot=A\nboot_success=1\n"
+GRUBENV_LEN=$(printf "${GRUBENV_CONTENT}" | wc -c)
+PAD_LEN=$((1024 - GRUBENV_LEN))
+GRUBENV_FILE="${BINARIES_DIR}/efi-part/grubenv_tmp"
+printf "${GRUBENV_CONTENT}" > "${GRUBENV_FILE}"
+dd if=/dev/zero bs=1 count="${PAD_LEN}" 2>/dev/null | tr '\0' '#' >> "${GRUBENV_FILE}"
+# Place in both locations (BIOS and EFI)
+cp "${GRUBENV_FILE}" "${EFI_GRUB_DIR}/grubenv"
+cp "${GRUBENV_FILE}" "${BINARIES_DIR}/efi-part/EFI/BOOT/grubenv"
+rm -f "${GRUBENV_FILE}"
+
 if [ -f "${BINARIES_DIR}/bzImage" ]; then
     cp "${BINARIES_DIR}/bzImage" "${BINARIES_DIR}/efi-part/bzImage"
 fi
