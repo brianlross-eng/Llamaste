@@ -299,9 +299,24 @@
               <span class="label">Pooled RAM</span>
               <span id="cluster-total-ram" class="value">-</span>
             </div>
+            <div class="dash-row" id="cluster-usable-row" style="display:none">
+              <span class="label">Usable RAM</span>
+              <span id="cluster-usable-ram" class="value">-</span>
+            </div>
             <div class="dash-row" id="cluster-coordinator-row" style="display:none">
               <span class="label">Coordinator</span>
               <span id="cluster-coordinator" class="value">-</span>
+            </div>
+            <div class="dash-row" id="cluster-model-row" style="display:none">
+              <span class="label">Best Model</span>
+              <span id="cluster-recommended-model" class="value">-</span>
+            </div>
+            <div class="dash-row" id="cluster-split-row" style="display:none">
+              <span class="label">Tensor Split</span>
+              <span id="cluster-tensor-split" class="value">-</span>
+            </div>
+            <div id="cluster-upgrade-notice" class="notice" style="display:none;margin-top:8px;padding:6px;background:#2a2a0a;border:1px solid #554;border-radius:4px;font-size:0.85em">
+              A larger model could fit this cluster. Download it to <code>/data/models/</code>.
             </div>
             <div id="cluster-peer-list" style="margin-top:8px"></div>
           </div>

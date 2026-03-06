@@ -1,8 +1,9 @@
 #pragma once
 // cluster.h -- Mesh clustering for distributed inference
 //
-// Manages peer discovery, coordinator election, and llama-rpc-server
-// lifecycle for multi-node inference via llama.cpp's RPC backend.
+// Manages peer discovery, coordinator election, llama-rpc-server
+// lifecycle, and automatic model selection + layer distribution
+// for multi-node inference via llama.cpp's RPC backend.
 
 #include <string>
 #include <vector>
@@ -19,6 +20,27 @@ struct PeerInfo {
     uint32_t cpu_cores = 0;
     std::string model;  // currently loaded model or "none"
     std::chrono::steady_clock::time_point last_seen;
+};
+
+// Model tier for automatic selection based on cluster capacity
+struct ModelTier {
+    std::string name;         // e.g. "qwen2.5-0.5b-instruct"
+    std::string gguf_file;    // e.g. "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    uint32_t size_mb;         // GGUF file size in MB
+    uint32_t min_ram_mb;      // Minimum usable cluster RAM needed
+    uint32_t layers;          // Number of transformer layers
+};
+
+// Cluster capacity analysis result
+struct ClusterCapacity {
+    uint32_t total_ram_mb = 0;      // Raw total across all nodes (including self)
+    uint32_t usable_ram_mb = 0;     // After 70% safety factor
+    uint32_t total_cores = 0;       // Total CPU cores across cluster
+    size_t node_count = 0;          // Number of nodes (self + peers)
+    std::string recommended_model;  // Best model name for this capacity
+    std::string recommended_gguf;   // Best GGUF filename
+    std::string tensor_split;       // "1,2,4" format for --tensor-split
+    bool upgrade_available = false; // True if bigger model could fit but isn't present
 };
 
 enum class ClusterState {
@@ -74,6 +96,25 @@ public:
 
     // Callback: called when coordinator changes (for llama-server restart)
     void set_topology_change_callback(std::function<void()> cb);
+
+    // --- Phase 5: Auto-offload ---
+
+    // Analyze cluster capacity: sum RAM, compute tensor split, recommend model
+    ClusterCapacity analyze_capacity(const std::string& model_dir = "/data/models") const;
+
+    // Compute --tensor-split ratios based on per-node RAM
+    // Returns "1,2,4" format string (or empty if single node)
+    std::string compute_tensor_split() const;
+
+    // Select best model from available files that fits cluster RAM
+    // Returns empty ModelTier if nothing fits
+    ModelTier select_model(const std::string& model_dir = "/data/models") const;
+
+    // Get built-in model tier table (Qwen2.5-Instruct Q4_K_M)
+    static const std::vector<ModelTier>& model_tiers();
+
+    // Scan model directory for available GGUF files, match against tier table
+    static std::vector<ModelTier> available_models(const std::string& model_dir);
 
 private:
     mutable std::mutex mu_;

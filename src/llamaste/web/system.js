@@ -387,6 +387,53 @@
         else roleEl.style.color = '';
       })
       .catch(function () {});
+
+    // Also fetch capacity info (auto-offload)
+    fetch('/llamaste/cluster/capacity', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (cap) {
+        var usableRow = document.getElementById('cluster-usable-row');
+        var usableEl = document.getElementById('cluster-usable-ram');
+        var modelRow = document.getElementById('cluster-model-row');
+        var modelEl = document.getElementById('cluster-recommended-model');
+        var splitRow = document.getElementById('cluster-split-row');
+        var splitEl = document.getElementById('cluster-tensor-split');
+        var upgradeNotice = document.getElementById('cluster-upgrade-notice');
+
+        if (!usableRow) return;
+
+        // Show usable RAM when we have peers
+        if (cap.node_count > 1) {
+          usableRow.style.display = '';
+          usableEl.textContent = (cap.usable_ram_mb / 1024).toFixed(1) + ' GB';
+        } else {
+          usableRow.style.display = 'none';
+        }
+
+        // Show recommended model
+        if (cap.recommended_model) {
+          modelRow.style.display = '';
+          modelEl.textContent = cap.recommended_model;
+        } else {
+          modelRow.style.display = 'none';
+        }
+
+        // Show tensor split when multi-node
+        if (cap.tensor_split && cap.node_count > 1) {
+          splitRow.style.display = '';
+          splitEl.textContent = cap.tensor_split;
+        } else {
+          splitRow.style.display = 'none';
+        }
+
+        // Show upgrade notice
+        if (cap.upgrade_available) {
+          upgradeNotice.style.display = '';
+        } else {
+          upgradeNotice.style.display = 'none';
+        }
+      })
+      .catch(function () {});
   }
 
   // Poll cluster status every 10 seconds

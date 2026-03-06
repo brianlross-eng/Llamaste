@@ -348,7 +348,8 @@ static std::string llama_inference(const std::string& request_json) {
 // ---------------------------------------------------------------------------
 
 static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
-                                int free_ram_mb, const std::string& rpc_endpoints = "") {
+                                int free_ram_mb, const std::string& rpc_endpoints = "",
+                                const std::string& tensor_split = "") {
     std::lock_guard<std::mutex> lock(g_llama_mutex);
 
     int threads = compute_thread_count(cpu_cores);
@@ -392,6 +393,12 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
             fprintf(stderr, "[child] Using RPC endpoints: %s\n", rpc_endpoints.c_str());
         }
 
+        if (!tensor_split.empty()) {
+            args.push_back("--tensor-split");
+            args.push_back(tensor_split.c_str());
+            fprintf(stderr, "[child] Using tensor split: %s\n", tensor_split.c_str());
+        }
+
         args.push_back(nullptr);
         execv("/opt/llamaste/llama-server", const_cast<char**>(args.data()));
         fprintf(stderr, "[child] execv llama-server failed: %s\n", strerror(errno));
@@ -416,6 +423,7 @@ static bool spawn_rpc_server() {
         execl("/opt/llamaste/llama-rpc-server", "llama-rpc-server",
               "--host", "0.0.0.0",
               "--port", port_str.c_str(),
+              "-c",  // Enable tensor caching for faster model reloads
               (char*)nullptr);
         fprintf(stderr, "[child] execl llama-rpc-server failed: %s\n", strerror(errno));
         _exit(127);
@@ -1123,12 +1131,14 @@ int child_main(const SupervisorConfig& config) {
                     g_cluster.rpc_endpoint_list().c_str());
         }
 
-        // Topology change callback: reload llama-server with updated --rpc endpoints
+        // Topology change callback: auto-select model + tensor-split for cluster
         g_cluster.set_topology_change_callback([]() {
             if (!g_cluster.is_coordinator()) return;
-            if (!g_model_loaded.load()) return;
 
-            fprintf(stderr, "[cluster] Topology changed — reloading llama-server with new RPC endpoints\n");
+            auto cap = g_cluster.analyze_capacity();
+            fprintf(stderr, "[cluster] Topology changed — %zu nodes, %u MB usable, recommend: %s\n",
+                    cap.node_count, cap.usable_ram_mb, cap.recommended_model.c_str());
+
 #ifndef _WIN32
             // Kill existing llama-server
             pid_t pid = g_llama_pid.load();
@@ -1140,16 +1150,39 @@ int child_main(const SupervisorConfig& config) {
                 g_inference_fn = stub_inference;
             }
 
-            // Respawn with updated endpoints
+            // Select best model for current cluster capacity
+            ModelTier best = g_cluster.select_model();
+            std::string model_path;
+            if (!best.name.empty()) {
+                model_path = "/data/models/" + best.gguf_file;
+                g_model_name = best.gguf_file;
+                fprintf(stderr, "[cluster] Auto-selected model: %s (%u MB, %u layers)\n",
+                        best.name.c_str(), best.size_mb, best.layers);
+            } else if (!g_model_name.empty()) {
+                // No tier match, keep current model
+                model_path = "/data/models/" + g_model_name;
+                fprintf(stderr, "[cluster] Keeping current model: %s\n", g_model_name.c_str());
+            } else {
+                fprintf(stderr, "[cluster] No model available — staying in stub mode\n");
+                return;
+            }
+
+            // Build RPC endpoints and tensor split
             std::string rpc = g_cluster.rpc_endpoint_list();
-            std::string model_path = "/data/models/" + g_model_name;
+            std::string tensor_split = g_cluster.compute_tensor_split();
+
             int free_ram_estimate = g_hwinfo.ram_free_mb - 512;
-            if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc)) {
+            if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc,
+                                   tensor_split)) {
                 if (wait_for_llama_server(120)) {
                     g_model_loaded.store(true);
                     g_inference_fn = llama_inference;
-                    fprintf(stderr, "[cluster] llama-server restarted with RPC endpoints: %s\n",
-                            rpc.c_str());
+                    fprintf(stderr, "[cluster] llama-server restarted: rpc=%s split=%s\n",
+                            rpc.c_str(), tensor_split.c_str());
+                    if (cap.upgrade_available) {
+                        fprintf(stderr, "[cluster] NOTE: A larger model could fit this cluster. "
+                                "Download it to /data/models/ for automatic upgrade.\n");
+                    }
                 }
             }
 #endif
@@ -2001,10 +2034,22 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(g_scheduler.delete_task(id), "application/json");
     }));
 
-    // --- Cluster status endpoint (protected) ---
+    // --- Cluster endpoints (protected) ---
     svr.Get("/llamaste/cluster/status", require_auth(
         [](const httplib::Request& /*req*/, httplib::Response& res) {
         res.set_content(g_tools.dispatch("cluster.status", "{}"),
+                        "application/json");
+    }));
+
+    svr.Get("/llamaste/cluster/capacity", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("cluster.capacity", "{}"),
+                        "application/json");
+    }));
+
+    svr.Get("/llamaste/cluster/models", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("cluster.models", "{}"),
                         "application/json");
     }));
 
