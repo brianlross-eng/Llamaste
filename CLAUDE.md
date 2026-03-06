@@ -111,9 +111,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 ### Immediate
 1. **Production update signing workflow** — Ed25519 keypair generation, build script to create signed `.update` packages (manifest + squashfs + signature). **Hosting: GitHub Releases** (free, CDN-backed). `update.check` polls `raw.githubusercontent.com/USER/llamaste/main/latest.json`; packages served from release assets. Verification side already built (Phase 4 TweetNaCl).
 2. **WiFi support** — Wireless networking (wpa_supplicant/iwd, scan/connect tools)
-3. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
-4. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
-5. **Clean downloadable ISO** — Polished ISO image ready for end-user download and install
+3. **Clean downloadable ISO** — Polished ISO image ready for end-user download and install
+4. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
+5. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 
 ### Backlog
 - **More TTS voices** — Expand Piper voice table (more accents, quality levels)
