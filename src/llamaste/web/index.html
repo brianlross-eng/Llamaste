@@ -258,6 +258,27 @@
 }</pre>
           </div>
 
+          <div class="system-card" id="cluster-card">
+            <h3>Cluster</h3>
+            <div class="dash-row">
+              <span class="label">Role</span>
+              <span id="cluster-role" class="value">standalone</span>
+            </div>
+            <div class="dash-row">
+              <span class="label">Peers</span>
+              <span id="cluster-peers" class="value">0</span>
+            </div>
+            <div class="dash-row" id="cluster-ram-row" style="display:none">
+              <span class="label">Pooled RAM</span>
+              <span id="cluster-total-ram" class="value">-</span>
+            </div>
+            <div class="dash-row" id="cluster-coordinator-row" style="display:none">
+              <span class="label">Coordinator</span>
+              <span id="cluster-coordinator" class="value">-</span>
+            </div>
+            <div id="cluster-peer-list" style="margin-top:8px"></div>
+          </div>
+
           <div class="system-card">
             <h3>Power</h3>
             <div style="display:flex;gap:12px;margin-top:8px">

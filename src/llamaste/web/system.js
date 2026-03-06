@@ -263,6 +263,50 @@
     return m + 'm';
   }
 
+  // --- Cluster status ---
+  function updateClusterCard() {
+    fetch('/llamaste/cluster/status', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var roleEl = document.getElementById('cluster-role');
+        var peersEl = document.getElementById('cluster-peers');
+        var ramRow = document.getElementById('cluster-ram-row');
+        var ramEl = document.getElementById('cluster-total-ram');
+        var coordRow = document.getElementById('cluster-coordinator-row');
+        var coordEl = document.getElementById('cluster-coordinator');
+
+        if (!roleEl) return;
+
+        roleEl.textContent = data.role || 'standalone';
+        peersEl.textContent = String(data.peer_count || 0);
+
+        if (data.total_ram_mb) {
+          ramRow.style.display = '';
+          ramEl.textContent = (data.total_ram_mb / 1024).toFixed(1) + ' GB';
+        } else {
+          ramRow.style.display = 'none';
+        }
+
+        if (data.coordinator && data.coordinator.hostname) {
+          coordRow.style.display = '';
+          coordEl.textContent = data.coordinator.hostname;
+        } else {
+          coordRow.style.display = 'none';
+        }
+
+        // Role badge color
+        roleEl.className = 'value';
+        if (data.role === 'coordinator') roleEl.style.color = '#4CAF50';
+        else if (data.role === 'worker') roleEl.style.color = '#2196F3';
+        else roleEl.style.color = '';
+      })
+      .catch(function () {});
+  }
+
+  // Poll cluster status every 10 seconds
+  setInterval(updateClusterCard, 10000);
+  updateClusterCard();
+
   // --- Public refresh function ---
   // Called when switching to the System tab.
   // Fetches fresh data and updates the sections that dashboard.js does NOT handle.
@@ -286,6 +330,9 @@
 
     // Fetch scheduled tasks separately
     fetchSchedules();
+
+    // Update cluster card
+    updateClusterCard();
   }
 
   // Export to window so switchTab can call it
