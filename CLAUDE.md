@@ -4,11 +4,12 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 4 COMPLETE — A/B updates (GRUB slot switching, Ed25519 signatures, boot counter rollback, 51 tools). 171 tests/12 suites.
+- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) IN PROGRESS. Phase 4 complete. 53 tools, 179 tests/12 suites.
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
+- **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
+- **Phase B design doc**: `D:\Llamaste\docs\plans\2026-03-07-neural-tts-design.md`
 - **Phase 4 design doc**: `D:\Llamaste\docs\plans\2026-03-06-ab-update-design.md`
-- **Phase 4 plan**: `D:\Llamaste\docs\plans\2026-03-06-ab-update-plan.md`
 
 ## Key Architecture Decisions
 - Single static C++ binary extending llama-server (not separate Go/Rust daemons)
@@ -44,7 +45,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - `docs/plans/2026-03-06-ab-update-plan.md` — Phase 4 implementation plan
 - `research/llamaste-architecture.html` — v2 three-layer architecture SVG diagram
 - `research/` — All research documents (01 through 26)
-- `src/llamaste/` — Production C++ source (~10,500 LOC)
+- `docs/plans/2026-03-07-mesh-auto-offload-design.md` — Phase 5 auto-offload design
+- `docs/plans/2026-03-07-neural-tts-design.md` — Phase B neural TTS design
+- `src/llamaste/` — Production C++ source (~11,000 LOC)
 
 ## Build Patterns & Gotchas
 - **Buildroot invocation**: `cd /root/llamaste-build/output && make` (NOT from buildroot/ source dir)
@@ -88,8 +91,10 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Future: Neural TTS** — Build onnxruntime from source for musl, then enable sherpa-onnx + Piper VITS
-2. **Phase 5: Mesh auto-offload** — Automatic model sharding across discovered cluster peers
+1. **Build Neural TTS in Buildroot** — Test onnxruntime + sherpa-onnx musl build (WSL2). Fix hash files.
+2. **Build Phase 5 in Buildroot** — Verify new cluster auto-offload code compiles. Deploy to VDI.
+3. **Multi-node integration test** — Test auto-offload with 2+ VMs
+4. **Piper voice model** — Create download tool/script for first-boot TTS model setup
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.

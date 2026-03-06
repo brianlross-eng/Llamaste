@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-06 (Phase 4 A/B Updates COMPLETE)
+**Last updated**: 2026-03-07 (Phase 5 Auto-Offload + Phase B Neural TTS packaging)
 
 ---
 
@@ -28,9 +28,87 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | GRUB module fix + ESP mount + deploy scripts | DONE (49026eb) |
 | Verified on VDI: 51 tools, grubenv working, slot A active | DONE |
 
+### Phase 5: Mesh Auto-Offload -- IN PROGRESS (bd14d7c)
+
+| Component | Status |
+|-----------|--------|
+| Design doc (mesh-auto-offload-design.md) | DONE |
+| ModelTier table + ClusterCapacity struct | DONE (bd14d7c) |
+| compute_tensor_split() — RAM-proportional ratios | DONE (bd14d7c) |
+| select_model() — largest GGUF that fits pooled RAM | DONE (bd14d7c) |
+| analyze_capacity() — full cluster capacity analysis | DONE (bd14d7c) |
+| spawn_llama_server() with --tensor-split | DONE (bd14d7c) |
+| RPC server caching (-c flag) | DONE (bd14d7c) |
+| cluster.capacity + cluster.models tools (53 total) | DONE (bd14d7c) |
+| HTTP endpoints: /llamaste/cluster/{capacity,models} | DONE (bd14d7c) |
+| Web UI cluster card extension | DONE (bd14d7c) |
+| 8 new auto-offload unit tests | DONE (bd14d7c) |
+| Build and test in Buildroot | PENDING |
+| Multi-node integration test | PENDING |
+
+### Phase B: Neural TTS -- IN PROGRESS (a8792a8)
+
+| Component | Status |
+|-----------|--------|
+| Design doc (neural-tts-design.md) | DONE |
+| onnxruntime Buildroot package (musl build from source) | DONE (a8792a8) |
+| musl patches (execinfo.h, flatbuffers locale) | DONE (a8792a8) |
+| sherpa-onnx version bump v1.11.3 → v1.12.28 | DONE (a8792a8) |
+| sherpa-onnx points to musl ORT | DONE (a8792a8) |
+| Defconfig + llamaste.mk updated | DONE (a8792a8) |
+| voice.cpp sherpa-onnx integration | ALREADY SCAFFOLDED |
+| CMakeLists.txt sherpa-onnx detection | ALREADY EXISTS |
+| Build and test in Buildroot (WSL2) | PENDING |
+| Hash files need real values after first download | PENDING |
+| Deploy to VDI, verify neural TTS | PENDING |
+
 ---
 
-## Latest Session (2026-03-06) -- Phase 4 A/B Updates
+## Latest Session (2026-03-07) -- Phase 5 Auto-Offload + Phase B Neural TTS
+
+### Phase 5: Mesh Auto-Offload (~350 LOC new code)
+
+**Design doc**: `docs/plans/2026-03-07-mesh-auto-offload-design.md`
+
+**Modified files**:
+- `cluster.h` — Added ModelTier, ClusterCapacity structs; 5 new ClusterManager methods
+- `cluster.cpp` — Model tier table (7 tiers), available_models(), compute_tensor_split(), select_model(), analyze_capacity()
+- `child_main.cpp` — spawn_llama_server() with --tensor-split, auto-select topology callback, RPC caching
+- `tools_cluster.cpp` — cluster.capacity + cluster.models tools, HTTP endpoints
+- `index.html` / `system.js` — Extended cluster card with capacity data
+
+**Key features**:
+- Automatic model selection: pools RAM across cluster, picks largest fitting model
+- Tensor split: RAM-proportional ratios (70% safety, 300MB overhead per node)
+- Model tier table: 0.5B through 72B Qwen2.5-Instruct Q4_K_M
+- Available model scanning: matches GGUF files on disk against tier table
+- Upgrade detection: flags when a bigger model could fit but isn't downloaded
+- RPC server tensor caching (-c flag) for near-instant model reload
+
+**Tests**: 8 new tests (model_tiers, tensor_split x4, analyze_capacity x2, select_model)
+
+### Phase B: Neural TTS Packaging
+
+**Design doc**: `docs/plans/2026-03-07-neural-tts-design.md`
+
+**New files**:
+- `br2-external/package/onnxruntime/` — Full Buildroot package for ORT v1.24.2
+  - `Config.in`, `onnxruntime.mk`, `onnxruntime.hash`
+  - `patches/0001-musl-no-execinfo.patch` — Guards execinfo.h for musl
+  - `patches/0002-musl-flatbuffers-locale.patch` — Guards xlocale.h for musl
+
+**Modified files**:
+- `sherpa-onnx.mk` — Version v1.11.3 → v1.12.28, points to musl ORT
+- `sherpa-onnx.hash` — Updated for v1.12.28
+- `Config.in` — Added onnxruntime source
+- `defconfig` — Enabled BR2_PACKAGE_ONNXRUNTIME, BR2_PACKAGE_SHERPA_ONNX
+- `llamaste.mk` — Added sherpa-onnx to dependencies
+
+**Commits**: `bd14d7c` (Phase 5), `a8792a8` (Phase B)
+
+---
+
+## Previous Session (2026-03-06) -- Phase 4 A/B Updates
 
 ### Phase 4 Implementation (~1500 LOC new code)
 
@@ -110,8 +188,10 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 ## Next Steps
 
 ### Immediate
-1. **Future: Neural TTS** -- Build onnxruntime from source for musl, then enable sherpa-onnx + Piper VITS
-2. **Phase 5: Mesh auto-offload** -- Automatic model sharding across discovered cluster peers
+1. **Build and test Neural TTS in Buildroot (WSL2)** -- Verify onnxruntime + sherpa-onnx compile with musl toolchain. Update hash files.
+2. **Build and test Phase 5 in Buildroot** -- Verify new cluster code compiles. Deploy to VDI.
+3. **Multi-node integration test** -- Test auto-offload with 2+ VMs on same network
+4. **Piper voice model download** -- Create model download tool/script for first-boot TTS setup
 
 ---
 
@@ -129,7 +209,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ## Source Summary
 
-~10,500 LOC original C++ + ~45KB web UI:
+~11,000 LOC original C++ + ~45KB web UI:
 - main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
 - agent.cpp, prompt_builder.cpp
 - tools.cpp + 13 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth, audio, cluster, update)
@@ -141,7 +221,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
 ## Test Suites
-12 suites, ~171 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster, updater
+12 suites, ~179 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster (16 tests), updater
 
 ## VirtualBox VM
 - **VM Name**: "Llamaste2", Location: `D:\Llamaste\vm\Llamaste2\`
