@@ -156,14 +156,24 @@
           <div class="dash-card">
             <h3>Model</h3>
             <div class="dash-row">
-              <span class="label">Name</span>
+              <span class="label">Active</span>
               <span class="value" id="dash-model">--</span>
             </div>
             <div class="dash-row">
               <span class="label">Speed</span>
               <span class="value" id="dash-speed">-- tok/s</span>
             </div>
-            <button id="dash-download-btn" class="btn btn-primary" style="margin-top:8px;width:100%">Download Recommended Model</button>
+            <div id="model-picker" style="margin-top:8px">
+              <select id="model-select" style="width:100%;padding:6px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee;margin-bottom:6px">
+                <option value="">Loading models...</option>
+              </select>
+              <div style="display:flex;gap:6px">
+                <button id="dash-download-btn" class="btn btn-primary" style="flex:1">Download Recommended</button>
+                <button id="model-select-btn" class="btn" style="flex:1;background:#555;color:#eee;border:none;padding:6px;border-radius:4px;cursor:pointer" disabled>Select</button>
+              </div>
+              <button id="model-usb-btn" class="btn" style="width:100%;margin-top:6px;background:#444;color:#ccc;border:none;padding:6px;border-radius:4px;cursor:pointer">Scan USB Drive</button>
+              <div id="model-status" style="margin-top:4px;font-size:0.85em;color:#aaa"></div>
+            </div>
           </div>
         </div>
       </div>

@@ -25,7 +25,35 @@ static const ModelCandidate MODELS[] = {
     {nullptr, nullptr, 0}
 };
 
+// Read a config value from /data/llamaste/config/<key>.
+// Returns empty string if not set.
+static std::string read_config(const char* key) {
+    std::string path = std::string("/data/llamaste/config/") + key;
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return "";
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    // Trim trailing whitespace/newlines
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+        buf[--n] = '\0';
+    return std::string(buf, n);
+}
+
 static std::string select_model(int available_mb) {
+    // Check for user-configured model override
+    std::string override_path = read_config("model.path");
+    if (!override_path.empty()) {
+        if (access(override_path.c_str(), R_OK) == 0) {
+            fprintf(stderr, "[main] Model override: %s\n", override_path.c_str());
+            return override_path;
+        }
+        fprintf(stderr, "[main] Model override not found: %s (falling back to auto)\n",
+                override_path.c_str());
+    }
+
+    // Auto-select: pick largest model that fits available RAM
     for (int i = 0; MODELS[i].name; i++) {
         if (available_mb >= MODELS[i].required_mb) {
             std::string path = std::string("/data/models/") + MODELS[i].filename;

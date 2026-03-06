@@ -1014,49 +1014,48 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline (desktop mode only — server mode stays lean)
+    // Initialize voice pipeline — TTS in all modes, full STT+listen in desktop only
     VoicePipeline voice_pipeline;
     {
         extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
 #ifndef _WIN32
-        if (g_boot_mode == "desktop") {
-            VoiceConfig vcfg;
+        VoiceConfig vcfg;
 
-            if (voice_pipeline.init(vcfg)) {
-                g_voice = &voice_pipeline;
-                fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
-                        voice_pipeline.tts_engine_name().c_str());
+        if (voice_pipeline.init(vcfg)) {
+            g_voice = &voice_pipeline;
+            fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
+                    voice_pipeline.tts_engine_name().c_str());
 
-                // Start always-listening if whisper model is available
-                if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
-                    // Wire command callback: voice commands go through the agent loop
-                    voice_pipeline.set_command_callback([&](const std::string& command) {
-                        fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
+            // Desktop mode: enable always-listening (ALSA capture + VAD)
+            if (g_boot_mode == "desktop" &&
+                access(vcfg.whisper_model.c_str(), R_OK) == 0) {
+                // Wire command callback: voice commands go through the agent loop
+                voice_pipeline.set_command_callback([&](const std::string& command) {
+                    fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
 
-                        ConversationState conv;
-                        conv.system_prompt = g_system_prompt;
-                        conv.add_user_message(command);
-                        std::string response = agent_turn(conv, g_tools, g_inference_fn);
+                    ConversationState conv;
+                    conv.system_prompt = g_system_prompt;
+                    conv.add_user_message(command);
+                    std::string response = agent_turn(conv, g_tools, g_inference_fn);
 
-                        fprintf(stderr, "[voice] Agent response: %.80s%s\n",
-                                response.c_str(),
-                                response.size() > 80 ? "..." : "");
+                    fprintf(stderr, "[voice] Agent response: %.80s%s\n",
+                            response.c_str(),
+                            response.size() > 80 ? "..." : "");
 
-                        // Speak the response via TTS
-                        if (!response.empty()) {
-                            voice_pipeline.speak(response);
-                        }
-                    });
+                    // Speak the response via TTS
+                    if (!response.empty()) {
+                        voice_pipeline.speak(response);
+                    }
+                });
 
-                    // Start the always-listening thread (ALSA capture + VAD)
-                    voice_pipeline.start();
-                }
+                // Start the always-listening thread (ALSA capture + VAD)
+                voice_pipeline.start();
             } else {
-                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
-                        voice_pipeline.last_error().c_str());
+                fprintf(stderr, "[child] Server mode: TTS available via API, STT disabled\n");
             }
         } else {
-            fprintf(stderr, "[child] Voice pipeline disabled (server mode)\n");
+            fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
+                    voice_pipeline.last_error().c_str());
         }
 #endif
     }
@@ -1664,6 +1663,30 @@ int child_main(const SupervisorConfig& config) {
     svr.Post("/v1/chat/completions", require_auth(handle_openai_completions));
     svr.Get("/health", handle_health);  // Health check always accessible
 
+#ifdef LLAMASTE_TEST_API
+    // Direct tool dispatch — TEST BUILDS ONLY, not compiled into production.
+    // Allows calling any tool by name without going through the LLM agent loop.
+    // Usage: POST /llamaste/tool {"name":"tool.name","arguments":{...}}
+    svr.Post("/llamaste/tool", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("name")) {
+            res.status = 400;
+            res.set_content(R"json({"error":"JSON body with 'name' required"})json",
+                            "application/json");
+            return;
+        }
+        std::string name = body.value("name", "");
+        std::string args = "{}";
+        if (body.contains("arguments")) {
+            args = body["arguments"].dump();
+        }
+        std::string result = g_tools.dispatch(name, args);
+        res.set_content(result, "application/json");
+    }));
+    fprintf(stderr, "[child] TEST API: POST /llamaste/tool enabled\n");
+#endif
+
     // --- Files API route (protected) ---
     svr.Get("/llamaste/files", require_auth([](const httplib::Request& req, httplib::Response& res) {
         std::string path = req.get_param_value("path");
@@ -1723,6 +1746,95 @@ int child_main(const SupervisorConfig& config) {
     svr.Get("/llamaste/model/recommended", require_auth(
         [](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string result = g_tools.dispatch("model.recommended", "{}");
+        res.set_content(result, "application/json");
+    }));
+
+    // GET /llamaste/model/list — List all downloaded models
+    svr.Get("/llamaste/model/list", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string result = g_tools.dispatch("model.list", "{}");
+        res.set_content(result, "application/json");
+    }));
+
+    // GET /llamaste/model/current — Currently loaded model info
+    svr.Get("/llamaste/model/current", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string result = g_tools.dispatch("model.current", "{}");
+        res.set_content(result, "application/json");
+    }));
+
+    // POST /llamaste/model/select — Set model override (takes effect on reboot)
+    svr.Post("/llamaste/model/select", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("path")) {
+            res.status = 400;
+            res.set_content(R"json({"error":"JSON body with 'path' required"})json",
+                            "application/json");
+            return;
+        }
+        std::string model_path = body.value("path", "");
+
+        // Validate: empty = clear override, otherwise must be under /data/models/
+        if (!model_path.empty() && model_path.find("/data/models/") != 0) {
+            res.status = 400;
+            res.set_content(R"json({"error":"Model path must be under /data/models/"})json",
+                            "application/json");
+            return;
+        }
+
+        // Save via config.set
+        json args;
+        args["key"] = "model.path";
+        args["value"] = model_path;  // empty clears the override
+        g_tools.dispatch("config.set", args.dump());
+
+        json out;
+        out["status"] = "ok";
+        out["model_path"] = model_path;
+        out["message"] = model_path.empty()
+            ? "Model override cleared. Auto-select will be used on next boot."
+            : "Model selected. Reboot to load: " + model_path;
+        res.set_content(out.dump(), "application/json");
+    }));
+
+    // POST /llamaste/model/download — Download any model from HuggingFace
+    svr.Post("/llamaste/model/download", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("repo_id") || !body.contains("filename")) {
+            res.status = 400;
+            res.set_content(R"json({"error":"JSON body with 'repo_id' and 'filename' required"})json",
+                            "application/json");
+            return;
+        }
+        std::string result = g_tools.dispatch("model.download", req.body);
+        res.set_content(result, "application/json");
+    }));
+
+    // GET /llamaste/model/usb/scan — Scan USB drives for GGUF files
+    svr.Get("/llamaste/model/usb/scan", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string result = g_tools.dispatch("model.usb_import",
+            R"json({"action":"scan"})json");
+        res.set_content(result, "application/json");
+    }));
+
+    // POST /llamaste/model/usb/import — Import GGUF file from USB
+    svr.Post("/llamaste/model/usb/import", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        auto body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.contains("device") || !body.contains("filename")) {
+            res.status = 400;
+            res.set_content(R"json({"error":"JSON body with 'device' and 'filename' required"})json",
+                            "application/json");
+            return;
+        }
+        json args;
+        args["action"] = "import";
+        args["device"] = body.value("device", "");
+        args["filename"] = body.value("filename", "");
+        std::string result = g_tools.dispatch("model.usb_import", args.dump());
         res.set_content(result, "application/json");
     }));
 

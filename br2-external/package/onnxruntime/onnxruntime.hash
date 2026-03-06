@@ -1,3 +1,2 @@
-# sha256 hash for onnxruntime v1.24.2 source tarball
-# Hash will be verified on first download — update after initial build
-sha256  e4f44579f0bdd06d1cc7abdb2a6740dc06ac10699d502c0f8d9576203550bd4d  onnxruntime-v1.24.2.tar.gz
+# sha256 hash for onnxruntime v1.23.2 source tarball
+sha256  99bcf964ce4e869d823c99b2294562a9050cbfa8e76ec81c8683cb3c7e19c2b4  onnxruntime-v1.23.2.tar.gz

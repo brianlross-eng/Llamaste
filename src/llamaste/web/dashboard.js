@@ -210,72 +210,193 @@
     return m + 'm';
   }
 
-  // --- Model download button ---
-  function initDownloadButton() {
+  // --- Model picker ---
+  function initModelPicker() {
     var dlBtn = document.getElementById('dash-download-btn');
-    if (!dlBtn) return;
+    var selBtn = document.getElementById('model-select-btn');
+    var selEl = document.getElementById('model-select');
+    var statusEl = document.getElementById('model-status');
+    if (!dlBtn || !selEl) return;
 
-    dlBtn.addEventListener('click', function () {
-      dlBtn.disabled = true;
-      dlBtn.textContent = 'Checking recommended model...';
+    // Track state
+    var recommended = null;
+    var downloadedModels = [];
 
-      // First check what model is recommended
-      fetch('/llamaste/model/recommended', { credentials: 'include' })
-        .then(function (r) { return r.json(); })
-        .then(function (rec) {
-          if (!rec.recommended) {
-            dlBtn.textContent = 'Not enough RAM for any model';
-            setTimeout(function () {
-              dlBtn.textContent = 'Download Recommended Model';
-              dlBtn.disabled = false;
-            }, 5000);
-            return;
-          }
+    function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
 
-          if (rec.already_downloaded) {
-            dlBtn.textContent = rec.model_name + ' already downloaded';
-            setTimeout(function () {
-              dlBtn.textContent = 'Download Recommended Model';
-              dlBtn.disabled = false;
-            }, 5000);
-            return;
-          }
+    // Load available models into dropdown
+    function refreshModelList() {
+      Promise.all([
+        fetch('/llamaste/model/list', { credentials: 'include' }).then(function(r) { return r.json(); }),
+        fetch('/llamaste/model/recommended', { credentials: 'include' }).then(function(r) { return r.json(); })
+      ]).then(function(results) {
+        var listData = results[0];
+        recommended = results[1];
+        downloadedModels = listData.models || [];
 
-          var sizeMb = rec.approx_download_mb || 0;
+        selEl.innerHTML = '';
+
+        if (downloadedModels.length === 0) {
+          var opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'No models downloaded';
+          selEl.appendChild(opt);
+          selBtn.disabled = true;
+        } else {
+          var autoOpt = document.createElement('option');
+          autoOpt.value = '';
+          autoOpt.textContent = '(Auto-select by RAM)';
+          selEl.appendChild(autoOpt);
+
+          downloadedModels.forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = '/data/models/' + m.filename;
+            var sizeStr = m.size_mb > 1024
+              ? (m.size_mb / 1024).toFixed(1) + ' GB'
+              : m.size_mb + ' MB';
+            opt.textContent = m.filename + ' (' + sizeStr + ')';
+            selEl.appendChild(opt);
+          });
+          selBtn.disabled = false;
+        }
+
+        // Update download button text
+        if (recommended && recommended.recommended && !recommended.already_downloaded) {
+          var sizeMb = recommended.approx_download_mb || 0;
           var sizeStr = sizeMb > 1024
             ? (sizeMb / 1024).toFixed(1) + ' GB'
             : sizeMb + ' MB';
-          dlBtn.textContent = 'Downloading ' + rec.model_name + ' (' + sizeStr + ')...';
+          dlBtn.textContent = 'Download ' + (recommended.model_name || 'Recommended') + ' (' + sizeStr + ')';
+        } else if (recommended && recommended.already_downloaded) {
+          dlBtn.textContent = 'Recommended Already Downloaded';
+          dlBtn.disabled = true;
+        } else {
+          dlBtn.textContent = 'Download Recommended';
+        }
+      }).catch(function() {
+        setStatus('Failed to load model list');
+      });
+    }
 
-          // Start the download
-          return fetch('/llamaste/model/download-recommended', { method: 'POST', credentials: 'include' })
-            .then(function (r) { return r.json(); })
-            .then(function (result) {
-              if (result.status === 'success' || result.status === 'already_exists') {
-                dlBtn.textContent = 'Downloaded! Restart to load.';
-                dlBtn.className = 'btn btn-success';
-              } else {
-                dlBtn.textContent = 'Download failed: ' + (result.error || 'unknown');
-                dlBtn.className = 'btn btn-danger';
-                setTimeout(function () {
-                  dlBtn.textContent = 'Retry Download';
-                  dlBtn.className = 'btn btn-primary';
-                  dlBtn.disabled = false;
-                }, 5000);
-              }
-            });
+    // Download recommended model
+    dlBtn.addEventListener('click', function() {
+      dlBtn.disabled = true;
+      dlBtn.textContent = 'Downloading...';
+      setStatus('Download in progress (may take several minutes)...');
+
+      fetch('/llamaste/model/download-recommended', { method: 'POST', credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (result.status === 'success' || result.status === 'already_exists') {
+            dlBtn.textContent = 'Downloaded!';
+            setStatus('Model downloaded. Select it and reboot to load.');
+            refreshModelList();
+          } else {
+            dlBtn.textContent = 'Download Failed';
+            setStatus('Error: ' + (result.error || 'unknown'));
+            setTimeout(function() {
+              dlBtn.disabled = false;
+              dlBtn.textContent = 'Retry Download';
+            }, 5000);
+          }
         })
-        .catch(function (err) {
-          dlBtn.textContent = 'Error: ' + err.message;
-          setTimeout(function () {
-            dlBtn.textContent = 'Download Recommended Model';
-            dlBtn.className = 'btn btn-primary';
-            dlBtn.disabled = false;
-          }, 5000);
+        .catch(function(err) {
+          dlBtn.textContent = 'Error';
+          setStatus(err.message);
+          setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
         });
     });
+
+    // Select model
+    selBtn.addEventListener('click', function() {
+      var path = selEl.value;
+      selBtn.disabled = true;
+      setStatus('Setting model...');
+
+      fetch('/llamaste/model/select', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (result.status === 'ok') {
+            setStatus(result.message);
+          } else {
+            setStatus('Error: ' + (result.error || 'unknown'));
+          }
+          selBtn.disabled = false;
+        })
+        .catch(function(err) {
+          setStatus('Error: ' + err.message);
+          selBtn.disabled = false;
+        });
+    });
+
+    // USB scan/import
+    var usbBtn = document.getElementById('model-usb-btn');
+    if (usbBtn) {
+      usbBtn.addEventListener('click', function() {
+        usbBtn.disabled = true;
+        usbBtn.textContent = 'Scanning...';
+        setStatus('Scanning USB drives for GGUF files...');
+
+        fetch('/llamaste/model/usb/scan', { credentials: 'include' })
+          .then(function(r) { return r.json(); })
+          .then(function(result) {
+            if (result.error) {
+              setStatus(result.error);
+              usbBtn.textContent = 'Scan USB Drive';
+              usbBtn.disabled = false;
+              return;
+            }
+            var files = result.gguf_files || [];
+            if (files.length === 0) {
+              setStatus('No GGUF files found on USB drives.');
+              usbBtn.textContent = 'Scan USB Drive';
+              usbBtn.disabled = false;
+              return;
+            }
+            // Show found files and let user pick one to import
+            setStatus('Found ' + files.length + ' file(s). Importing first...');
+            var f = files[0];
+            usbBtn.textContent = 'Importing ' + f.filename + '...';
+
+            fetch('/llamaste/model/usb/import', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ device: f.device, filename: f.filename })
+            })
+              .then(function(r) { return r.json(); })
+              .then(function(imp) {
+                if (imp.error) {
+                  setStatus('Import error: ' + imp.error);
+                } else {
+                  setStatus('Imported ' + (imp.filename || f.filename) + '!');
+                  refreshModelList();
+                }
+                usbBtn.textContent = 'Scan USB Drive';
+                usbBtn.disabled = false;
+              })
+              .catch(function(err) {
+                setStatus('Import error: ' + err.message);
+                usbBtn.textContent = 'Scan USB Drive';
+                usbBtn.disabled = false;
+              });
+          })
+          .catch(function(err) {
+            setStatus('Scan error: ' + err.message);
+            usbBtn.textContent = 'Scan USB Drive';
+            usbBtn.disabled = false;
+          });
+      });
+    }
+
+    refreshModelList();
   }
 
-  initDownloadButton();
+  initModelPicker();
 
 })();

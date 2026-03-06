@@ -7,7 +7,7 @@
 #
 ################################################################################
 
-ONNXRUNTIME_VERSION = v1.24.2
+ONNXRUNTIME_VERSION = v1.23.2
 ONNXRUNTIME_SITE = $(call github,microsoft,onnxruntime,$(ONNXRUNTIME_VERSION))
 ONNXRUNTIME_LICENSE = MIT
 ONNXRUNTIME_LICENSE_FILES = LICENSE
@@ -20,7 +20,8 @@ ONNXRUNTIME_DEPENDENCIES = host-protobuf host-python3 host-flatbuffers
 ONNXRUNTIME_SUBDIR = cmake
 
 ONNXRUNTIME_CONF_OPTS = \
-	-DCMAKE_BUILD_TYPE=MinSizeRel \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_CXX_FLAGS="-Wno-error=array-bounds" \
 	-DBUILD_SHARED_LIBS=OFF \
 	-Donnxruntime_BUILD_SHARED_LIB=ON \
 	-Donnxruntime_BUILD_UNIT_TESTS=OFF \
@@ -30,7 +31,7 @@ ONNXRUNTIME_CONF_OPTS = \
 	-Donnxruntime_DISABLE_EXCEPTIONS=OFF \
 	-Donnxruntime_ENABLE_PYTHON=OFF \
 	-Donnxruntime_ENABLE_TRAINING=OFF \
-	-Donnxruntime_ENABLE_LTO=ON \
+	-Donnxruntime_ENABLE_LTO=OFF \
 	-Donnxruntime_USE_CUDA=OFF \
 	-Donnxruntime_USE_TENSORRT=OFF \
 	-Donnxruntime_USE_DML=OFF \

@@ -64,6 +64,7 @@ struct ConfigDefault {
 static const ConfigDefault defaults[] = {
     {"system.hostname", "llamaste", "System hostname"},
     {"system.timezone", "UTC", "System timezone"},
+    {"model.path", "", "Override model path (empty = auto-select by RAM)"},
     {"model.context_size", "2048", "LLM context window size"},
     {"model.temperature", "0.7", "LLM sampling temperature"},
     {"model.max_tokens", "512", "Maximum tokens per response"},

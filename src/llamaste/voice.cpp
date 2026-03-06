@@ -15,6 +15,8 @@
 #include <chrono>
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
 #endif
 
 using json = nlohmann::json;
@@ -292,29 +294,132 @@ bool VoicePipeline::init(const VoiceConfig& config) {
         has_model = (access(config_.tts_model.c_str(), R_OK) == 0);
 #endif
         if (ram_mb >= 3072 && has_model) {
-            SherpaOnnxOfflineTtsConfig tts_config;
-            memset(&tts_config, 0, sizeof(tts_config));
-            tts_config.model.vits.model = config_.tts_model.c_str();
-            tts_config.model.vits.tokens = config_.tts_tokens.c_str();
-            tts_config.model.vits.data_dir = config_.tts_data_dir.c_str();
-            tts_config.model.vits.length_scale = 1.0f;
-            tts_config.model.vits.noise_scale = 0.667f;
-            tts_config.model.vits.noise_scale_w = 0.8f;
-            tts_config.model.num_threads = 2;
-            tts_config.model.provider = "cpu";
-            tts_config.max_num_sentences = 1;
-
             fprintf(stderr, "[voice] Loading sherpa-onnx TTS: %s\n",
                     config_.tts_model.c_str());
 
-            impl_->sherpa_tts = SherpaOnnxCreateOfflineTts(&tts_config);
-            if (impl_->sherpa_tts) {
-                impl_->sherpa_initialized = true;
-                impl_->tts_engine_name = "sherpa-onnx";
-                tts_initialized = true;
-                fprintf(stderr, "[voice] sherpa-onnx TTS initialized (Piper VITS)\n");
+            // Fork-test: try loading in a child process first to catch crashes
+            bool safe_to_load = true;
+#ifndef _WIN32
+            {
+                // Log diagnostics to /data/llamaste/sherpa-diag.log
+                FILE* diag = fopen("/data/llamaste/sherpa-diag.log", "w");
+                if (diag) {
+                    fprintf(diag, "model=%s\n", config_.tts_model.c_str());
+                    fprintf(diag, "tokens=%s\n", config_.tts_tokens.c_str());
+                    fprintf(diag, "data_dir=%s\n", config_.tts_data_dir.c_str());
+                    fprintf(diag, "ram_mb=%d\n", ram_mb);
+                    fprintf(diag, "model_exists=%d\n", has_model ? 1 : 0);
+                    fprintf(diag, "tokens_exists=%d\n",
+                            access(config_.tts_tokens.c_str(), R_OK) == 0 ? 1 : 0);
+                    fprintf(diag, "data_dir_exists=%d\n",
+                            access(config_.tts_data_dir.c_str(), R_OK) == 0 ? 1 : 0);
+                    fflush(diag);
+                }
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    // Child: attempt to load the model — exit 0 on success, 1 on failure
+                    // Redirect stderr to diag log for crash info
+                    FILE* clog = fopen("/data/llamaste/sherpa-child.log", "w");
+                    if (clog) {
+                        dup2(fileno(clog), STDERR_FILENO);
+                        fprintf(stderr, "fork-child: starting SherpaOnnxCreateOfflineTts\n");
+                        fflush(stderr);
+                    }
+
+                    SherpaOnnxOfflineTtsConfig test_config;
+                    memset(&test_config, 0, sizeof(test_config));
+                    test_config.model.vits.model = config_.tts_model.c_str();
+                    test_config.model.vits.tokens = config_.tts_tokens.c_str();
+                    test_config.model.vits.data_dir = config_.tts_data_dir.c_str();
+                    test_config.model.vits.length_scale = 1.0f;
+                    test_config.model.vits.noise_scale = 0.667f;
+                    test_config.model.vits.noise_scale_w = 0.8f;
+                    test_config.model.num_threads = 1;
+                    test_config.model.provider = "cpu";
+                    test_config.max_num_sentences = 1;
+
+                    fprintf(stderr, "fork-child: calling SherpaOnnxCreateOfflineTts...\n");
+                    fflush(stderr);
+
+                    auto* tts = SherpaOnnxCreateOfflineTts(&test_config);
+
+                    fprintf(stderr, "fork-child: result=%p\n", (void*)tts);
+                    fflush(stderr);
+
+                    if (tts) {
+                        SherpaOnnxDestroyOfflineTts(tts);
+                        fprintf(stderr, "fork-child: SUCCESS\n");
+                        fflush(stderr);
+                        _exit(0);
+                    }
+                    fprintf(stderr, "fork-child: FAILED (null return)\n");
+                    fflush(stderr);
+                    _exit(1);
+                } else if (pid > 0) {
+                    int status = 0;
+                    // Wait up to 120 seconds for the test child (model loading can be slow)
+                    for (int i = 0; i < 120; i++) {
+                        pid_t w = waitpid(pid, &status, WNOHANG);
+                        if (w > 0) break;
+                        if (w < 0) { safe_to_load = false; break; }
+                        usleep(1000000);  // 1 second
+                    }
+                    if (waitpid(pid, &status, WNOHANG) == 0) {
+                        // Timed out — kill the test child
+                        kill(pid, SIGKILL);
+                        waitpid(pid, &status, 0);
+                        fprintf(stderr, "[voice] sherpa-onnx fork-test timed out (120s)\n");
+                        if (diag) fprintf(diag, "result=TIMEOUT\n");
+                        safe_to_load = false;
+                    } else if (WIFSIGNALED(status)) {
+                        fprintf(stderr, "[voice] sherpa-onnx fork-test crashed (signal %d)\n",
+                                WTERMSIG(status));
+                        if (diag) fprintf(diag, "result=CRASH signal=%d\n", WTERMSIG(status));
+                        safe_to_load = false;
+                    } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                        fprintf(stderr, "[voice] sherpa-onnx fork-test failed (status=%d)\n", status);
+                        if (diag) fprintf(diag, "result=FAILED status=%d\n", status);
+                        safe_to_load = false;
+                    } else {
+                        fprintf(stderr, "[voice] sherpa-onnx fork-test passed\n");
+                        if (diag) fprintf(diag, "result=PASS\n");
+                    }
+                } else {
+                    fprintf(stderr, "[voice] fork() failed for sherpa-onnx test: %s\n",
+                            strerror(errno));
+                    if (diag) fprintf(diag, "result=FORK_FAILED errno=%d\n", errno);
+                    // Try loading anyway
+                }
+
+                if (diag) fclose(diag);
+            }
+#endif
+
+            if (safe_to_load) {
+                SherpaOnnxOfflineTtsConfig tts_config;
+                memset(&tts_config, 0, sizeof(tts_config));
+                tts_config.model.vits.model = config_.tts_model.c_str();
+                tts_config.model.vits.tokens = config_.tts_tokens.c_str();
+                tts_config.model.vits.data_dir = config_.tts_data_dir.c_str();
+                tts_config.model.vits.length_scale = 1.0f;
+                tts_config.model.vits.noise_scale = 0.667f;
+                tts_config.model.vits.noise_scale_w = 0.8f;
+                tts_config.model.num_threads = 2;
+                tts_config.model.provider = "cpu";
+                tts_config.max_num_sentences = 1;
+
+                impl_->sherpa_tts = SherpaOnnxCreateOfflineTts(&tts_config);
+                if (impl_->sherpa_tts) {
+                    impl_->sherpa_initialized = true;
+                    impl_->tts_engine_name = "sherpa-onnx";
+                    tts_initialized = true;
+                    fprintf(stderr, "[voice] sherpa-onnx TTS initialized (Piper VITS)\n");
+                } else {
+                    fprintf(stderr, "[voice] sherpa-onnx TTS init failed, falling back\n");
+                }
             } else {
-                fprintf(stderr, "[voice] sherpa-onnx TTS init failed, falling back\n");
+                fprintf(stderr, "[voice] Skipping sherpa-onnx (fork-test failed), using fallback\n");
             }
         } else if (!has_model) {
             fprintf(stderr, "[voice] sherpa-onnx: model not found at %s\n",
