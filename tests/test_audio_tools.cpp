@@ -171,7 +171,7 @@ int main() {
         auto j = json::parse(result);
         assert(j.contains("voices"));
         assert(j["voices"].is_array());
-        assert(j["voices"].size() >= 2);
+        assert(j["voices"].size() >= 12);
         // Check first voice has expected fields
         auto& v0 = j["voices"][0];
         assert(v0.contains("name"));

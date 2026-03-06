@@ -279,12 +279,44 @@ struct TtsVoiceInfo {
 };
 
 static const TtsVoiceInfo TTS_VOICES[] = {
+    // ── American English (en_US) ──
     {"amy-low",       "en_US-amy-low.onnx",
      "csukuangfj/vits-piper-en_US-amy-low",
-     16, 16000, "low", "female"},
+     63, 16000, "low", "female"},
     {"lessac-medium", "en_US-lessac-medium.onnx",
      "csukuangfj/vits-piper-en_US-lessac-medium",
+     63, 22050, "medium", "female"},
+    {"lessac-high",   "en_US-lessac-high.onnx",
+     "csukuangfj/vits-piper-en_US-lessac-high",
+     114, 22050, "high", "female"},
+    {"ryan-low",      "en_US-ryan-low.onnx",
+     "csukuangfj/vits-piper-en_US-ryan-low",
+     63, 16000, "low", "male"},
+    {"ryan-high",     "en_US-ryan-high.onnx",
+     "csukuangfj/vits-piper-en_US-ryan-high",
+     121, 22050, "high", "male"},
+    {"danny-low",     "en_US-danny-low.onnx",
+     "csukuangfj/vits-piper-en_US-danny-low",
+     63, 16000, "low", "male"},
+    {"hfc_female-medium", "en_US-hfc_female-medium.onnx",
+     "csukuangfj/vits-piper-en_US-hfc_female-medium",
+     63, 22050, "medium", "female"},
+    // ── British English (en_GB) ──
+    {"alba-medium",   "en_GB-alba-medium.onnx",
+     "csukuangfj/vits-piper-en_GB-alba-medium",
+     63, 22050, "medium", "female"},
+    {"cori-high",     "en_GB-cori-high.onnx",
+     "csukuangfj/vits-piper-en_GB-cori-high",
+     114, 22050, "high", "female"},
+    {"alan-low",      "en_GB-alan-low.onnx",
+     "csukuangfj/vits-piper-en_GB-alan-low",
+     63, 16000, "low", "male"},
+    {"northern_english_male-medium", "en_GB-northern_english_male-medium.onnx",
+     "csukuangfj/vits-piper-en_GB-northern_english_male-medium",
      63, 22050, "medium", "male"},
+    {"southern_english_female-low", "en_GB-southern_english_female-low.onnx",
+     "csukuangfj/vits-piper-en_GB-southern_english_female-low",
+     63, 16000, "low", "female"},
 };
 static const int TTS_VOICE_COUNT = sizeof(TTS_VOICES) / sizeof(TTS_VOICES[0]);
 
