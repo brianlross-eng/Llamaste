@@ -24,6 +24,8 @@
 #include "voice.h"
 #include "cluster.h"
 #include "mcp_server.h"
+#include "updater.h"
+#include "version.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -514,6 +516,10 @@ static void llama_monitor_thread(std::string model_path, int cpu_cores, int free
 static json gather_system_info(const SupervisorConfig& config) {
     json info;
 
+    // Version and A/B slot
+    info["version"] = LLAMASTE_VERSION;
+    info["active_slot"] = detect_current_slot();
+
     // Model info
     if (config.model_path.empty()) {
         info["model"] = "stub (no model loaded)";
@@ -942,6 +948,7 @@ int child_main(const SupervisorConfig& config) {
     register_schedule_tools(g_tools, g_scheduler);
     register_auth_tools(g_tools, g_auth);
     register_cluster_tools(g_tools, g_cluster);
+    register_update_tools(g_tools);
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware
@@ -1115,6 +1122,38 @@ int child_main(const SupervisorConfig& config) {
             fprintf(stderr, "[cluster] Coordinator — RPC endpoints: %s\n",
                     g_cluster.rpc_endpoint_list().c_str());
         }
+
+        // Topology change callback: reload llama-server with updated --rpc endpoints
+        g_cluster.set_topology_change_callback([]() {
+            if (!g_cluster.is_coordinator()) return;
+            if (!g_model_loaded.load()) return;
+
+            fprintf(stderr, "[cluster] Topology changed — reloading llama-server with new RPC endpoints\n");
+#ifndef _WIN32
+            // Kill existing llama-server
+            pid_t pid = g_llama_pid.load();
+            if (pid > 0) {
+                kill(pid, SIGTERM);
+                waitpid(pid, nullptr, 0);
+                g_llama_pid.store(0);
+                g_model_loaded.store(false);
+                g_inference_fn = stub_inference;
+            }
+
+            // Respawn with updated endpoints
+            std::string rpc = g_cluster.rpc_endpoint_list();
+            std::string model_path = "/data/models/" + g_model_name;
+            int free_ram_estimate = g_hwinfo.ram_free_mb - 512;
+            if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc)) {
+                if (wait_for_llama_server(120)) {
+                    g_model_loaded.store(true);
+                    g_inference_fn = llama_inference;
+                    fprintf(stderr, "[cluster] llama-server restarted with RPC endpoints: %s\n",
+                            rpc.c_str());
+                }
+            }
+#endif
+        });
     }
 
     // Cluster heartbeat: re-announce service and expire stale peers every 30s
@@ -1969,6 +2008,66 @@ int child_main(const SupervisorConfig& config) {
                         "application/json");
     }));
 
+    // --- Update endpoints ---
+    svr.Get("/llamaste/update/status", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        json status;
+        status["version"] = LLAMASTE_VERSION;
+        status["active_slot"] = detect_current_slot();
+        status["inactive_slot"] = inactive_slot(detect_current_slot());
+        // Check if inactive slot has metadata
+        std::string inact = inactive_slot(detect_current_slot());
+        std::string meta_path = "/data/llamaste/slots/" + inact + ".json";
+        std::ifstream mf(meta_path);
+        if (mf.is_open()) {
+            try {
+                json meta = json::parse(mf);
+                status["inactive_version"] = meta.value("version", "");
+            } catch (...) {}
+        }
+        status["update_state"] = "idle";
+        res.set_content(status.dump(), "application/json");
+    }));
+
+    svr.Post("/llamaste/update/check", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        json result;
+        result["current_version"] = LLAMASTE_VERSION;
+        result["available"] = false;
+        result["message"] = "Online update checking coming soon. Upload a .update file via the web UI.";
+        res.set_content(result.dump(), "application/json");
+    }));
+
+    svr.Post("/llamaste/update/rollback", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        std::string grubenv_path = find_grubenv_path();
+        if (grubenv_path.empty()) {
+            json err;
+            err["error"] = "grubenv not found — cannot switch slot";
+            res.status = 500;
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        std::string current = detect_current_slot();
+        std::string new_slot = inactive_slot(current);
+        auto vars = grubenv_read(grubenv_path);
+        vars["active_slot"] = new_slot;
+        vars["boot_success"] = "0";
+        vars["boot_counter"] = "3";
+        if (grubenv_write(grubenv_path, vars)) {
+            json ok;
+            ok["success"] = true;
+            ok["new_slot"] = new_slot;
+            ok["message"] = "Switched to slot " + new_slot + ". Reboot to activate.";
+            res.set_content(ok.dump(), "application/json");
+        } else {
+            json err;
+            err["error"] = "Failed to write grubenv";
+            res.status = 500;
+            res.set_content(err.dump(), "application/json");
+        }
+    }));
+
     // --- MCP server (Model Context Protocol, spec 2025-03-26) ---
     // Exposes all Llamaste tools to Claude Desktop and other MCP clients.
     // Auth: Bearer token (preferred, headless) OR session cookie (web UI users).
@@ -2034,6 +2133,15 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] MCP:    http://localhost:%d/mcp  (Claude Desktop)\n", port);
     fprintf(stderr, "[child] Running in %s mode\n",
             config.model_path.empty() ? "stub (no model)" : "inference");
+
+    // Mark boot as successful after a short delay (post-update health check)
+    // mark_boot_success() is a no-op if boot_counter is not set in grubenv
+    std::thread boot_success_thread([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        mark_boot_success();
+        fprintf(stderr, "[update] Boot health check complete\n");
+    });
+    boot_success_thread.detach();
 
     // Push one-time startup notification — shown as a toast when the first
     // SSE client connects.  Queued here so it's waiting before any browser opens.

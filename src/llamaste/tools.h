@@ -56,6 +56,8 @@ void register_install_tools(ToolRegistry& reg);
 void register_model_download_tools(ToolRegistry& reg);
 void register_audio_tools(ToolRegistry& reg);
 
+void register_update_tools(ToolRegistry& reg);
+
 class ClusterManager;  // forward declaration
 void register_cluster_tools(ToolRegistry& reg, ClusterManager& cluster);
 

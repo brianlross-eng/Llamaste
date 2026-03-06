@@ -23,6 +23,7 @@ set(LLAMASTE_SOURCES
     tools_model_download.cpp
     tools_audio.cpp
     tools_cluster.cpp
+    tools_update.cpp
     cluster.cpp
     updater.cpp
     tweetnacl.c

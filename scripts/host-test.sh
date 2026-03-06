@@ -170,6 +170,9 @@ if [ "${SKIP_INTEGRATION:-0}" != "1" ]; then
     echo ""
 fi
 
+# Pre-compile tweetnacl.c as C (needed by multiple suites)
+gcc -c -o "${BUILD_DIR}/tweetnacl.o" "${SRC}/tweetnacl.c" 2>&1
+
 # ---------------------------------------------------------------
 # Suite 5: HTTP Server
 # ---------------------------------------------------------------
@@ -192,6 +195,9 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/tools_cluster.cpp" \
+    "${SRC}/tools_update.cpp" \
+    "${SRC}/updater.cpp" \
+    "${BUILD_DIR}/tweetnacl.o" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
@@ -268,6 +274,9 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${SRC}/tools_auth.cpp" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/tools_cluster.cpp" \
+    "${SRC}/tools_update.cpp" \
+    "${SRC}/updater.cpp" \
+    "${BUILD_DIR}/tweetnacl.o" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
@@ -350,8 +359,7 @@ echo ""
 # Suite 12: Updater
 # ---------------------------------------------------------------
 echo -e "${BOLD}--- [12/12] Updater ---${NC}"
-# tweetnacl.c must be compiled as C (not C++) due to strict const/initialization rules
-gcc -c -o "${BUILD_DIR}/tweetnacl.o" "${SRC}/tweetnacl.c" 2>&1
+# tweetnacl.o already compiled above (before Suite 5)
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_updater" \
     "${TESTS}/test_updater.cpp" \
     "${SRC}/updater.cpp" \
