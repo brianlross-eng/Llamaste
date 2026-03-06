@@ -31,7 +31,7 @@ struct VoiceConfig {
     // sherpa-onnx TTS model paths
     std::string tts_model = "/data/models/tts/en_US-amy-low.onnx";
     std::string tts_tokens = "/data/models/tts/tokens.txt";
-    std::string tts_data_dir = "/data/models/tts/espeak-ng-data";
+    std::string tts_data_dir = "/usr/share/espeak-ng-data";
     std::string alsa_device = "default";    // ALSA capture device
     int sample_rate = 16000;                // 16kHz for whisper
     float vad_threshold = 0.5f;             // Speech probability threshold

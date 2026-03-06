@@ -28,18 +28,23 @@ int main() {
         auto names = reg.tool_names();
         bool has_transcribe = false, has_speak = false, has_status = false;
         bool has_config = false, has_download = false;
+        bool has_list_tts = false, has_download_tts = false;
         for (const auto& n : names) {
             if (n == "audio.transcribe") has_transcribe = true;
             if (n == "audio.speak") has_speak = true;
             if (n == "audio.status") has_status = true;
             if (n == "audio.config") has_config = true;
             if (n == "audio.download_model") has_download = true;
+            if (n == "voice.list_tts") has_list_tts = true;
+            if (n == "voice.download_tts") has_download_tts = true;
         }
         assert(has_transcribe);
         assert(has_speak);
         assert(has_status);
         assert(has_config);
         assert(has_download);
+        assert(has_list_tts);
+        assert(has_download_tts);
         PASS();
     }
 
@@ -149,11 +154,62 @@ int main() {
     }
 
     // Test 10: Tool count
-    TEST("5 audio tools registered");
+    TEST("7 audio tools registered");
     {
         ToolRegistry reg;
         register_audio_tools(reg);
-        assert(reg.count() == 5);
+        assert(reg.count() == 7);
+        PASS();
+    }
+
+    // Test 11: voice.list_tts returns voice list
+    TEST("voice.list_tts returns voice list");
+    {
+        ToolRegistry reg;
+        register_audio_tools(reg);
+        std::string result = reg.dispatch("voice.list_tts", "{}");
+        auto j = json::parse(result);
+        assert(j.contains("voices"));
+        assert(j["voices"].is_array());
+        assert(j["voices"].size() >= 2);
+        // Check first voice has expected fields
+        auto& v0 = j["voices"][0];
+        assert(v0.contains("name"));
+        assert(v0.contains("onnx_file"));
+        assert(v0.contains("size_mb"));
+        assert(v0.contains("quality"));
+        assert(v0.contains("gender"));
+        assert(v0.contains("installed"));
+        assert(j.contains("active_engine"));
+        PASS();
+    }
+
+    // Test 12: voice.download_tts rejects unknown voice
+    TEST("voice.download_tts rejects unknown voice");
+    {
+        ToolRegistry reg;
+        register_audio_tools(reg);
+        std::string result = reg.dispatch("voice.download_tts",
+            R"json({"voice": "nonexistent"})json");
+        auto j = json::parse(result);
+        assert(j.contains("error"));
+        assert(j.contains("available_voices"));
+        assert(j["available_voices"].is_array());
+        PASS();
+    }
+
+    // Test 13: voice.download_tts default voice is amy-low
+    TEST("voice.download_tts defaults to amy-low");
+    {
+        ToolRegistry reg;
+        register_audio_tools(reg);
+        // On host, model file won't exist, so we get download_needed or not_supported
+        std::string result = reg.dispatch("voice.download_tts", "{}");
+        auto j = json::parse(result);
+        assert(j.contains("status"));
+        std::string st = j["status"];
+        assert(st == "download_needed" || st == "not_supported" ||
+               st == "already_downloaded");
         PASS();
     }
 

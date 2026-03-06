@@ -1,6 +1,7 @@
 // tools_audio.cpp — Audio tools for Llamaste Voice I/O
 //
-// Tools: audio.transcribe, audio.speak, audio.status, audio.config
+// Tools: audio.transcribe, audio.speak, audio.status, audio.config,
+//        audio.download_model, voice.list_tts, voice.download_tts
 // These provide the LLM and HTTP API with voice capabilities.
 
 #include "tools.h"
@@ -12,6 +13,10 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/stat.h>
+#ifdef HAVE_LIBCURL
+#include <curl/curl.h>
+#endif
 #endif
 
 using json = nlohmann::json;
@@ -262,6 +267,226 @@ static std::string handle_audio_download_model(const std::string& args_json) {
     return result.dump();
 }
 
+// ── TTS voice model table ────────────────────────────────────────────────
+struct TtsVoiceInfo {
+    const char* name;       // Short name shown to user
+    const char* onnx_file;  // Filename of the ONNX model
+    const char* repo_id;    // HuggingFace repo
+    int approx_mb;          // Approximate download size
+    int sample_rate;        // Output sample rate
+    const char* quality;    // x-low, low, medium, high
+    const char* gender;     // male, female
+};
+
+static const TtsVoiceInfo TTS_VOICES[] = {
+    {"amy-low",       "en_US-amy-low.onnx",
+     "csukuangfj/vits-piper-en_US-amy-low",
+     16, 16000, "low", "female"},
+    {"lessac-medium", "en_US-lessac-medium.onnx",
+     "csukuangfj/vits-piper-en_US-lessac-medium",
+     63, 22050, "medium", "male"},
+};
+static const int TTS_VOICE_COUNT = sizeof(TTS_VOICES) / sizeof(TTS_VOICES[0]);
+
+static const TtsVoiceInfo* find_tts_voice(const std::string& name) {
+    for (int i = 0; i < TTS_VOICE_COUNT; i++) {
+        if (name == TTS_VOICES[i].name) return &TTS_VOICES[i];
+    }
+    return nullptr;
+}
+
+#if !defined(_WIN32) && defined(HAVE_LIBCURL)
+// Download a single file from URL to dest_path. Returns empty string on success,
+// error message on failure.
+static std::string download_file(const std::string& url,
+                                  const std::string& dest_path) {
+    std::string part_path = dest_path + ".part";
+
+    // Resume support
+    uint64_t existing_size = 0;
+    struct stat st;
+    if (stat(part_path.c_str(), &st) == 0) {
+        existing_size = st.st_size;
+    }
+
+    FILE* fp = fopen(part_path.c_str(), existing_size > 0 ? "ab" : "wb");
+    if (!fp) return "Cannot write to " + dest_path;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) { fclose(fp); return "curl init failed"; }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/1.0");
+    if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO,
+                         "/etc/ssl/certs/ca-certificates.crt");
+    }
+    if (existing_size > 0) {
+        curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
+                         (curl_off_t)existing_size);
+    }
+
+    fprintf(stderr, "[tts] Downloading: %s\n", url.c_str());
+    CURLcode res = curl_easy_perform(curl);
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    fclose(fp);
+
+    if (res != CURLE_OK) {
+        return std::string("Download failed: ") + curl_easy_strerror(res);
+    }
+    if (http_code >= 400) {
+        unlink(part_path.c_str());
+        return "HTTP error " + std::to_string(http_code);
+    }
+
+    // Rename .part to final
+    if (rename(part_path.c_str(), dest_path.c_str()) != 0) {
+        return "Failed to rename " + part_path + " to " + dest_path;
+    }
+    return "";  // success
+}
+#endif
+
+static std::string handle_voice_download_tts(const std::string& args_json) {
+    auto args = json::parse(args_json, nullptr, false);
+    std::string voice_name = "amy-low";
+    if (!args.is_discarded()) {
+        voice_name = args.value("voice", "amy-low");
+    }
+
+    const TtsVoiceInfo* voice = find_tts_voice(voice_name);
+    if (!voice) {
+        json out;
+        out["error"] = "Unknown voice: " + voice_name;
+        json voices = json::array();
+        for (int i = 0; i < TTS_VOICE_COUNT; i++) {
+            json v;
+            v["name"] = TTS_VOICES[i].name;
+            v["size_mb"] = TTS_VOICES[i].approx_mb;
+            v["quality"] = TTS_VOICES[i].quality;
+            v["gender"] = TTS_VOICES[i].gender;
+            voices.push_back(v);
+        }
+        out["available_voices"] = voices;
+        return out.dump();
+    }
+
+    std::string tts_dir = "/data/models/tts";
+    std::string onnx_path = tts_dir + "/" + voice->onnx_file;
+    std::string tokens_path = tts_dir + "/tokens.txt";
+
+#ifndef _WIN32
+    // Check if already downloaded
+    if (access(onnx_path.c_str(), R_OK) == 0 &&
+        access(tokens_path.c_str(), R_OK) == 0) {
+        json out;
+        out["status"] = "already_downloaded";
+        out["voice"] = voice_name;
+        out["model_path"] = onnx_path;
+        out["tokens_path"] = tokens_path;
+        return out.dump();
+    }
+
+#ifdef HAVE_LIBCURL
+    // Create directory
+    mkdir("/data/models", 0755);
+    mkdir(tts_dir.c_str(), 0755);
+
+    // Download ONNX model
+    std::string onnx_url = std::string("https://huggingface.co/") +
+        voice->repo_id + "/resolve/main/" + voice->onnx_file;
+    std::string err = download_file(onnx_url, onnx_path);
+    if (!err.empty()) {
+        json out;
+        out["status"] = "error";
+        out["error"] = err;
+        out["file"] = voice->onnx_file;
+        return out.dump();
+    }
+
+    // Download tokens.txt
+    std::string tokens_url = std::string("https://huggingface.co/") +
+        voice->repo_id + "/resolve/main/tokens.txt";
+    err = download_file(tokens_url, tokens_path);
+    if (!err.empty()) {
+        json out;
+        out["status"] = "error";
+        out["error"] = err;
+        out["file"] = "tokens.txt";
+        return out.dump();
+    }
+
+    json out;
+    out["status"] = "downloaded";
+    out["voice"] = voice_name;
+    out["model_path"] = onnx_path;
+    out["tokens_path"] = tokens_path;
+    out["size_mb"] = voice->approx_mb;
+    out["sample_rate"] = voice->sample_rate;
+    out["quality"] = voice->quality;
+    out["hint"] = "Restart voice pipeline to activate neural TTS";
+    return out.dump();
+#else
+    json out;
+    out["status"] = "download_needed";
+    out["voice"] = voice_name;
+    out["onnx_url"] = std::string("https://huggingface.co/") +
+        voice->repo_id + "/resolve/main/" + voice->onnx_file;
+    out["tokens_url"] = std::string("https://huggingface.co/") +
+        voice->repo_id + "/resolve/main/tokens.txt";
+    out["destination"] = tts_dir;
+    out["hint"] = "curl not available — download manually";
+    return out.dump();
+#endif // HAVE_LIBCURL
+#else
+    json out;
+    out["status"] = "not_supported";
+    out["message"] = "TTS download not supported on this platform";
+    return out.dump();
+#endif // _WIN32
+}
+
+static std::string handle_voice_list_tts(const std::string& /*args_json*/) {
+    json voices = json::array();
+    for (int i = 0; i < TTS_VOICE_COUNT; i++) {
+        json v;
+        v["name"] = TTS_VOICES[i].name;
+        v["onnx_file"] = TTS_VOICES[i].onnx_file;
+        v["size_mb"] = TTS_VOICES[i].approx_mb;
+        v["sample_rate"] = TTS_VOICES[i].sample_rate;
+        v["quality"] = TTS_VOICES[i].quality;
+        v["gender"] = TTS_VOICES[i].gender;
+
+        // Check if installed
+        std::string path = std::string("/data/models/tts/") + TTS_VOICES[i].onnx_file;
+#ifndef _WIN32
+        v["installed"] = (access(path.c_str(), R_OK) == 0);
+#else
+        v["installed"] = false;
+#endif
+        voices.push_back(v);
+    }
+
+    json out;
+    out["voices"] = voices;
+    // Report active engine
+    if (g_voice) {
+        out["active_engine"] = g_voice->tts_engine_name();
+    } else {
+        out["active_engine"] = "none";
+    }
+    return out.dump();
+}
+
 void register_audio_tools(ToolRegistry& reg) {
     reg.register_tool({
         .name = "audio.status",
@@ -358,5 +583,35 @@ void register_audio_tools(ToolRegistry& reg) {
             }
         })json",
         .handler = handle_audio_download_model
+    });
+
+    reg.register_tool({
+        .name = "voice.list_tts",
+        .description = "List available Piper TTS voice models with install status. "
+                       "Shows voice name, quality, gender, sample rate, and download size.",
+        .parameters = R"json({
+            "type": "object",
+            "properties": {}
+        })json",
+        .handler = handle_voice_list_tts
+    });
+
+    reg.register_tool({
+        .name = "voice.download_tts",
+        .description = "Download a Piper neural TTS voice model from HuggingFace. "
+                       "Downloads ONNX model + tokens to /data/models/tts/. "
+                       "Default voice: amy-low (16MB, female). "
+                       "Restart voice pipeline after download to activate.",
+        .parameters = R"json({
+            "type": "object",
+            "properties": {
+                "voice": {
+                    "type": "string",
+                    "description": "Voice name: amy-low (16MB, female) or lessac-medium (63MB, male)",
+                    "default": "amy-low"
+                }
+            }
+        })json",
+        .handler = handle_voice_download_tts
     });
 }
