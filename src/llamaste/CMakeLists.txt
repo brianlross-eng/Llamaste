@@ -153,6 +153,18 @@ else()
     message(STATUS "flite not found — text-to-speech disabled")
 endif()
 
+# sherpa-onnx for neural TTS (Piper VITS models)
+find_library(SHERPA_ONNX_LIB NAMES sherpa-onnx-c-api)
+find_path(SHERPA_ONNX_INCLUDE NAMES sherpa-onnx/c-api/c-api.h)
+if(SHERPA_ONNX_LIB AND SHERPA_ONNX_INCLUDE)
+    message(STATUS "Found sherpa-onnx: ${SHERPA_ONNX_LIB}")
+    target_compile_definitions(llamaste PRIVATE HAVE_SHERPA_ONNX)
+    target_include_directories(llamaste PRIVATE ${SHERPA_ONNX_INCLUDE})
+    target_link_libraries(llamaste PRIVATE ${SHERPA_ONNX_LIB})
+else()
+    message(STATUS "sherpa-onnx not found — neural TTS disabled, using flite fallback")
+endif()
+
 # Web asset embedding (production builds)
 # When web_embed.cpp/h are generated, add them and define LLAMASTE_HAS_EMBED
 set(WEB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web")
