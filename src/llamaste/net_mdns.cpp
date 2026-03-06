@@ -140,6 +140,38 @@ std::string MdnsResponder::decode_dns_name(const uint8_t* pkt, size_t pkt_len,
 }
 
 // ---------------------------------------------------------------------------
+// Parse an IPv4 address string into 4 bytes
+// ---------------------------------------------------------------------------
+
+static bool parse_ipv4(const std::string& ip_str, uint8_t out[4]) {
+    unsigned a, b, c, d;
+    if (sscanf(ip_str.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        return false;
+    }
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    out[0] = static_cast<uint8_t>(a);
+    out[1] = static_cast<uint8_t>(b);
+    out[2] = static_cast<uint8_t>(c);
+    out[3] = static_cast<uint8_t>(d);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Case-insensitive string comparison for DNS names
+// ---------------------------------------------------------------------------
+
+static bool dns_name_eq(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (tolower(static_cast<unsigned char>(a[i])) !=
+            tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Per-record append helpers (used by build_service_response)
 // ---------------------------------------------------------------------------
 
@@ -253,6 +285,253 @@ std::vector<uint8_t> MdnsResponder::build_service_response(
 }
 
 // ---------------------------------------------------------------------------
+// Build mDNS PTR query packet
+// ---------------------------------------------------------------------------
+
+std::vector<uint8_t> MdnsResponder::build_ptr_query(const std::string& service_fqdn) {
+    std::vector<uint8_t> pkt;
+    pkt.reserve(64);
+
+    // DNS Header (12 bytes): QR=0 (query), QDCOUNT=1
+    put_u16(pkt, 0);      // Transaction ID (mDNS uses 0)
+    put_u16(pkt, 0);      // Flags: QR=0 (standard query)
+    put_u16(pkt, 1);      // QDCOUNT = 1
+    put_u16(pkt, 0);      // ANCOUNT = 0
+    put_u16(pkt, 0);      // NSCOUNT = 0
+    put_u16(pkt, 0);      // ARCOUNT = 0
+
+    // Question section: service name + QTYPE=PTR + QCLASS=IN|unicast
+    auto name = encode_dns_name(service_fqdn);
+    pkt.insert(pkt.end(), name.begin(), name.end());
+    put_u16(pkt, DNS_TYPE_PTR);    // QTYPE = PTR (12)
+    put_u16(pkt, 0x8001);          // QCLASS = IN with unicast-response bit
+
+    return pkt;
+}
+
+// ---------------------------------------------------------------------------
+// Parse service responses from a DNS response packet
+// ---------------------------------------------------------------------------
+
+std::vector<MdnsResponder::DiscoveredService> MdnsResponder::parse_service_responses(
+        const uint8_t* pkt, size_t pkt_len) {
+    std::vector<DiscoveredService> results;
+
+    if (pkt_len < 12) return results;
+
+    // Parse header
+    uint16_t flags   = get_u16(pkt + 2);
+    uint16_t qdcount = get_u16(pkt + 4);
+    uint16_t ancount = get_u16(pkt + 6);
+    // uint16_t nscount = get_u16(pkt + 8);  // unused
+    uint16_t arcount = get_u16(pkt + 10);
+
+    // Must be a response
+    if (!(flags & DNS_FLAG_RESPONSE)) return results;
+
+    size_t offset = 12;
+
+    // Skip question section
+    for (uint16_t i = 0; i < qdcount && offset < pkt_len; ++i) {
+        decode_dns_name(pkt, pkt_len, offset);  // skip name
+        if (offset + 4 > pkt_len) return results;
+        offset += 4;  // skip QTYPE + QCLASS
+    }
+
+    // We'll collect SRV, TXT, and A records, then merge them.
+    // Key for SRV/TXT records is the instance name; for A records it's hostname.
+    struct SrvInfo {
+        std::string target;  // hostname (without .local)
+        uint16_t port = 0;
+    };
+
+    // Maps keyed by record owner name
+    std::vector<std::pair<std::string, SrvInfo>> srv_records;
+    std::vector<std::pair<std::string, std::vector<std::string>>> txt_records;
+    std::vector<std::pair<std::string, std::string>> a_records;  // fqdn -> ip
+
+    // Parse answer + additional sections
+    uint16_t total_rr = ancount + arcount;
+    for (uint16_t i = 0; i < total_rr && offset < pkt_len; ++i) {
+        // Record name
+        std::string rr_name = decode_dns_name(pkt, pkt_len, offset);
+
+        if (offset + 10 > pkt_len) break;
+        uint16_t rr_type  = get_u16(pkt + offset); offset += 2;
+        uint16_t rr_class = get_u16(pkt + offset); offset += 2;
+        (void)rr_class;
+        /* uint32_t rr_ttl = */ offset += 4;  // skip TTL
+        uint16_t rdlength = get_u16(pkt + offset); offset += 2;
+
+        if (offset + rdlength > pkt_len) break;
+
+        size_t rdata_start = offset;
+
+        if (rr_type == DNS_TYPE_SRV && rdlength >= 6) {
+            // SRV RDATA: priority(2) + weight(2) + port(2) + target(variable)
+            // uint16_t priority = get_u16(pkt + offset);
+            offset += 2;  // skip priority
+            // uint16_t weight = get_u16(pkt + offset);
+            offset += 2;  // skip weight
+            uint16_t port = get_u16(pkt + offset);
+            offset += 2;
+
+            std::string target = decode_dns_name(pkt, pkt_len, offset);
+
+            SrvInfo info;
+            info.port = port;
+            // Strip ".local" suffix from target
+            const std::string suffix = ".local";
+            if (target.size() > suffix.size() &&
+                target.compare(target.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                info.target = target.substr(0, target.size() - suffix.size());
+            } else {
+                info.target = target;
+            }
+            srv_records.push_back({rr_name, info});
+
+        } else if (rr_type == DNS_TYPE_TXT && rdlength > 0) {
+            // TXT RDATA: sequence of length-prefixed strings
+            std::vector<std::string> kvs;
+            size_t txt_end = rdata_start + rdlength;
+            size_t pos = rdata_start;
+            while (pos < txt_end) {
+                uint8_t str_len = pkt[pos];
+                ++pos;
+                if (pos + str_len > txt_end) break;
+                if (str_len > 0) {
+                    kvs.emplace_back(reinterpret_cast<const char*>(pkt + pos), str_len);
+                }
+                pos += str_len;
+            }
+            txt_records.push_back({rr_name, kvs});
+            offset = rdata_start + rdlength;
+
+        } else if (rr_type == DNS_TYPE_A && rdlength == 4) {
+            // A RDATA: 4-byte IPv4
+            char ip_str[16];
+            snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+                     pkt[rdata_start], pkt[rdata_start + 1],
+                     pkt[rdata_start + 2], pkt[rdata_start + 3]);
+            a_records.push_back({rr_name, std::string(ip_str)});
+            offset = rdata_start + rdlength;
+
+        } else {
+            // Skip unknown record types
+            offset = rdata_start + rdlength;
+        }
+    }
+
+    // Merge: each SRV record becomes a DiscoveredService, enriched with
+    // matching TXT and A records.
+    for (const auto& [srv_name, srv_info] : srv_records) {
+        DiscoveredService ds;
+        ds.hostname = srv_info.target;
+        ds.port = srv_info.port;
+
+        // Find matching TXT record (same owner name as SRV)
+        for (const auto& [txt_name, txt_kvs] : txt_records) {
+            if (dns_name_eq(txt_name, srv_name)) {
+                ds.txt = txt_kvs;
+                break;
+            }
+        }
+
+        // Find matching A record for the SRV target hostname
+        std::string target_fqdn = srv_info.target + ".local";
+        for (const auto& [a_name, a_ip] : a_records) {
+            if (dns_name_eq(a_name, target_fqdn)) {
+                ds.ip = a_ip;
+                break;
+            }
+        }
+
+        results.push_back(ds);
+    }
+
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// Discover services on the LAN via mDNS PTR queries
+// ---------------------------------------------------------------------------
+
+std::vector<MdnsResponder::DiscoveredService> MdnsResponder::discover_services(
+        const std::string& service_type, int timeout_ms) {
+    std::vector<DiscoveredService> results;
+
+#ifndef _WIN32
+    if (sock_ < 0 || !running_) return results;
+
+    std::string service_fqdn = service_type + ".local";
+    auto query = build_ptr_query(service_fqdn);
+
+    // Send query twice (100ms gap for UDP loss tolerance)
+    send_multicast(query);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    send_multicast(query);
+
+    // Collect responses until timeout
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+
+    uint8_t buf[1500];
+    struct pollfd pfd;
+    pfd.fd = sock_;
+    pfd.events = POLLIN;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+
+        int ret = poll(&pfd, 1, static_cast<int>(remaining));
+        if (ret <= 0) break;
+        if (!(pfd.revents & POLLIN)) continue;
+
+        struct sockaddr_in sender = {};
+        socklen_t sender_len = sizeof(sender);
+        ssize_t n = recvfrom(sock_, buf, sizeof(buf), 0,
+                             reinterpret_cast<struct sockaddr*>(&sender),
+                             &sender_len);
+        if (n < 12) continue;
+
+        size_t pkt_len = static_cast<size_t>(n);
+
+        // Only parse response packets (QR=1)
+        uint16_t flags = get_u16(buf + 2);
+        if (!(flags & DNS_FLAG_RESPONSE)) continue;
+
+        auto peers = parse_service_responses(buf, pkt_len);
+        for (auto& peer : peers) {
+            results.push_back(std::move(peer));
+        }
+    }
+
+    // Deduplicate by IP + port
+    std::vector<DiscoveredService> deduped;
+    for (const auto& svc : results) {
+        bool dup = false;
+        for (const auto& existing : deduped) {
+            if (existing.ip == svc.ip && existing.port == svc.port) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            deduped.push_back(svc);
+        }
+    }
+
+    return deduped;
+#else
+    (void)service_type;
+    (void)timeout_ms;
+    return results;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Build mDNS response packet
 // ---------------------------------------------------------------------------
 
@@ -325,38 +604,6 @@ std::string MdnsResponder::get_local_ip() {
     freeifaddrs(addrs);
     return result;
 #endif
-}
-
-// ---------------------------------------------------------------------------
-// Parse an IPv4 address string into 4 bytes
-// ---------------------------------------------------------------------------
-
-static bool parse_ipv4(const std::string& ip_str, uint8_t out[4]) {
-    unsigned a, b, c, d;
-    if (sscanf(ip_str.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
-        return false;
-    }
-    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
-    out[0] = static_cast<uint8_t>(a);
-    out[1] = static_cast<uint8_t>(b);
-    out[2] = static_cast<uint8_t>(c);
-    out[3] = static_cast<uint8_t>(d);
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// Case-insensitive string comparison for DNS names
-// ---------------------------------------------------------------------------
-
-static bool dns_name_eq(const std::string& a, const std::string& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (tolower(static_cast<unsigned char>(a[i])) !=
-            tolower(static_cast<unsigned char>(b[i]))) {
-            return false;
-        }
-    }
-    return true;
 }
 
 // ---------------------------------------------------------------------------

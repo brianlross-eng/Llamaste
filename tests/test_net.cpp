@@ -278,6 +278,202 @@ static void test_encode_decode_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: build_ptr_query packet structure
+// ---------------------------------------------------------------------------
+
+static void test_build_ptr_query() {
+    printf("test_build_ptr_query...\n");
+
+    auto pkt = MdnsResponder::build_ptr_query("_llama-rpc._tcp.local");
+
+    // Must be longer than the 12-byte header
+    assert(pkt.size() > 12);
+
+    // QR=0 (query, not response)
+    assert((pkt[2] & 0x80) == 0);
+
+    // QDCOUNT=1
+    assert(pkt[4] == 0 && pkt[5] == 1);
+
+    // ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+    assert(read_u16(pkt.data() + 6) == 0);
+    assert(read_u16(pkt.data() + 8) == 0);
+    assert(read_u16(pkt.data() + 10) == 0);
+
+    printf("  PASS: header flags correct (QR=0, QDCOUNT=1)\n");
+
+    // Decode the question name
+    size_t off = 12;
+    std::string name = MdnsResponder::decode_dns_name(pkt.data(), pkt.size(), off);
+    assert(name == "_llama-rpc._tcp.local");
+
+    printf("  PASS: question name correct\n");
+
+    // QTYPE = PTR (12)
+    uint16_t qtype = read_u16(pkt.data() + off);
+    assert(qtype == 12);
+    off += 2;
+
+    // QCLASS = IN with unicast-response bit (0x8001)
+    uint16_t qclass = read_u16(pkt.data() + off);
+    assert(qclass == 0x8001);
+
+    printf("  PASS: QTYPE=PTR, QCLASS=IN|unicast correct\n");
+
+    // Verify total packet length = 12 (header) + encoded name + 4 (type+class)
+    auto encoded_name = MdnsResponder::encode_dns_name("_llama-rpc._tcp.local");
+    assert(pkt.size() == 12 + encoded_name.size() + 4);
+
+    printf("  PASS: build_ptr_query\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test: parse_service_responses roundtrip with build_service_response
+// ---------------------------------------------------------------------------
+
+static void test_parse_service_response() {
+    printf("test_parse_service_response...\n");
+
+    // Build a service response using the existing method
+    MdnsServiceRecord svc;
+    svc.browse_name    = "_llama-rpc._tcp.local";
+    svc.instance_name  = "llamaste._llama-rpc._tcp.local";
+    svc.port           = 50052;
+    svc.txt            = {"ram=8192", "cores=4", "model=none"};
+
+    uint8_t ip[4] = {192, 168, 1, 42};
+    auto pkt = MdnsResponder::build_service_response(svc, "llamaste.local", ip, 0);
+
+    // Parse it back
+    auto peers = MdnsResponder::parse_service_responses(pkt.data(), pkt.size());
+
+    assert(peers.size() == 1);
+    printf("  PASS: found 1 service\n");
+
+    assert(peers[0].hostname == "llamaste");
+    printf("  PASS: hostname = llamaste\n");
+
+    assert(peers[0].ip == "192.168.1.42");
+    printf("  PASS: ip = 192.168.1.42\n");
+
+    assert(peers[0].port == 50052);
+    printf("  PASS: port = 50052\n");
+
+    assert(peers[0].txt.size() == 3);
+    assert(peers[0].txt[0] == "ram=8192");
+    assert(peers[0].txt[1] == "cores=4");
+    assert(peers[0].txt[2] == "model=none");
+    printf("  PASS: txt entries correct\n");
+
+    printf("  PASS: parse_service_response\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test: parse_service_responses with multiple services
+// ---------------------------------------------------------------------------
+
+static void test_parse_multiple_services() {
+    printf("test_parse_multiple_services...\n");
+
+    // Build two separate service response packets and parse each
+    MdnsServiceRecord svc1;
+    svc1.browse_name   = "_llama-rpc._tcp.local";
+    svc1.instance_name = "node1._llama-rpc._tcp.local";
+    svc1.port          = 50052;
+    svc1.txt           = {"ram=4096"};
+
+    MdnsServiceRecord svc2;
+    svc2.browse_name   = "_llama-rpc._tcp.local";
+    svc2.instance_name = "node2._llama-rpc._tcp.local";
+    svc2.port          = 50053;
+    svc2.txt           = {"ram=16384"};
+
+    uint8_t ip1[4] = {10, 0, 0, 1};
+    uint8_t ip2[4] = {10, 0, 0, 2};
+
+    auto pkt1 = MdnsResponder::build_service_response(svc1, "node1.local", ip1, 0);
+    auto pkt2 = MdnsResponder::build_service_response(svc2, "node2.local", ip2, 0);
+
+    auto peers1 = MdnsResponder::parse_service_responses(pkt1.data(), pkt1.size());
+    auto peers2 = MdnsResponder::parse_service_responses(pkt2.data(), pkt2.size());
+
+    assert(peers1.size() == 1);
+    assert(peers1[0].hostname == "node1");
+    assert(peers1[0].ip == "10.0.0.1");
+    assert(peers1[0].port == 50052);
+
+    assert(peers2.size() == 1);
+    assert(peers2[0].hostname == "node2");
+    assert(peers2[0].ip == "10.0.0.2");
+    assert(peers2[0].port == 50053);
+
+    printf("  PASS: multiple services parsed independently\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test: parse_service_responses rejects query packets
+// ---------------------------------------------------------------------------
+
+static void test_parse_rejects_queries() {
+    printf("test_parse_rejects_queries...\n");
+
+    // Build a PTR query (not a response) and ensure parse returns empty
+    auto query = MdnsResponder::build_ptr_query("_llama-rpc._tcp.local");
+    auto peers = MdnsResponder::parse_service_responses(query.data(), query.size());
+    assert(peers.empty());
+
+    printf("  PASS: query packets correctly rejected\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test: parse_service_responses handles truncated/empty packets
+// ---------------------------------------------------------------------------
+
+static void test_parse_truncated_packets() {
+    printf("test_parse_truncated_packets...\n");
+
+    // Empty packet
+    auto peers1 = MdnsResponder::parse_service_responses(nullptr, 0);
+    assert(peers1.empty());
+    printf("  PASS: empty packet handled\n");
+
+    // Too-short packet (< 12 bytes)
+    uint8_t short_pkt[8] = {0};
+    auto peers2 = MdnsResponder::parse_service_responses(short_pkt, sizeof(short_pkt));
+    assert(peers2.empty());
+    printf("  PASS: truncated packet handled\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test: build_ptr_query with different service names
+// ---------------------------------------------------------------------------
+
+static void test_ptr_query_different_services() {
+    printf("test_ptr_query_different_services...\n");
+
+    // Test with MCP service type
+    auto pkt = MdnsResponder::build_ptr_query("_mcp._tcp.local");
+    assert(pkt.size() > 12);
+
+    size_t off = 12;
+    std::string name = MdnsResponder::decode_dns_name(pkt.data(), pkt.size(), off);
+    assert(name == "_mcp._tcp.local");
+    assert(read_u16(pkt.data() + off) == 12);  // PTR
+
+    printf("  PASS: _mcp._tcp.local query correct\n");
+
+    // Test with HTTP service type
+    auto pkt2 = MdnsResponder::build_ptr_query("_http._tcp.local");
+    assert(pkt2.size() > 12);
+
+    size_t off2 = 12;
+    std::string name2 = MdnsResponder::decode_dns_name(pkt2.data(), pkt2.size(), off2);
+    assert(name2 == "_http._tcp.local");
+
+    printf("  PASS: _http._tcp.local query correct\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -290,6 +486,12 @@ int main() {
     test_get_local_ip();
     test_encode_decode_roundtrip();
     test_start_stop();
+    test_build_ptr_query();
+    test_parse_service_response();
+    test_parse_multiple_services();
+    test_parse_rejects_queries();
+    test_parse_truncated_packets();
+    test_ptr_query_different_services();
 
     printf("\nAll network tests passed.\n");
     return 0;

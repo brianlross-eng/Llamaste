@@ -70,6 +70,31 @@ public:
         const uint8_t ip[4],
         uint16_t query_id = 0);
 
+    // Build an mDNS PTR query packet for a service type.
+    // service_fqdn: e.g. "_llama-rpc._tcp.local"
+    static std::vector<uint8_t> build_ptr_query(const std::string& service_fqdn);
+
+    // Parsed service info from a response packet.
+    struct DiscoveredService {
+        std::string hostname;
+        std::string ip;
+        uint16_t port = 0;
+        std::vector<std::string> txt;
+    };
+
+    // Parse peer info from a service response packet.
+    // Extracts SRV (port+target), TXT (key=value strings), and A (IPv4)
+    // records from a DNS response packet.
+    static std::vector<DiscoveredService> parse_service_responses(
+        const uint8_t* pkt, size_t pkt_len);
+
+    // Discover services of a given type on the LAN.
+    // service_type: e.g. "_llama-rpc._tcp" (no ".local")
+    // Sends PTR queries via multicast and collects responses until timeout.
+    // Returns deduplicated list of discovered services.
+    std::vector<DiscoveredService> discover_services(
+        const std::string& service_type, int timeout_ms = 2000);
+
     // Get the IPv4 address of the first non-loopback interface.
     // Returns "0.0.0.0" if none found.
     static std::string get_local_ip();
