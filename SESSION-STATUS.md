@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-07 (Phase 5 + Phase B: Built, tested, deployed)
+**Last updated**: 2026-03-08 (Neural TTS end-to-end verified, model picker, test API)
 
 ---
 
@@ -63,10 +63,49 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | Hash files updated with real values | DONE (5866523) |
 | Deploy to VDI, llamaste links sherpa-onnx | DONE |
 | Piper voice model download tool (voice.list_tts, voice.download_tts) | DONE (9dca894) |
+| ORT fix: v1.23.2 Release + no LTO + -Wno-error=array-bounds | DONE (ffdfdff) |
+| Fork-test safety for sherpa-onnx load (voice.cpp) | DONE (ffdfdff) |
+| End-to-end neural TTS verified on VDI | DONE |
+| Model picker UI + config-based model.path override | DONE (ffdfdff) |
+| Test-only tool dispatch endpoint | DONE (ffdfdff) |
+| Model management API (list, info, download, USB import) | DONE (ffdfdff) |
 
 ---
 
-## Latest Session (2026-03-07) -- TTS Voice Model Download Tools
+## Latest Session (2026-03-08) -- Neural TTS End-to-End + Model Picker
+
+### Neural TTS Activation — sherpa-onnx Piper VITS Verified (ffdfdff)
+
+**Root cause**: ORT v1.24.2 built with `MinSizeRel` (-Os) + LTO caused graph validation
+crash on valid Piper ONNX models. The model was valid (Python ORT 1.24.2 loaded it fine).
+
+**Fix**: ORT v1.23.2 + `Release` (-O2) + `LTO=OFF` + `-Wno-error=array-bounds` (GCC 12 false positive).
+
+**Safety**: Fork-test mechanism in voice.cpp — forks child to test-load sherpa-onnx, catches
+crashes (SIGABRT/etc), falls back to espeak-ng. Prevents crash-restart loop.
+
+**Verified on VDI**:
+- `audio.status` reports `tts_engine: sherpa-onnx`
+- `audio.speak` synthesizes speech: 4.06s WAV at 16kHz for test sentence
+- Fork-test passes, full sherpa-onnx Piper VITS model loads successfully
+
+### Model Picker + Test API + Model Management
+
+- Model picker UI in web dashboard (dropdown, auto-detect, manual download)
+- `model.path` config override via `config.set` tool
+- Test-only tool dispatch endpoint (`/llamaste/test/tool`)
+- Model management: list, info, download (HuggingFace), USB import
+- Voice pipeline initialized in all modes (server + desktop)
+
+### Build Chain Changes
+
+- ORT: v1.24.2 → v1.23.2, MinSizeRel → Release, LTO ON → OFF
+- Deploy: squashfs-only script (vm/deploy-squashfs.sh) preserves data partition
+- 55 tools, 12 test suites, server mode confirmed
+
+---
+
+## Previous Session (2026-03-07) -- TTS Voice Model Download Tools
 
 ### voice.list_tts + voice.download_tts — 55 tools total (9dca894)
 

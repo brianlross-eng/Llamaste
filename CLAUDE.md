@@ -4,7 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) COMPLETE. 53 tools, 179 tests/12 suites.
+- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) COMPLETE. 55 tools, 182 tests/12 suites.
+- **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI.
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
@@ -83,6 +84,11 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Conditional deps in .mk**: `ifeq ($(BR2_PACKAGE_FOO),y)` pattern for optional packages not yet selected in .config
 - **VDI detach before copy**: Must `storageattach --medium none` + `closemedium` before copying VDI files — VBoxSVC holds locks on registered media
 - **VirtualBox aborted state**: If VM gets stuck in "aborted" state, create a new VM rather than trying to fix the old one
+- **ORT MinSizeRel crash**: ORT built with `-Os` (MinSizeRel) + LTO crashes on valid ONNX models ("Graph output does not exist"). Fix: `Release` (-O2) + `LTO=OFF`
+- **ORT GCC 12 false positive**: `-Werror=array-bounds` in `custom_ops.cc` under `-O2`. Fix: `-DCMAKE_CXX_FLAGS="-Wno-error=array-bounds"` in CONF_OPTS
+- **Squashfs-only VDI deploy**: `vm/deploy-squashfs.sh` — VDI→RAW (qemu-img) → losetup → dd squashfs to p3 → RAW→VDI. Preserves data partition
+- **VDI resize after deploy**: Must `closemedium` old reference (UUID changes after qemu-img convert), then `modifymedium --resizebyte`, then re-attach
+- **Sherpa-onnx fork-test safety**: Fork child to test-load sherpa-onnx before real load. Catches crashes, prevents crash-restart loop. See voice.cpp
 
 ## VirtualBox VM
 - VM "Llamaste2" at `D:\Llamaste\vm\Llamaste2\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
@@ -98,9 +104,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Piper voice model download tool** — Download .onnx + tokens from HuggingFace for first-boot TTS setup
-2. **Activate neural TTS in voice.cpp** — Wire up sherpa-onnx C API for Piper VITS synthesis
-3. **Multi-node integration test** — Test auto-offload with 2+ VMs on same network
+1. **Multi-node integration test** — Test auto-offload with 2+ VMs on same network
+2. **More TTS voices** — Expand Piper voice table (more accents, quality levels)
+3. **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
