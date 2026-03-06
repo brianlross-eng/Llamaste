@@ -54,9 +54,10 @@ ONNXRUNTIME_CONF_OPTS = \
 	-DFETCHCONTENT_QUIET=OFF
 
 # Install shared lib and headers to staging for sherpa-onnx
+# Note: ONNXRUNTIME_SUBDIR=cmake means build dir is $(@D)/cmake/buildroot-build/
 define ONNXRUNTIME_INSTALL_STAGING_CMDS
 	# Shared library
-	find $(@D)/buildroot-build -name "libonnxruntime.so*" -exec \
+	find $(@D)/cmake/buildroot-build -name "libonnxruntime.so*" -exec \
 		cp -a {} $(STAGING_DIR)/usr/lib/ \;
 	# C API header
 	$(INSTALL) -D -m 0644 \
@@ -74,7 +75,7 @@ endef
 
 # Install shared lib to target rootfs
 define ONNXRUNTIME_INSTALL_TARGET_CMDS
-	find $(@D)/buildroot-build -name "libonnxruntime.so*" -exec \
+	find $(@D)/cmake/buildroot-build -name "libonnxruntime.so*" -exec \
 		cp -a {} $(TARGET_DIR)/usr/lib/ \;
 endef
 
