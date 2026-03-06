@@ -1,0 +1,29 @@
+--- a/onnxruntime/core/platform/posix/stacktrace.cc
++++ b/onnxruntime/core/platform/posix/stacktrace.cc
+@@ -1,7 +1,9 @@
+ #include "core/common/common.h"
+
++#if defined(__GLIBC__)
+ #include <execinfo.h>
++#endif
+
+ #include <vector>
+
+@@ -9,6 +11,7 @@
+ namespace onnxruntime {
+
+ std::vector<std::string> GetStackTrace() {
++#if defined(__GLIBC__)
+   const int kMaxStackDepth = 64;
+   void* stack[kMaxStackDepth];
+   int depth = backtrace(stack, kMaxStackDepth);
+@@ -20,6 +23,9 @@
+   }
+   free(frame_strings);
+   return result;
++#else
++  return {};
++#endif
+ }
+
+ }  // namespace onnxruntime

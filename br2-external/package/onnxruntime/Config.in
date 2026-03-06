@@ -1,0 +1,10 @@
+config BR2_PACKAGE_ONNXRUNTIME
+	bool "onnxruntime"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_HOST_PROTOBUF
+	help
+	  ONNX Runtime — cross-platform inference and training accelerator.
+	  Built from source for musl libc compatibility (CPU only).
+
+	  https://github.com/microsoft/onnxruntime
