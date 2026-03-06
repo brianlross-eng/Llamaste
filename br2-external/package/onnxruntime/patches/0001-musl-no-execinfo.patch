@@ -1,29 +1,20 @@
 --- a/onnxruntime/core/platform/posix/stacktrace.cc
 +++ b/onnxruntime/core/platform/posix/stacktrace.cc
-@@ -1,7 +1,9 @@
+@@ -3,7 +3,7 @@
+
  #include "core/common/common.h"
 
-+#if defined(__GLIBC__)
+-#if !defined(__ANDROID__) && !defined(__wasm__) && !defined(_OPSCHEMA_LIB_) && !defined(_AIX)
++#if !defined(__ANDROID__) && !defined(__wasm__) && !defined(_OPSCHEMA_LIB_) && !defined(_AIX) && defined(__GLIBC__)
  #include <execinfo.h>
-+#endif
-
+ #endif
  #include <vector>
-
-@@ -9,6 +11,7 @@
- namespace onnxruntime {
-
+@@ -13,7 +13,7 @@
  std::vector<std::string> GetStackTrace() {
-+#if defined(__GLIBC__)
-   const int kMaxStackDepth = 64;
-   void* stack[kMaxStackDepth];
-   int depth = backtrace(stack, kMaxStackDepth);
-@@ -20,6 +23,9 @@
-   }
-   free(frame_strings);
-   return result;
-+#else
-+  return {};
-+#endif
- }
+   std::vector<std::string> stack;
 
- }  // namespace onnxruntime
+-#if !defined(NDEBUG) && !defined(__ANDROID__) && !defined(__wasm__) && !defined(_OPSCHEMA_LIB_)
++#if !defined(NDEBUG) && !defined(__ANDROID__) && !defined(__wasm__) && !defined(_OPSCHEMA_LIB_) && defined(__GLIBC__)
+   constexpr int kCallstackLimit = 64;  // Maximum depth of callstack
+
+   void* array[kCallstackLimit];
