@@ -350,9 +350,12 @@ echo ""
 # Suite 12: Updater
 # ---------------------------------------------------------------
 echo -e "${BOLD}--- [12/12] Updater ---${NC}"
+# tweetnacl.c must be compiled as C (not C++) due to strict const/initialization rules
+gcc -c -o "${BUILD_DIR}/tweetnacl.o" "${SRC}/tweetnacl.c" 2>&1
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_updater" \
     "${TESTS}/test_updater.cpp" \
-    "${SRC}/updater.cpp" 2>&1; then
+    "${SRC}/updater.cpp" \
+    "${BUILD_DIR}/tweetnacl.o" 2>&1; then
     if "${BUILD_DIR}/test_updater"; then
         suite_pass "Updater"
     else

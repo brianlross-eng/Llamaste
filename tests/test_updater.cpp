@@ -174,6 +174,28 @@ static void test_manifest_parse_invalid() {
 }
 
 // ---------------------------------------------------------------------------
+// Ed25519 signature verification tests
+// ---------------------------------------------------------------------------
+
+static void test_verify_signature_invalid() {
+    // Random garbage signature should fail verification against non-zero key
+    unsigned char sig[64];
+    for (int i = 0; i < 64; i++) sig[i] = (unsigned char)(i * 7 + 13);
+    unsigned char msg[] = "hello world update bundle";
+    unsigned char pk[32];
+    for (int i = 0; i < 32; i++) pk[i] = (unsigned char)(i * 3 + 5);
+    assert(!verify_update_signature(sig, 64, msg, 24, pk));
+}
+
+static void test_verify_signature_wrong_len() {
+    // Signature must be exactly 64 bytes
+    unsigned char sig[32] = {0};
+    unsigned char msg[] = "hello";
+    unsigned char pk[32] = {0};
+    assert(!verify_update_signature(sig, 32, msg, 5, pk));
+}
+
+// ---------------------------------------------------------------------------
 // File I/O roundtrip test (uses temp files)
 // ---------------------------------------------------------------------------
 
@@ -225,6 +247,8 @@ int main() {
     TEST(test_version_compare);
     TEST(test_manifest_parse);
     TEST(test_manifest_parse_invalid);
+    TEST(test_verify_signature_invalid);
+    TEST(test_verify_signature_wrong_len);
     TEST(test_grubenv_file_roundtrip);
 
     printf("\n%d/%d updater tests passed\n", tests_passed, tests_run);

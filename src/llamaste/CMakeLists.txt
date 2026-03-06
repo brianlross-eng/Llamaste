@@ -24,6 +24,8 @@ set(LLAMASTE_SOURCES
     tools_audio.cpp
     tools_cluster.cpp
     cluster.cpp
+    updater.cpp
+    tweetnacl.c
     voice.cpp
     mcp_server.cpp
     agent.cpp

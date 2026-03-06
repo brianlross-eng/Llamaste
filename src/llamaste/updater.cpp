@@ -185,6 +185,21 @@ UpdateManifest parse_manifest(const std::string& json_str) {
 }
 
 // ---------------------------------------------------------------------------
+// Ed25519 signature verification
+// ---------------------------------------------------------------------------
+
+#include "tweetnacl.h"
+
+bool verify_update_signature(
+    const unsigned char* sig, size_t sig_len,
+    const unsigned char* msg, size_t msg_len,
+    const unsigned char* pubkey
+) {
+    if (sig_len != 64) return false;
+    return crypto_sign_ed25519_verify_detached(sig, msg, (unsigned long long)msg_len, pubkey) == 0;
+}
+
+// ---------------------------------------------------------------------------
 // ESP / grubenv helpers
 // ---------------------------------------------------------------------------
 

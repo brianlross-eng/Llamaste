@@ -78,6 +78,16 @@ struct UpdateManifest {
 // Sets valid=true if version is non-empty and format_version > 0.
 UpdateManifest parse_manifest(const std::string& json_str);
 
+// --- Ed25519 signature verification ---
+
+// Verify Ed25519 detached signature. Returns true if valid.
+// sig: 64-byte signature, msg: message bytes, pubkey: 32-byte public key
+bool verify_update_signature(
+    const unsigned char* sig, size_t sig_len,
+    const unsigned char* msg, size_t msg_len,
+    const unsigned char* pubkey
+);
+
 // --- ESP / grubenv helpers ---
 
 // Search well-known paths for grubenv on the ESP.
