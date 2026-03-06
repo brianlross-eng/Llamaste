@@ -6,6 +6,7 @@ Llamaste is a bootable Linux image where the LLM IS the operating system. A sing
 ## Current Status
 - **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) COMPLETE. 55 tools, 182 tests/12 suites.
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI.
+- **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
@@ -86,6 +87,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **VirtualBox aborted state**: If VM gets stuck in "aborted" state, create a new VM rather than trying to fix the old one
 - **ORT MinSizeRel crash**: ORT built with `-Os` (MinSizeRel) + LTO crashes on valid ONNX models ("Graph output does not exist"). Fix: `Release` (-O2) + `LTO=OFF`
 - **ORT GCC 12 false positive**: `-Werror=array-bounds` in `custom_ops.cc` under `-O2`. Fix: `-DCMAKE_CXX_FLAGS="-Wno-error=array-bounds"` in CONF_OPTS
+- **Cluster mutex deadlock**: `run_election()` and `expire_peers()` must release `mu_` before calling `topology_cb_()`. The callback calls cluster methods that re-acquire `mu_` — calling while holding = deadlock.
+- **VirtualBox mDNS multicast**: Host-only adapter doesn't forward 224.0.0.251 between VMs. Use `/llamaste/cluster/add-peer` endpoint for manual peer registration.
+- **VirtualBox hard reset**: `controlvm reset` can leave child process stuck on next boot. Always use `poweroff` + `startvm`.
 - **Squashfs-only VDI deploy**: `vm/deploy-squashfs.sh` — VDI→RAW (qemu-img) → losetup → dd squashfs to p3 → RAW→VDI. Preserves data partition
 - **VDI resize after deploy**: Must `closemedium` old reference (UUID changes after qemu-img convert), then `modifymedium --resizebyte`, then re-attach
 - **Sherpa-onnx fork-test safety**: Fork child to test-load sherpa-onnx before real load. Catches crashes, prevents crash-restart loop. See voice.cpp
@@ -100,13 +104,14 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **NTFS rename fails from WSL2**: use PowerShell `Copy-Item -Path $new -Destination $old -Force` + `Remove-Item` instead of `mv`/`Move-Item`
 
 ## Known Bugs
-(None currently known)
+- **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
+- **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
 
 ## Next Steps
 ### Immediate
-1. **Multi-node integration test** — Test auto-offload with 2+ VMs on same network
-2. **More TTS voices** — Expand Piper voice table (more accents, quality levels)
-3. **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
+1. **More TTS voices** — Expand Piper voice table (more accents, quality levels)
+2. **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
+3. **Model auto-download on cluster formation** — When cluster has enough pooled RAM for larger model, auto-download it
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.

@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-08 (Neural TTS end-to-end verified, model picker, test API)
+**Last updated**: 2026-03-08 (Multi-node integration test PASSED, cluster mutex deadlock fixed)
 
 ---
 
@@ -45,7 +45,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | 8 new auto-offload unit tests | DONE (bd14d7c) |
 | Build and test in Buildroot | DONE (5fc9600) |
 | Verified on VDI: 53 tools, capacity endpoint working | DONE |
-| Multi-node integration test | PENDING |
+| Multi-node integration test (2 VMs verified) | DONE |
 
 ### Phase B: Neural TTS -- COMPLETE (e0e0bf0)
 
@@ -72,7 +72,42 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-08) -- Neural TTS End-to-End + Model Picker
+## Latest Session (2026-03-08) -- Multi-Node Integration Test + Cluster Fix
+
+### Multi-Node Cluster Integration Test — PASSED
+
+**Setup**: 2 VirtualBox VMs on host-only network (192.168.56.x)
+- VM1 "Llamaste2": 4GB RAM, 2 CPUs → coordinator (score=32)
+- VM2 "Llamaste3": 2GB RAM, 2 CPUs → worker (score=12)
+
+**Bug found & fixed**: Deadlock in `cluster.cpp` — `run_election()` and `expire_peers()` called
+`topology_cb_()` while holding `mu_` mutex, but the callback called cluster methods that
+re-acquired the same mutex → deadlock. Fix: release lock before calling callback.
+
+**New endpoints**: `/llamaste/cluster/peers`, `/llamaste/cluster/reload`,
+`/llamaste/cluster/add-peer` (manual peer registration for testing without mDNS).
+
+**Test results** (all PASS):
+| Test | Result |
+|------|--------|
+| Manual peer registration (add-peer) | ✅ Instant response |
+| Election: coordinator (4GB) vs worker (2GB) | ✅ Correct roles |
+| Bidirectional peer registration | ✅ Both nodes agree |
+| Pooled RAM (3917+1969=5886 MB) | ✅ Correct |
+| Usable RAM (70%=4120 MB) | ✅ Correct |
+| Tensor split (2:1 proportional to RAM) | ✅ Correct |
+| Model tier fit (0.5B-3B fit 4120 MB usable) | ✅ Correct |
+| Cluster reload endpoint | ✅ Works |
+| Peer expiry (90s timeout → back to standalone) | ✅ Correct |
+| Re-election after peer re-add | ✅ Correct |
+| No deadlock after multiple heartbeat cycles | ✅ Stable at 211s+ |
+
+**Known limitation**: VirtualBox host-only networking doesn't forward mDNS multicast
+(224.0.0.251). Workaround: `/llamaste/cluster/add-peer` for manual peer registration.
+
+---
+
+## Previous Session (2026-03-08) -- Neural TTS End-to-End + Model Picker
 
 ### Neural TTS Activation — sherpa-onnx Piper VITS Verified (ffdfdff)
 

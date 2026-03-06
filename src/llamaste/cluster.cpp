@@ -47,42 +47,51 @@ void ClusterManager::add_peer(const PeerInfo& peer) {
 }
 
 void ClusterManager::expire_peers(int timeout_seconds) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto now = std::chrono::steady_clock::now();
-    bool changed = false;
-    peers_.erase(
-        std::remove_if(peers_.begin(), peers_.end(),
-            [&](const PeerInfo& p) {
-                auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                    now - p.last_seen).count();
-                if (age >= timeout_seconds) {
-                    changed = true;
-                    return true;
-                }
-                return false;
-            }),
-        peers_.end());
-
-    if (changed && topology_cb_) {
+    bool should_notify = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto now = std::chrono::steady_clock::now();
+        bool changed = false;
+        peers_.erase(
+            std::remove_if(peers_.begin(), peers_.end(),
+                [&](const PeerInfo& p) {
+                    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - p.last_seen).count();
+                    if (age >= timeout_seconds) {
+                        changed = true;
+                        return true;
+                    }
+                    return false;
+                }),
+            peers_.end());
+        should_notify = changed && topology_cb_;
+    }
+    // Call callback OUTSIDE lock to avoid blocking all cluster operations
+    if (should_notify) {
         topology_cb_();
     }
 }
 
 void ClusterManager::run_election() {
-    std::lock_guard<std::mutex> lock(mu_);
-    PeerInfo winner = elect_coordinator(self_, peers_);
-    coordinator_ = winner;
+    bool should_notify = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        PeerInfo winner = elect_coordinator(self_, peers_);
+        coordinator_ = winner;
 
-    ClusterState old_state = state_;
-    if (peers_.empty()) {
-        state_ = ClusterState::STANDALONE;
-    } else if (winner.ip == self_.ip) {
-        state_ = ClusterState::COORDINATOR;
-    } else {
-        state_ = ClusterState::WORKER;
+        ClusterState old_state = state_;
+        if (peers_.empty()) {
+            state_ = ClusterState::STANDALONE;
+        } else if (winner.ip == self_.ip) {
+            state_ = ClusterState::COORDINATOR;
+        } else {
+            state_ = ClusterState::WORKER;
+        }
+        should_notify = (state_ != old_state) && topology_cb_;
     }
-
-    if (state_ != old_state && topology_cb_) {
+    // Call callback OUTSIDE lock to avoid blocking all cluster operations
+    // (topology callback may restart llama-server, taking 120s+)
+    if (should_notify) {
         topology_cb_();
     }
 }

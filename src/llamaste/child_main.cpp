@@ -2165,6 +2165,59 @@ int child_main(const SupervisorConfig& config) {
                         "application/json");
     }));
 
+    svr.Get("/llamaste/cluster/peers", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("cluster.peers", "{}"),
+                        "application/json");
+    }));
+
+    svr.Post("/llamaste/cluster/reload", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("cluster.reload", "{}"),
+                        "application/json");
+    }));
+
+    // Test endpoint: manually add a peer (for integration testing without mDNS)
+    svr.Post("/llamaste/cluster/add-peer", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json args = json::parse(req.body);
+            PeerInfo peer;
+            peer.hostname = args.value("hostname", "unknown");
+            peer.ip = args.value("ip", "");
+            peer.rpc_port = args.value("rpc_port", 50052);
+            peer.ram_mb = args.value("ram_mb", 0);
+            peer.cpu_cores = args.value("cpu_cores", 0);
+            peer.model = args.value("model", "none");
+
+            if (peer.ip.empty()) {
+                json err;
+                err["error"] = "ip is required";
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+
+            g_cluster.add_peer(peer);
+
+            // Run election in background to avoid blocking HTTP response
+            // (topology callback may try to restart llama-server, taking 120s+)
+            std::thread([](){ g_cluster.run_election(); }).detach();
+
+            // Small delay to let election start
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            json result;
+            result["added"] = peer.ip;
+            result["role"] = g_cluster.role_name();
+            result["peer_count"] = g_cluster.peer_count();
+            res.set_content(result.dump(), "application/json");
+        } catch (const std::exception& e) {
+            json err;
+            err["error"] = e.what();
+            res.set_content(err.dump(), "application/json");
+        }
+    }));
+
     // --- Update endpoints ---
     svr.Get("/llamaste/update/status", require_auth(
         [](const httplib::Request&, httplib::Response& res) {
