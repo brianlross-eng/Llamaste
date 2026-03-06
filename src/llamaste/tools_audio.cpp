@@ -45,13 +45,14 @@ static std::string handle_audio_status(const std::string& args_json) {
         result["always_listening"] = false;
         result["wake_phrase"] = "llamaste";
     }
-#ifdef HAVE_FLITE
-    result["tts_available"] = true;
-    result["tts_engine"] = "flite";
-#else
-    result["tts_available"] = false;
-    result["tts_engine"] = "none";
-#endif
+    // Report TTS engine from pipeline state
+    if (g_voice) {
+        result["tts_engine"] = g_voice->tts_engine_name();
+        result["tts_available"] = (g_voice->tts_engine_name() != "none");
+    } else {
+        result["tts_available"] = false;
+        result["tts_engine"] = "none";
+    }
     return result.dump();
 }
 
@@ -117,9 +118,10 @@ static std::string handle_audio_speak(const std::string& args_json) {
         return R"json({"error": "Voice pipeline not initialized"})json";
     }
 
-    auto pcm = g_voice->speak(text);
+    int tts_rate = 16000;
+    auto pcm = g_voice->speak(text, &tts_rate);
     if (pcm.empty()) {
-        return R"json({"error": "TTS synthesis failed — flite not available"})json";
+        return R"json({"error": "TTS synthesis failed — no TTS engine available"})json";
     }
 
     // Write WAV to /data/tmp/
@@ -128,11 +130,10 @@ static std::string handle_audio_speak(const std::string& args_json) {
     {
         std::ofstream ofs(out_path, std::ios::binary);
         if (ofs) {
-            // Write WAV header + PCM data
             uint32_t data_size = (uint32_t)(pcm.size() * 2);
             uint32_t file_size = data_size + 36;
             uint16_t channels = 1;
-            uint32_t sample_rate = 16000; // flite cmu_us_kal outputs 16kHz
+            uint32_t sample_rate = (uint32_t)tts_rate;
             uint16_t bps = 16;
             uint32_t byte_rate = sample_rate * channels * bps / 8;
             uint16_t block_align = channels * bps / 8;
@@ -161,7 +162,9 @@ static std::string handle_audio_speak(const std::string& args_json) {
     result["audio_file"] = out_path;
     result["text"] = text;
     result["samples"] = (int)pcm.size();
-    result["duration_seconds"] = (double)pcm.size() / 16000.0;
+    result["sample_rate"] = tts_rate;
+    result["duration_seconds"] = (double)pcm.size() / (double)tts_rate;
+    result["tts_engine"] = g_voice->tts_engine_name();
     return result.dump();
 }
 
@@ -185,7 +188,14 @@ static std::string handle_audio_config(const std::string& args_json) {
             result["sample_rate"] = 16000;
             result["vad_threshold"] = 0.5;
         }
-        result["piper_voice"] = "en_US-amy-low";
+        if (g_voice) {
+            result["tts_engine"] = g_voice->tts_engine_name();
+            auto cfg2 = g_voice->config();
+            result["tts_model"] = cfg2.tts_model;
+        } else {
+            result["tts_engine"] = "none";
+            result["tts_model"] = "";
+        }
         return result.dump();
     }
 
