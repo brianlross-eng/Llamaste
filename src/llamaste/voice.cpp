@@ -13,6 +13,9 @@
 #include <thread>
 #include <algorithm>
 #include <chrono>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using json = nlohmann::json;
 
@@ -30,6 +33,10 @@ extern "C" {
 }
 // Flite voice registration (defined in libflite_cmu_us_kal)
 extern "C" cst_voice* register_cmu_us_kal(const char* voxdir);
+#endif
+
+#ifdef HAVE_SHERPA_ONNX
+#include <sherpa-onnx/c-api/c-api.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -169,6 +176,11 @@ struct VoicePipeline::Impl {
     cst_voice* flite_voice = nullptr;
     bool flite_initialized = false;
 #endif
+#ifdef HAVE_SHERPA_ONNX
+    const SherpaOnnxOfflineTts* sherpa_tts = nullptr;
+    bool sherpa_initialized = false;
+#endif
+    std::string tts_engine_name = "none";  // "sherpa-onnx", "flite", or "none"
     std::thread voice_thread;
     std::atomic<bool> running{false};
 
@@ -194,6 +206,12 @@ VoicePipeline::~VoicePipeline() {
     if (impl_->capture_handle) {
         snd_pcm_close(impl_->capture_handle);
         impl_->capture_handle = nullptr;
+    }
+#endif
+#ifdef HAVE_SHERPA_ONNX
+    if (impl_->sherpa_tts) {
+        SherpaOnnxDestroyOfflineTts(impl_->sherpa_tts);
+        impl_->sherpa_tts = nullptr;
     }
 #endif
     delete impl_;
@@ -234,19 +252,85 @@ bool VoicePipeline::init(const VoiceConfig& config) {
     return false;
 #endif
 
-    // Initialize Flite TTS
+    // ---------------------------------------------------------------
+    // Initialize TTS engine: prefer sherpa-onnx on >= 3GB RAM, else Flite
+    // ---------------------------------------------------------------
+    bool tts_initialized = false;
+
+#ifdef HAVE_SHERPA_ONNX
+    {
+        // RAM gate: neural TTS needs ~150MB, only load on 3GB+ systems
+        int ram_mb = 0;
+#ifndef _WIN32
+        std::ifstream meminfo("/proc/meminfo");
+        std::string mline;
+        while (std::getline(meminfo, mline)) {
+            if (mline.find("MemTotal") == 0) {
+                size_t colon = mline.find(':');
+                if (colon != std::string::npos)
+                    ram_mb = std::atoi(mline.c_str() + colon + 1) / 1024;
+                break;
+            }
+        }
+#endif
+        bool has_model = false;
+#ifndef _WIN32
+        has_model = (access(config_.tts_model.c_str(), R_OK) == 0);
+#endif
+        if (ram_mb >= 3072 && has_model) {
+            SherpaOnnxOfflineTtsConfig tts_config;
+            memset(&tts_config, 0, sizeof(tts_config));
+            tts_config.model.vits.model = config_.tts_model.c_str();
+            tts_config.model.vits.tokens = config_.tts_tokens.c_str();
+            tts_config.model.vits.data_dir = config_.tts_data_dir.c_str();
+            tts_config.model.vits.length_scale = 1.0f;
+            tts_config.model.vits.noise_scale = 0.667f;
+            tts_config.model.vits.noise_scale_w = 0.8f;
+            tts_config.model.num_threads = 2;
+            tts_config.model.provider = "cpu";
+            tts_config.max_num_sentences = 1;
+
+            fprintf(stderr, "[voice] Loading sherpa-onnx TTS: %s\n",
+                    config_.tts_model.c_str());
+
+            impl_->sherpa_tts = SherpaOnnxCreateOfflineTts(&tts_config);
+            if (impl_->sherpa_tts) {
+                impl_->sherpa_initialized = true;
+                impl_->tts_engine_name = "sherpa-onnx";
+                tts_initialized = true;
+                fprintf(stderr, "[voice] sherpa-onnx TTS initialized (Piper VITS)\n");
+            } else {
+                fprintf(stderr, "[voice] sherpa-onnx TTS init failed, falling back\n");
+            }
+        } else if (!has_model) {
+            fprintf(stderr, "[voice] sherpa-onnx: model not found at %s\n",
+                    config_.tts_model.c_str());
+        } else {
+            fprintf(stderr, "[voice] sherpa-onnx: skipping (RAM %dMB < 3072MB)\n",
+                    ram_mb);
+        }
+    }
+#endif
+
+    // Fallback to Flite
 #ifdef HAVE_FLITE
-    if (!impl_->flite_initialized) {
+    if (!tts_initialized && !impl_->flite_initialized) {
         flite_init();
         impl_->flite_voice = register_cmu_us_kal(nullptr);
         if (impl_->flite_voice) {
             impl_->flite_initialized = true;
-            fprintf(stderr, "[voice] Flite TTS initialized (cmu_us_kal voice)\n");
+            impl_->tts_engine_name = "flite";
+            tts_initialized = true;
+            fprintf(stderr, "[voice] Flite TTS initialized (cmu_us_kal fallback)\n");
         } else {
             fprintf(stderr, "[voice] Flite TTS: failed to register voice\n");
         }
     }
 #endif
+
+    if (!tts_initialized) {
+        fprintf(stderr, "[voice] No TTS engine available\n");
+    }
 
     state_.store(VoiceState::LISTENING);
     return true;
@@ -302,45 +386,73 @@ std::string VoicePipeline::transcribe(const std::vector<float>& samples) {
 }
 
 std::vector<int16_t> VoicePipeline::speak(const std::string& text, int* out_sample_rate) {
-#ifdef HAVE_FLITE
-    if (!impl_->flite_voice) {
-        fprintf(stderr, "[voice] TTS: flite voice not loaded\n");
-        return {};
-    }
+    if (text.empty()) return {};
 
     state_.store(VoiceState::SPEAKING);
-    fprintf(stderr, "[voice] TTS: synthesizing %zu chars\n", text.size());
+    fprintf(stderr, "[voice] TTS: synthesizing %zu chars via %s\n",
+            text.size(), impl_->tts_engine_name.c_str());
 
-    cst_wave* wave = flite_text_to_wave(text.c_str(), impl_->flite_voice);
-    if (!wave) {
-        fprintf(stderr, "[voice] TTS: flite_text_to_wave failed\n");
-        state_.store(VoiceState::LISTENING);
-        return {};
-    }
+#ifdef HAVE_SHERPA_ONNX
+    if (impl_->sherpa_initialized && impl_->sherpa_tts) {
+        const SherpaOnnxGeneratedAudio* audio =
+            SherpaOnnxOfflineTtsGenerate(impl_->sherpa_tts, text.c_str(),
+                                         /*sid=*/0, /*speed=*/1.0f);
+        if (audio && audio->n > 0) {
+            int sample_rate = audio->sample_rate;
+            // Convert float32 (-1.0..1.0) to int16
+            std::vector<int16_t> pcm(audio->n);
+            for (int32_t i = 0; i < audio->n; i++) {
+                float s = audio->samples[i];
+                if (s > 1.0f) s = 1.0f;
+                if (s < -1.0f) s = -1.0f;
+                pcm[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
 
-    // Extract PCM samples from flite wave
-    int num_samples = wave->num_samples;
-    int sample_rate = wave->sample_rate;
-    std::vector<int16_t> pcm(wave->samples, wave->samples + num_samples);
-    delete_wave(wave);
+            fprintf(stderr, "[voice] TTS: %zu samples @ %dHz (%.1fs)\n",
+                    pcm.size(), sample_rate,
+                    (float)pcm.size() / sample_rate);
 
-    fprintf(stderr, "[voice] TTS: %d samples @ %dHz (%.1fs)\n",
-            num_samples, sample_rate, (float)num_samples / sample_rate);
+            if (out_sample_rate) *out_sample_rate = sample_rate;
 
-    // Expose sample rate to caller (for WAV encoding in HTTP endpoint)
-    if (out_sample_rate) *out_sample_rate = sample_rate;
-
-    // Play through ALSA if available
 #ifdef HAVE_ALSA
-    play_audio(pcm.data(), pcm.size(), sample_rate);
+            play_audio(pcm.data(), pcm.size(), sample_rate);
+#endif
+            state_.store(VoiceState::LISTENING);
+            return pcm;
+        }
+        if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        fprintf(stderr, "[voice] TTS: sherpa-onnx generate returned empty\n");
+    }
+#endif
+
+#ifdef HAVE_FLITE
+    if (impl_->flite_voice) {
+        cst_wave* wave = flite_text_to_wave(text.c_str(), impl_->flite_voice);
+        if (wave) {
+            int num_samples = wave->num_samples;
+            int sample_rate = wave->sample_rate;
+            std::vector<int16_t> pcm(wave->samples, wave->samples + num_samples);
+            delete_wave(wave);
+
+            fprintf(stderr, "[voice] TTS: %d samples @ %dHz (%.1fs)\n",
+                    num_samples, sample_rate,
+                    (float)num_samples / sample_rate);
+
+            if (out_sample_rate) *out_sample_rate = sample_rate;
+
+#ifdef HAVE_ALSA
+            play_audio(pcm.data(), pcm.size(), sample_rate);
+#endif
+            state_.store(VoiceState::LISTENING);
+            return pcm;
+        }
+        fprintf(stderr, "[voice] TTS: flite_text_to_wave failed\n");
+    }
 #endif
 
     state_.store(VoiceState::LISTENING);
-    return pcm;
-#else
-    (void)text;
     return {};
-#endif
 }
 
 // Play PCM audio through ALSA playback device
@@ -506,6 +618,10 @@ std::string VoicePipeline::state_string() const {
 }
 
 std::string VoicePipeline::last_error() const { return last_error_; }
+
+std::string VoicePipeline::tts_engine_name() const {
+    return impl_ ? impl_->tts_engine_name : "none";
+}
 
 VoiceConfig VoicePipeline::config() const {
     std::lock_guard<std::mutex> lock(config_mutex_);

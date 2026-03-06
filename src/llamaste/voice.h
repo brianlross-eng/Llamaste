@@ -28,8 +28,10 @@ enum class VoiceState {
 struct VoiceConfig {
     std::string wake_phrase = "llamaste";   // Case-insensitive match in transcription
     std::string whisper_model = "/data/models/ggml-tiny.en-q5_1.bin";
-    std::string piper_binary = "/opt/llamaste/piper";
-    std::string piper_model = "/data/models/en_US-amy-low.onnx";
+    // sherpa-onnx TTS model paths
+    std::string tts_model = "/data/models/tts/en_US-amy-low.onnx";
+    std::string tts_tokens = "/data/models/tts/tokens.txt";
+    std::string tts_data_dir = "/data/models/tts/espeak-ng-data";
     std::string alsa_device = "default";    // ALSA capture device
     int sample_rate = 16000;                // 16kHz for whisper
     float vad_threshold = 0.5f;             // Speech probability threshold
@@ -55,6 +57,7 @@ public:
     VoiceState state() const { return state_.load(); }
     std::string state_string() const;
     std::string last_error() const;
+    std::string tts_engine_name() const;
 
     // One-shot transcription: transcribe a WAV buffer (for HTTP endpoint)
     // Input: raw PCM samples (16kHz, mono, float32)
