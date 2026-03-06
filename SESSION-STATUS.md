@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-06 (Phase 3 Mesh Clustering COMPLETE)
+**Last updated**: 2026-03-06 (Phase 4 A/B Updates COMPLETE)
 
 ---
 
@@ -12,141 +12,86 @@ All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
 ### Phase 2: COMPLETE
 All sub-phases done: Web UI, scheduler, desktop mode, inference, model download, auth, network config.
 
-### Phase 3a: Voice I/O — COMPLETE
+### Phase 3: COMPLETE
+All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications, mesh clustering.
 
-### Phase 3: MCP Server — COMPLETE (0d418fc)
+### Phase 4: A/B Updates -- COMPLETE (49026eb)
 
-### Phase 3b: Mesh Clustering — COMPLETE (0adfdb0)
-
-| Sub-phase | Status |
+| Component | Status |
 |-----------|--------|
-| 3a-1: STT Foundation | DONE — whisper.cpp package, voice.h/cpp, WAV parser, HTTP endpoints, mic button |
-| 3a-2: Always-Listening | DONE — ALSA capture thread, energy VAD, wake phrase detection, agent loop wiring |
-| 3a-3: Flite TTS | DONE — Flite (BSD) linked into binary, cmu_us_kal voice, ALSA playback, agent auto-speak |
-| 3a-4: Web UI Voice | DONE — /audio/tts WAV endpoint, TTS toggle button, voice status indicator, error handler fix |
-| 3a-5: TTS Upgrade | DONE — espeak-ng 22kHz replaces Flite 8kHz as primary TTS engine (f8835ef) |
-
-**Key design decisions**:
-- Voice pipeline (TTS + STT) only initializes in desktop mode — server mode stays lean
-- STT/always-listening only when whisper model is available (whisper model is ~200MB)
-- TTS engine priority: sherpa-onnx (future) > espeak-ng (22kHz) > Flite (8kHz fallback)
+| Updater foundation (version.h, slot detection, grubenv R/W) | DONE (0f0b307) |
+| TweetNaCl vendor (Ed25519 crypto) | DONE (da8c1eb) |
+| Ed25519 signature verification | DONE (82425f0) |
+| GRUB A/B boot switching (boot counter, rollback) | DONE (6a95297) |
+| Update tools (4 tools: status, check, install, rollback) | DONE (3cb6d41) |
+| Web UI update card | DONE (0544bdb) |
+| GRUB module fix + ESP mount + deploy scripts | DONE (49026eb) |
+| Verified on VDI: 51 tools, grubenv working, slot A active | DONE |
 
 ---
 
-## Latest Session (2026-03-06) — Phase 3b Mesh Clustering
+## Latest Session (2026-03-06) -- Phase 4 A/B Updates
 
-### Phase 3b: Mesh Clustering (10 tasks, ~900 LOC)
-- **Design doc**: `docs/plans/2026-03-06-mesh-clustering-design.md`
-- **Implementation plan**: `docs/plans/2026-03-06-mesh-clustering-plan.md`
-- **Architecture**: llama.cpp RPC backend (tensor-level distribution), mDNS DNS-SD discovery, composite election score
-- **New files**: cluster.h, cluster.cpp (~120 LOC), tools_cluster.cpp (~120 LOC)
-- **Modified files**: child_main.cpp (~200 LOC), net_mdns.h/cpp (~250 LOC discovery), llama-server.mk, CMakeLists.txt, host-test.sh, index.html, system.js
+### Phase 4 Implementation (~1500 LOC new code)
+
+**Design doc**: `docs/plans/2026-03-06-ab-update-design.md`
+**Implementation plan**: `docs/plans/2026-03-06-ab-update-plan.md`
+
+**New files**:
+- `src/llamaste/updater.h` / `updater.cpp` (~270 LOC) -- grubenv R/W, slot detection, manifest parsing, Ed25519 verify
+- `src/llamaste/version.h` -- semantic version (1.0.0), build date
+- `src/llamaste/tweetnacl.h` / `tweetnacl.c` (~800 LOC) -- vendored Ed25519/Curve25519
+- `src/llamaste/tools_update.cpp` (~300 LOC) -- 4 update tools + boot health thread
+- Deploy scripts: `scripts/finish-deploy.ps1`, `scripts/force-replace-vdi.ps1`, `scripts/ensure-vm.bat`
+
+**Modified files**:
+- `child_main.cpp` -- update HTTP endpoints, boot success thread, version in /system
+- `grub.cfg` -- A/B slot switching with boot counter rollback
+- `post_image.sh` -- grubenv creation (1024-byte env block)
+- `post_build.sh` -- /boot/efi and /mnt mount points in squashfs
+- `init.cpp` / `init.h` -- `init_mount_esp()` mounts ESP at /boot/efi
+- `main.cpp` -- calls init_mount_esp() during boot
+- `defconfig` -- GRUB builtin modules: loadenv, test, echo, configfile
+- `index.html` / `dashboard.js` -- update card in web UI
 
 **Key features**:
-- `llama-rpc-server` (port 50052) spawned at boot on all nodes, exposing local compute
-- mDNS discovery: `_llama-rpc._tcp.local` PTR queries + response parsing + deduplication
-- ClusterManager: PeerInfo struct, election score `(ram_mb/1024)*10 + cpu_cores`, lowest IP tiebreak
-- State machine: STANDALONE → COORDINATOR/WORKER based on election result
-- Heartbeat thread: re-announce service + expire stale peers (90s) + re-discover every 30s
-- Topology change callback: coordinator restarts llama-server with `--rpc ip1:port,ip2:port,...`
-- 3 cluster tools: `cluster.status`, `cluster.peers`, `cluster.reload`
-- Web UI cluster card: role badge (green=coordinator, blue=worker), peer count, pooled RAM
-- `/llamaste/cluster/status` HTTP endpoint + cluster info in `/llamaste/system`
-- **Build fix**: llama.cpp binary is `rpc-server` not `llama-rpc-server` — install cmd corrected
+- A/B boot switching via GRUB grubenv (active_slot=A|B)
+- Boot counter rollback: 3 attempts, then auto-switch to other slot
+- `mark_boot_success()`: 5s after HTTP server ready, sets boot_success=1
+- Ed25519 signature verification for update packages (TweetNaCl)
+- Update manifest parsing (version, SHA-256, changelog)
+- HTTP endpoints: GET/POST /llamaste/update/{status,check,install,rollback}
+- Web UI: update card shows version, slot, check/rollback buttons
 
-**Test suites**: 11 suites, 155 tests (8 new cluster tests)
+**GRUB fixes** (49026eb):
+- Added `loadenv`, `test`, `echo`, `configfile` to both EFI and BIOS GRUB module lists
+- Without these, `load_env`/`save_env`/`[` commands in grub.cfg fail silently
+- Added `init_mount_esp()` to mount ESP at /boot/efi for runtime grubenv access
+- Pre-created /boot/efi and /mnt in squashfs (read-only root needs existing mount points)
+- Added missing grubenv path candidates: `/boot/efi/grub/grubenv`, `/mnt/esp/grub/grubenv`
+
+**Test suites**: 12 suites, 171 tests (16 new updater tests)
 
 **Verified on VDI**:
-- 47 tools registered (37 base + 5 schedule + 2 auth + 3 cluster)
-- llama-rpc-server spawned on port 50052, reports 3917 MB backend memory
-- mDNS advertising `_llama-rpc._tcp.local` with TXT records (ram, cores, rpc_port, model)
-- Cluster role: standalone (single node, expected)
-- `/llamaste/cluster/status` returns correct JSON
+- 51 tools registered (47 base + 4 update)
+- `GET /llamaste/update/status` -> `{"active_slot":"A","inactive_slot":"B","update_state":"idle","version":"1.0.0"}`
+- Serial log: `[init] Mounted /dev/sda2 on /boot/efi (ESP)` + `[update] Boot health check complete`
+- GRUB shows menu with "Llamaste Server" / "Llamaste Desktop", boots slot A correctly
+- grubenv read/write working (mark_boot_success no longer fails)
 
-**Commits**: `551ab39`, `bb33e0d`, `e92baea`, `c797a81`, `10d2a7b`, `0e45628`, `3b821e7`, `0adfdb0`
-
----
-
-## Previous Session (2026-03-05) — TTS Upgrade to espeak-ng
-
-### Phase 3a-5: TTS Upgrade (f8835ef)
-- **espeak-ng** (GPL-3.0+, csukuangfj CMake fork) replaces Flite as primary TTS
-- **22kHz sample rate** (2.75x improvement over Flite 8kHz)
-- **Buildroot package**: cross-compiles library, native-builds phoneme data (arch-independent)
-- **Voice pipeline**: TTS now initializes in all boot modes (not just desktop)
-  - Whisper STT remains optional — failure no longer blocks TTS init
-  - espeak-ng callback API: `espeak_SetSynthCallback` accumulates PCM samples
-- **Strategic pivot**: sherpa-onnx (neural TTS) deferred — onnxruntime pre-built binaries are glibc-linked, incompatible with musl. Code retained behind `#ifdef HAVE_SHERPA_ONNX` for future Phase B (build onnxruntime from source)
-- **espeak-ng footprint**: 307KB lib + 214KB libucd + 1.5MB phoneme data = ~2MB total
-- Squashfs: 155MB (includes desktop packages from defconfig regeneration)
-- Verified: `/llamaste/audio/tts` returns 22kHz 16-bit mono WAV audio
-- Commit: `f8835ef`
+**Commits**: `8c34276`, `0f0b307`, `da8c1eb`, `82425f0`, `6a95297`, `3cb6d41`, `0544bdb`, `49026eb`
 
 ---
 
-## Previous Session (2026-03-05) — Phase 3a Complete
+## Previous Session (2026-03-06) -- Phase 3b Mesh Clustering
 
-### Phase 3a-3: Flite TTS
-- **Flite** (BSD-4-Clause) linked directly into binary — no GPL isolation needed
-- `cmu_us_kal` voice (8kHz, robotic but functional)
-- `VoicePipeline::speak()` calls `flite_text_to_wave()`, plays via ALSA `snd_pcm_open(PLAYBACK)`
-- `audio.speak` tool writes WAV to `/data/tmp/tts_*.wav`
-- Agent command callback speaks LLM response after each voice command
-- Squashfs: 91MB (up from 78MB, flite voice data) | Binary: 4.1MB (flite linked dynamically)
-- Commits: `123e66c`
-
-### Phase 3a-4: Web UI Voice Integration
-- **`/llamaste/audio/tts`** — new POST endpoint, returns `audio/wav` binary for browser playback
-- WAV encoding: in-memory (no disk write needed for browser path), uses `voice.speak()` + encode_wav_for_http()
-- **`#tts-btn`** — speaker icon toggle button in chat input area (between mic and send)
-- **Auto-speak**: after stream finishes, if TTS enabled, POSTs response text to /audio/tts and plays via `new Audio()`
-- **Markdown stripping**: plain text extraction before synthesis (removes code blocks, bold, italic, headers)
-- **500 char truncation** to avoid very long synthesis
-- **`#voice-indicator`** — colored dot in status bar, polls `/audio/status` every 5s
-  - Green dot = listening, Red pulsing = recording, Blue = speaking, hidden = disabled
-- **Error handler fix**: `set_error_handler` now preserves custom response bodies (was overwriting all non-200)
-- **voice.speak() API**: added `int* out_sample_rate` parameter (backward compatible)
-- **VDI deployment lesson**: dynamic VDIs need qemu-nbd for partition writes (not raw dd with data offset)
-- Commits: `70561ad`
-
-### Key Commits This Session
-- `123e66c` — Phase 3a-3 Flite TTS
-- `70561ad` — Phase 3a-4 Web UI voice integration
-
-### VDI Recovery Needed
-- Dynamic VDI was briefly corrupted by naive dd (wrong data offset assumption)
-- Recovery: VBoxManage convertfromraw + resize, then qemu-nbd for future updates
-- **Correct update pattern**: `qemu-nbd -c /dev/nbd0 <VDI>` → `dd to /dev/nbd0p3` → `qemu-nbd -d /dev/nbd0`
-
-## Previous Session (Phase 3a-1 + 3a-2)
-
-### Features Added
-1. **Always-listening voice pipeline** (voice.cpp):
-   - ALSA capture: 480 frames (30ms) at 16kHz mono S16_LE
-   - Energy-based VAD: RMS threshold (0.01), speech onset/offset detection
-   - 300ms silence = end of utterance, min 0.5s speech, max 30s recording
-   - Wake phrase: case-insensitive "llamaste" match in whisper transcription
-   - Command extraction: text after wake phrase routed to agent loop
-   - ALSA error recovery (overrun handling)
-
-2. **Agent loop integration** (child_main.cpp):
-   - Voice commands go through same `agent_turn()` as HTTP chat
-   - TODO: Phase 3a-3 will pipe agent response to Piper TTS
-
-3. **Enhanced audio status** (tools_audio.cpp):
-   - New fields: `always_listening`, `alsa_device`, `silence_ms`, `last_error`
-
-4. **Desktop-only voice** (child_main.cpp):
-   - Voice pipeline gated on `g_boot_mode == "desktop"`
-   - Server mode logs "voice pipeline disabled" and skips whisper model loading
-
-### Build Fixes
-- **ALSA PCM headers missing**: alsa-lib needed rebuild after PCM config enabled (pcm.h not in staging)
-- **alsa-utils removed**: musl cross-compile issues, only alsa-lib (C API) needed
-- **Config.in selects**: Added `select BR2_PACKAGE_ALSA_LIB` and `select BR2_PACKAGE_WHISPER_CPP`
-
-### ISO Rebuilt
-- 964 MB ISO with all fixes: voice I/O, CA certs, DNS, --jinja, network config
+### Phase 3b: Mesh Clustering (10 tasks, ~900 LOC)
+- llama-rpc-server (port 50052): fork/exec lifecycle, spawned on all nodes at boot
+- mDNS discovery: `_llama-rpc._tcp.local` PTR queries + response parsing
+- ClusterManager: election score `(ram/1024)*10+cores`, lowest-IP tiebreak
+- State machine: STANDALONE -> COORDINATOR/WORKER, topology change callback
+- 3 cluster tools: cluster.status, cluster.peers, cluster.reload
+- Commits: `551ab39` through `0adfdb0`
 
 ---
 
@@ -156,82 +101,17 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 - VirtualBox port forwarding doesn't work from WSL2 `localhost`
 - Use `172.18.208.1:8080` instead
 
-### Voice pipeline untested end-to-end
-- Whisper model download + ALSA capture not yet tested with real microphone
-- VirtualBox AC97 audio enabled but whisper model needs to be downloaded first
+### VirtualBox VM renamed
+- VM is now "Llamaste2" (original "Llamaste" got stuck in aborted state)
+- `scripts/ensure-vm.bat` tries both names
 
 ---
-
-## Latest Session — MCP API Key (e8680ce)
-
-### MCP API Key Implementation
-- **Bearer token auth**: `Authorization: Bearer <64-hex-key>` accepted by `/mcp` alongside session cookies
-- **Key persistence**: stored at `/data/llamaste/mcp_key.txt`, generated on first use, survives reboots
-- **`McpAuthCheck`**: changed auth type from handler-wrapping to `function<bool(Request)>` predicate — cleaner, no circular deps
-- **`load_or_create_api_key()`**: reads file, validates 64-hex, generates + persists if missing/invalid
-- **`regenerate_api_key()`**: new 64-hex key, atomically replaces in memory + file, old key rejected immediately
-- **Key management routes** in child_main.cpp (cookie-auth):
-  - `GET /llamaste/mcp/key` → `{"key":"<full>","key_prefix":"<8>...","active":true}`
-  - `POST /llamaste/mcp/key/regenerate` → same JSON with new key
-- **System panel** MCP card: full key shown in blue monospace, Copy button (clipboard + textarea fallback for HTTP), Regen button (confirms → POST → updates display + snippet), config snippet auto-includes `Authorization` header with live key
-
-### Verified (localhost:8080):
-- `Bearer <key>` → 200 on ping, initialize, tools/list (44 tools), tools/call
-- Cookie auth still works for web UI users
-- Regenerate: old key → 401 immediately, new key → 200
-- `GET /llamaste/mcp/key` → correct JSON, key persisted in `/data/llamaste/mcp_key.txt`
-
-## Previous Session — Phase 3 MCP Server (0d418fc)
-
-### MCP Server Implementation
-- **Transport**: Streamable HTTP (MCP spec 2025-03-26), single endpoint `POST /mcp`
-- **Protocol**: JSON-RPC 2.0 with session IDs (32-hex, 30-min idle expiry)
-- **Methods**: initialize, ping, tools/list (44 tools), tools/call, resources/list, resources/read, prompts/list, notifications
-- **Tool mapping**: `ToolRegistry.to_openai_tools_json()` → reformat `parameters`→`inputSchema` for MCP
-- **Auth**: same `require_auth` cookie middleware as all other protected routes
-- **System panel**: new MCP card with endpoint URL + pre-filled Claude Desktop config snippet, populated from live device IP
-- **CORS**: full CORS headers for browser-based MCP clients
-- **New files**: mcp_server.h, mcp_server.cpp (~400 LOC), 6 files modified
-
-## Latest Session — mDNS DNS-SD + Proactive Notifications (916b671, 7c75e09)
-
-### mDNS DNS-SD Advertisement (916b671)
-- **`MdnsServiceRecord`** struct + `advertise_service()` method in net_mdns.h/cpp
-- PTR/SRV/TXT/A record support — full DNS-SD (RFC 6763) response building
-- Proactive announcement sent twice on startup (UDP loss tolerance)
-- Query handling: PTR + ANY queries for `_mcp._tcp.local` service
-- `child_main.cpp`: `mdns.advertise_service("_mcp._tcp", 80, {"path=/mcp","version=2025-03-26","auth=bearer"})`
-- Serial log: `[mdns] Advertising llamaste._mcp._tcp.local on port 80 (txt: 3 entries)`
-
-### Proactive Health Notifications (7c75e09)
-- **`push_notification()`**: public method on Scheduler, safe to call from any thread
-- **`set_model_check_fn()`**: callback `std::function<bool()>` → model-loaded check without coupling
-- **Model-not-loaded alert**: fires 60s after startup, at most every 30 min if no model loaded
-  - `type="alert"`, `title="No AI Model Loaded"`, `body="...Dashboard → Download a model..."`
-- **Startup toast**: queued in `pending_notifications_` before `svr.listen()` blocks
-  - `type="info"`, `title="Llamaste Ready"`, `body="Server running at http://<ip>/ — no model loaded yet"`
-- Verified: startup toast drains on first SSE connect; model alert fires at 60s
-
-### VDI Deploy Lesson (this session)
-- VDI can't be overwritten from WSL2 while VM is running (file locked by VBoxHeadless)
-- **Correct flow**: stop VM → update VDI → fix UUID → restart
-- UUID fix: `VBoxManage internalcommands sethduuid <vdi> <uuid>` after replacing VDI file
-- `scripts/deploy-to-vdi.sh`: helper for the VDI update workflow
-- **NTFS rename from WSL2 fails**: use PowerShell `Copy-Item -Force` + `Remove-Item` instead of `mv`
-- Skill saved: `~/.claude/skills/virtualbox-vdi-partition-update/SKILL.md`
-- Git credential bridge: `/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe` (config as global credential.helper)
-
-### End-of-Session Docs (6208570, 86655ec)
-- **DEVELOPER.md**: updated net_mdns DNS-SD, MCP Bearer auth + DNS-SD discovery, scheduler push_notification() API, full version history
-- **INSTALL.md**: What's New rewritten, MCP connection guide, notifications table, tools count 32→44, known limitations refreshed
-- **CLAUDE.md**: Phase status → Phase 3a COMPLETE, VDI workflow, NTFS rename gotcha, UUID fix, known bugs cleared, next steps updated
-- All 22 commits pushed to GitHub (`86655ec`)
 
 ## Next Steps
 
 ### Immediate
-1. **Phase 4: A/B updates** — SYS-B partition already reserved, GRUB `llamaste_slot` variable in design
-2. **Future: Neural TTS** — Build onnxruntime from source for musl, then enable sherpa-onnx + Piper VITS
+1. **Future: Neural TTS** -- Build onnxruntime from source for musl, then enable sherpa-onnx + Piper VITS
+2. **Phase 5: Mesh auto-offload** -- Automatic model sharding across discovered cluster peers
 
 ---
 
@@ -239,33 +119,32 @@ All sub-phases done: Web UI, scheduler, desktop mode, inference, model download,
 
 | Artifact | Size | Details |
 |----------|------|---------|
-| llamaste binary | 4.1 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA + espeak-ng |
+| llamaste binary | 4.4 MB | Dynamic ELF, x86-64, musl + whisper.cpp + ALSA + espeak-ng + TweetNaCl |
 | bzImage kernel | 7.5 MB | Built-in DRM/GPU/audio drivers, no modules |
-| rootfs.squashfs | 155 MB | llamaste + WPEWebKit + Mesa + Wayland + whisper + alsa-lib + espeak-ng |
+| rootfs.squashfs | 156 MB | llamaste + WPEWebKit + Mesa + Wayland + all libs |
 | llamaste.img | 611 MB | 5-partition GPT disk image |
-| llamaste.iso | 964 MB | Live ISO with installer |
-| Boot time | ~2 seconds | Kernel → HTTP server ready |
-| Model load | ~6 seconds | Qwen2.5-1.5B-Instruct Q4_K_M |
+| Boot time | ~2 seconds | Kernel -> HTTP server ready |
 
 ---
 
 ## Source Summary
 
-~9,000 LOC original C++ + ~45KB web UI:
+~10,500 LOC original C++ + ~45KB web UI:
 - main.cpp, supervisor.cpp, init.cpp, hwdetect.cpp, child_main.cpp
 - agent.cpp, prompt_builder.cpp
-- tools.cpp + 12 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth, audio, cluster)
-- voice.h, voice.cpp
-- cluster.h, cluster.cpp
+- tools.cpp + 13 tool files (fs, process, network, system, config, model, model_download, install, schedule, auth, audio, cluster, update)
+- voice.h, voice.cpp, cluster.h, cluster.cpp
+- updater.h, updater.cpp, version.h
+- tweetnacl.h, tweetnacl.c
 - bcrypt.cpp, auth.cpp
 - net_mdns.cpp, scheduler.cpp, mcp_server.cpp
 - Web UI: index.html, login.html, setup.html, chat.js, dashboard.js, files.js, system.js, notifications.js, install.js, style.css
 
 ## Test Suites
-11 suites, ~155 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster
+12 suites, ~171 tests: hwdetect, tools, agent, integration, http, mdns, auth, inference, model_download, audio, cluster, updater
 
 ## VirtualBox VM
-- **VM Name**: "Llamaste", Location: `D:\Llamaste\vm\Llamaste\`
+- **VM Name**: "Llamaste2", Location: `D:\Llamaste\vm\Llamaste2\`
 - 4 GB RAM, 2 CPUs, EFI64, VMSVGA, AC97 audio, NAT (host 8080 -> guest 80)
 - SATA port 0: `llamaste-disk.vdi` (16 GB)
 - Access from Windows: `http://localhost:8080`
