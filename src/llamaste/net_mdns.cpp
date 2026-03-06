@@ -635,8 +635,18 @@ void MdnsResponder::advertise_service(const std::string& service_type,
 
     {
         std::lock_guard<std::mutex> lk(service_mu_);
-        service_     = svc;
-        has_service_ = true;
+        // Update existing or add new
+        bool found = false;
+        for (auto& s : services_) {
+            if (s.browse_name == svc.browse_name) {
+                s = svc;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            services_.push_back(svc);
+        }
     }
 
     // Send proactive announcement so listeners don't have to query
@@ -833,9 +843,12 @@ void MdnsResponder::run_loop() {
                 bool got_svc = false;
                 {
                     std::lock_guard<std::mutex> lk(service_mu_);
-                    if (has_service_ && dns_name_eq(qname, service_.browse_name)) {
-                        svc_copy = service_;
-                        got_svc  = true;
+                    for (const auto& s : services_) {
+                        if (dns_name_eq(qname, s.browse_name)) {
+                            svc_copy = s;
+                            got_svc  = true;
+                            break;
+                        }
                     }
                 }
                 if (got_svc) {

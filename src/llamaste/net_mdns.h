@@ -106,9 +106,8 @@ private:
     std::string hostname_;   // without ".local"
     std::string fqdn_;       // hostname_ + ".local"
 
-    // Service advertisement (set once by advertise_service, read by run_loop)
-    MdnsServiceRecord service_;
-    bool              has_service_ = false;
+    // Service advertisements (added by advertise_service, read by run_loop)
+    std::vector<MdnsServiceRecord> services_;
     mutable std::mutex service_mu_;
 
     void run_loop();

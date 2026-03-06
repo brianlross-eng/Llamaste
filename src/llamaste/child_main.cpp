@@ -45,6 +45,7 @@
 #include <thread>
 #include <atomic>
 #include <functional>
+#include <vector>
 
 #ifdef _WIN32
 #include <io.h>
@@ -108,6 +109,12 @@ static std::atomic<bool> g_model_loaded{false};
 static int g_llama_port = 8088;
 static std::string g_model_name;
 static std::mutex g_llama_mutex;
+
+// llama-rpc-server process state (mesh clustering)
+#ifndef _WIN32
+static std::atomic<pid_t> g_rpc_pid{0};
+#endif
+static int g_rpc_port = 50052;
 
 // ---------------------------------------------------------------------------
 // Inference configuration helpers (non-static for testability)
@@ -334,7 +341,8 @@ static std::string llama_inference(const std::string& request_json) {
 // llama-server process lifecycle
 // ---------------------------------------------------------------------------
 
-static bool spawn_llama_server(const std::string& model_path, int cpu_cores, int free_ram_mb) {
+static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
+                                int free_ram_mb, const std::string& rpc_endpoints = "") {
     std::lock_guard<std::mutex> lock(g_llama_mutex);
 
     int threads = compute_thread_count(cpu_cores);
@@ -356,29 +364,60 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores, int
     }
 
     if (pid == 0) {
-        // Child process: exec llama-server
-        execl("/opt/llamaste/llama-server", "llama-server",
-              "-m", model_path.c_str(),
-              "--host", "127.0.0.1",
-              "--port", port_str.c_str(),
-              "--no-webui",
-              "-c", c_str.c_str(),
-              "-t", t_str.c_str(),
-              "-tb", tb_str.c_str(),
-              "--mlock",
-              "-fa",
-              "--jinja",
-              "--chat-template", "chatml",
-              "--log-disable",
-              (char*)nullptr);
-        // exec failed
-        fprintf(stderr, "[child] execl llama-server failed: %s\n", strerror(errno));
+        // Child process: build args vector for variable-length command
+        std::vector<const char*> args;
+        args.push_back("llama-server");
+        args.push_back("-m"); args.push_back(model_path.c_str());
+        args.push_back("--host"); args.push_back("127.0.0.1");
+        args.push_back("--port"); args.push_back(port_str.c_str());
+        args.push_back("--no-webui");
+        args.push_back("-c"); args.push_back(c_str.c_str());
+        args.push_back("-t"); args.push_back(t_str.c_str());
+        args.push_back("-tb"); args.push_back(tb_str.c_str());
+        args.push_back("--mlock");
+        args.push_back("-fa");
+        args.push_back("--jinja");
+        args.push_back("--chat-template"); args.push_back("chatml");
+        args.push_back("--log-disable");
+
+        if (!rpc_endpoints.empty()) {
+            args.push_back("--rpc");
+            args.push_back(rpc_endpoints.c_str());
+            fprintf(stderr, "[child] Using RPC endpoints: %s\n", rpc_endpoints.c_str());
+        }
+
+        args.push_back(nullptr);
+        execv("/opt/llamaste/llama-server", const_cast<char**>(args.data()));
+        fprintf(stderr, "[child] execv llama-server failed: %s\n", strerror(errno));
         _exit(127);
     }
 
     // Parent: store PID
     g_llama_pid.store(pid);
     fprintf(stderr, "[child] llama-server spawned with PID %d\n", pid);
+    return true;
+}
+
+static bool spawn_rpc_server() {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[child] Failed to fork llama-rpc-server: %s\n", strerror(errno));
+        return false;
+    }
+
+    if (pid == 0) {
+        std::string port_str = std::to_string(g_rpc_port);
+        execl("/opt/llamaste/llama-rpc-server", "llama-rpc-server",
+              "--host", "0.0.0.0",
+              "--port", port_str.c_str(),
+              (char*)nullptr);
+        fprintf(stderr, "[child] execl llama-rpc-server failed: %s\n", strerror(errno));
+        _exit(127);
+    }
+
+    g_rpc_pid.store(pid);
+    fprintf(stderr, "[child] llama-rpc-server spawned with PID %d on port %d\n",
+            pid, g_rpc_port);
     return true;
 }
 
@@ -925,6 +964,20 @@ int child_main(const SupervisorConfig& config) {
         } else {
             fprintf(stderr, "[child] Failed to spawn llama-server, staying in stub mode\n");
         }
+    }
+#endif
+
+    // Start llama-rpc-server for mesh clustering (port 50052)
+    // Runs on all nodes — even standalone, so it's ready when peers discover us
+#ifndef _WIN32
+    if (access("/opt/llamaste/llama-rpc-server", X_OK) == 0) {
+        if (spawn_rpc_server()) {
+            fprintf(stderr, "[child] RPC server ready for mesh clustering\n");
+        } else {
+            fprintf(stderr, "[child] RPC server failed to start — mesh clustering unavailable\n");
+        }
+    } else {
+        fprintf(stderr, "[child] llama-rpc-server not found — mesh clustering unavailable\n");
     }
 #endif
 
@@ -1887,6 +1940,24 @@ int child_main(const SupervisorConfig& config) {
     g_scheduler.stop();
     mdns.stop();
     fprintf(stderr, "[child] HTTP server stopped\n");
+
+    // Stop llama-rpc-server
+#ifndef _WIN32
+    {
+        pid_t rpc_pid = g_rpc_pid.load();
+        if (rpc_pid > 0) {
+            fprintf(stderr, "[child] Stopping llama-rpc-server (PID %d)\n", rpc_pid);
+            kill(rpc_pid, SIGTERM);
+            for (int i = 0; i < 50; i++) {
+                int status;
+                if (waitpid(rpc_pid, &status, WNOHANG) != 0) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            kill(rpc_pid, SIGKILL);
+            g_rpc_pid.store(0);
+        }
+    }
+#endif
 
     // Stop llama-server
 #ifndef _WIN32
