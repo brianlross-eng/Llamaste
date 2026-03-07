@@ -51,6 +51,7 @@
 #include <atomic>
 #include <functional>
 #include <vector>
+#include <memory>
 
 #ifdef _WIN32
 #include <io.h>
@@ -125,6 +126,22 @@ static int g_llama_port = 8088;
 static std::string g_model_name;
 static std::mutex g_llama_mutex;
 
+// Persistent HTTP client for inference (HTTP keep-alive — avoids TCP reconnect per request).
+// Protected by g_inference_cli_mutex. Created lazily, recreated if connection drops.
+static std::unique_ptr<httplib::Client> g_inference_cli;
+static std::mutex g_inference_cli_mutex;
+
+// Semantic cache: hash(system_prompt + user_message) → {response, timestamp}
+// Avoids redundant LLM inference for repeated identical queries (e.g. help, status).
+struct SemanticCacheEntry {
+    std::string response;
+    std::time_t timestamp = 0;
+};
+static std::map<std::string, SemanticCacheEntry> g_semantic_cache;
+static std::mutex g_semantic_cache_mutex;
+static constexpr int SEMANTIC_CACHE_TTL_SECONDS = 600;  // 10 minutes
+static constexpr int SEMANTIC_CACHE_MAX_ENTRIES  = 50;
+
 // llama-rpc-server process state (mesh clustering)
 #ifndef _WIN32
 static std::atomic<pid_t> g_rpc_pid{0};
@@ -138,10 +155,12 @@ static std::atomic<bool> g_upgrade_downloading{false};
 // Inference configuration helpers (non-static for testability)
 // ---------------------------------------------------------------------------
 
-// Thread count for generation: max(1, cores * 3/4)
+// Thread count for generation.
+// Use all available CPU cores for maximum inference throughput.
+// The watchdog is now kept alive by a dedicated kicker thread in the supervisor,
+// so slow inference with multiple threads won't trigger the softdog.
 int compute_thread_count(int cpu_cores) {
-    int t = cpu_cores * 3 / 4;
-    return t < 1 ? 1 : t;
+    return cpu_cores < 1 ? 1 : cpu_cores;
 }
 
 // Batch thread count: use all cores
@@ -150,12 +169,13 @@ int compute_batch_thread_count(int cpu_cores) {
 }
 
 // Context window size based on free RAM after model loading.
-// Smaller contexts = faster inference on CPU. 4096 is plenty for most
-// single-turn conversations; 8192 for multi-turn agent loops.
+// 4096 is used for diagnostic purposes: halves KV cache memory vs 8192.
+// The 62-tool system prompt is ~700 tokens when in /completion chatml format
+// (tools are NOT passed to llama-server, only the system prompt + messages),
+// so 4096 is sufficient for the actual inference workload.
 int compute_context_size(int free_ram_mb) {
-    if (free_ram_mb >= 4096) return 8192;
     if (free_ram_mb >= 2048) return 4096;
-    if (free_ram_mb >= 1024) return 4096;
+    if (free_ram_mb >= 1024) return 2048;
     if (free_ram_mb >= 512)  return 2048;
     return 2048;
 }
@@ -302,55 +322,301 @@ static std::string stub_inference(const std::string& request_json) {
 }
 
 // ---------------------------------------------------------------------------
-// Real inference: HTTP proxy to llama-server on localhost
+// Semantic cache helpers
 // ---------------------------------------------------------------------------
 
+// Compute a simple 64-bit FNV-1a hash of a string (fast, no crypto needed).
+static uint64_t fnv1a_hash(const std::string& s) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c : s) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+// Check the semantic cache. Returns cached response or "" if miss/expired.
+// Only caches single-turn user messages (avoids multi-turn pollution).
+static std::string semantic_cache_lookup(const std::string& request_json) {
+    // Only cache single-turn requests: one system + one user message.
+    // More complex requests (tool results, multi-turn) are always fresh.
+    auto req = json::parse(request_json, nullptr, false);
+    if (req.is_discarded()) return "";
+    if (!req.contains("messages") || !req["messages"].is_array()) return "";
+
+    const auto& msgs = req["messages"];
+    // Count non-system messages
+    int non_sys = 0;
+    std::string user_text;
+    std::string sys_text;
+    for (const auto& m : msgs) {
+        const std::string role = m.value("role", "");
+        if (role == "system") {
+            sys_text = m.value("content", "");
+        } else if (role == "user") {
+            user_text = m.value("content", "");
+            non_sys++;
+        } else {
+            non_sys++;  // tool result or assistant turn → don't cache
+        }
+    }
+    if (non_sys != 1 || user_text.empty()) return "";  // not a simple query
+
+    const std::string key_src = sys_text + "\x00" + user_text;
+    const uint64_t h = fnv1a_hash(key_src);
+    const std::string key = std::to_string(h);
+
+    std::lock_guard<std::mutex> lock(g_semantic_cache_mutex);
+    auto it = g_semantic_cache.find(key);
+    if (it == g_semantic_cache.end()) return "";
+
+    const std::time_t now = std::time(nullptr);
+    if (now - it->second.timestamp > SEMANTIC_CACHE_TTL_SECONDS) {
+        g_semantic_cache.erase(it);
+        return "";
+    }
+
+    fprintf(stderr, "[inference] semantic cache HIT (key=%s)\n", key.c_str());
+    return it->second.response;
+}
+
+// Store response in semantic cache (evicts oldest if over cap).
+static void semantic_cache_store(const std::string& request_json,
+                                  const std::string& response_json) {
+    auto req = json::parse(request_json, nullptr, false);
+    if (req.is_discarded()) return;
+    if (!req.contains("messages") || !req["messages"].is_array()) return;
+
+    const auto& msgs = req["messages"];
+    int non_sys = 0;
+    std::string user_text;
+    std::string sys_text;
+    for (const auto& m : msgs) {
+        const std::string role = m.value("role", "");
+        if (role == "system") {
+            sys_text = m.value("content", "");
+        } else if (role == "user") {
+            user_text = m.value("content", "");
+            non_sys++;
+        } else {
+            non_sys++;
+        }
+    }
+    if (non_sys != 1 || user_text.empty()) return;
+
+    const std::string key_src = sys_text + "\x00" + user_text;
+    const uint64_t h = fnv1a_hash(key_src);
+    const std::string key = std::to_string(h);
+
+    std::lock_guard<std::mutex> lock(g_semantic_cache_mutex);
+    // Evict oldest if at capacity
+    if (static_cast<int>(g_semantic_cache.size()) >= SEMANTIC_CACHE_MAX_ENTRIES) {
+        std::time_t oldest_t = std::numeric_limits<std::time_t>::max();
+        std::string oldest_k;
+        for (const auto& kv : g_semantic_cache) {
+            if (kv.second.timestamp < oldest_t) {
+                oldest_t = kv.second.timestamp;
+                oldest_k = kv.first;
+            }
+        }
+        if (!oldest_k.empty()) g_semantic_cache.erase(oldest_k);
+    }
+    g_semantic_cache[key] = {response_json, std::time(nullptr)};
+}
+
+// ---------------------------------------------------------------------------
+// Real inference: HTTP proxy to llama-server on localhost
+// HTTP keep-alive: reuse persistent Client across calls.
+// ---------------------------------------------------------------------------
+
+// Get or create the persistent inference httplib::Client.
+// Call with g_inference_cli_mutex held.
+static httplib::Client& get_inference_client() {
+    if (!g_inference_cli) {
+        g_inference_cli = std::make_unique<httplib::Client>("127.0.0.1", g_llama_port);
+        g_inference_cli->set_connection_timeout(5);
+        // 300s: large prompts (62 tools + system prompt ≈ 6300 tokens) can take
+        // 130-200s on a 2-core CPU VM.  Previous 120s was too short.
+        g_inference_cli->set_read_timeout(300);
+        g_inference_cli->set_keep_alive(true);
+    }
+    return *g_inference_cli;
+}
+
+// Build an error response JSON string (well-formed chat completion).
+static std::string make_inference_error(const std::string& message) {
+    json response;
+    json choice;
+    json msg;
+    msg["role"] = "assistant";
+    msg["content"] = message;
+    choice["index"] = 0;
+    choice["message"] = msg;
+    choice["finish_reason"] = "stop";
+    response["id"] = "chatcmpl-error";
+    response["object"] = "chat.completion";
+    response["model"] = "llamaste-error";
+    response["choices"] = json::array({choice});
+    json usage;
+    usage["prompt_tokens"] = 0;
+    usage["completion_tokens"] = 0;
+    usage["total_tokens"] = 0;
+    response["usage"] = usage;
+    return response.dump();
+}
+
+// Build a chatml-formatted prompt string from OpenAI-format messages.
+// Used by llama_inference to bypass the broken chat template in llama-server.
+static std::string build_chatml_prompt(const json& messages) {
+    std::string prompt;
+    for (const auto& msg : messages) {
+        const std::string role = msg.value("role", "user");
+        std::string content = msg.value("content", "");
+
+        // Assistant messages with tool_calls: serialize tool calls as Qwen2.5 native format
+        if (role == "assistant" && content.empty() && msg.contains("tool_calls")
+            && msg["tool_calls"].is_array()) {
+            for (const auto& tc : msg["tool_calls"]) {
+                if (tc.contains("function")) {
+                    std::string name = tc["function"].value("name", "");
+                    std::string args = tc["function"].value("arguments", "{}");
+                    content += "<tool_call>\n{\"name\": \"" + name +
+                               "\", \"arguments\": " + args + "}\n</tool_call>\n";
+                }
+            }
+        }
+
+        // Tool result messages → "tool" role (Qwen2.5 training format)
+        if (role == "tool") {
+            std::string name = msg.value("name", "");
+            prompt += "<|im_start|>tool\n";
+            if (!name.empty()) {
+                prompt += "{\"name\": \"" + name + "\", \"content\": " +
+                          json(content).dump() + "}\n";
+            } else {
+                prompt += content + "\n";
+            }
+            prompt += "<|im_end|>\n";
+            continue;
+        }
+
+        prompt += "<|im_start|>" + role + "\n" + content + "<|im_end|>\n";
+    }
+    prompt += "<|im_start|>assistant\n";
+    return prompt;
+}
+
 static std::string llama_inference(const std::string& request_json) {
+    fprintf(stderr, "[inference] START request_size=%zu\n", request_json.size());
     if (!g_model_loaded.load()) {
         return stub_inference(request_json);  // graceful fallback
     }
 
-    httplib::Client cli("127.0.0.1", g_llama_port);
-    cli.set_connection_timeout(5);
-    cli.set_read_timeout(120);  // large models may take time
+    // --- Semantic cache lookup (single-turn queries only) ---
+    std::string cached = semantic_cache_lookup(request_json);
+    if (!cached.empty()) return cached;
 
-    auto result = cli.Post("/v1/chat/completions",
-                           request_json,
-                           "application/json");
-
-    if (!result || result->status != 200) {
-        // Return error as a well-formed chat completion
-        json response;
-        json choice;
-        json msg;
-        msg["role"] = "assistant";
-
-        if (!result) {
-            fprintf(stderr, "[inference] llama-server unreachable (no result)\n");
-            msg["content"] = "[inference error: llama-server unreachable]";
-        } else {
-            fprintf(stderr, "[inference] llama-server HTTP %d: %s\n",
-                    result->status, result->body.substr(0, 500).c_str());
-            msg["content"] = "[inference error: llama-server returned HTTP " +
-                             std::to_string(result->status) + "]";
-        }
-
-        choice["index"] = 0;
-        choice["message"] = msg;
-        choice["finish_reason"] = "stop";
-        response["id"] = "chatcmpl-error";
-        response["object"] = "chat.completion";
-        response["model"] = "llamaste-error";
-        response["choices"] = json::array({choice});
-        json usage;
-        usage["prompt_tokens"] = 0;
-        usage["completion_tokens"] = 0;
-        usage["total_tokens"] = 0;
-        response["usage"] = usage;
-        return response.dump();
+    // --- Build chatml prompt and use /completion endpoint ---
+    // llama-server's /v1/chat/completions is broken in this build:
+    //   - --jinja silently ignored (compiled without minja Jinja2 support)
+    //   - "Content-only" mode: no stop tokens → generation stalls indefinitely
+    //   - Hardware watchdog fires (~60s) and reboots the system
+    // Fix: format messages as chatml manually, POST to /completion (raw generation),
+    // parse the plain-text response, and wrap it in OpenAI format.
+    auto req_obj = json::parse(request_json, nullptr, false);
+    if (req_obj.is_discarded()) {
+        return make_inference_error("[inference error: failed to parse request]");
     }
 
-    return result->body;
+    int   max_tokens  = req_obj.value("max_tokens", 2048);
+    float temperature = req_obj.value("temperature", 0.7f);
+
+    std::string prompt;
+    if (req_obj.contains("messages") && req_obj["messages"].is_array()) {
+        prompt = build_chatml_prompt(req_obj["messages"]);
+    } else {
+        prompt = "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n";
+    }
+
+    // Build /completion request body
+    json comp_req;
+    comp_req["prompt"]       = prompt;
+    comp_req["n_predict"]    = max_tokens;
+    comp_req["temperature"]  = temperature;
+    comp_req["stop"]   = json::array({"<|im_end|>", "<|endoftext|>", "<|im_start|>"});
+    comp_req["stream"] = false;
+    std::string comp_req_str = comp_req.dump();
+
+    fprintf(stderr, "[inference] chatml prompt_len=%zu n_predict=%d POSTing to /completion\n",
+            prompt.size(), max_tokens);
+
+    // --- POST to /completion with a fresh connection (no keep-alive) ---
+    // Previously used keep-alive but the persistent connection might be causing
+    // the Post() to block waiting for data after llama-server finishes generating.
+    // Use a fresh connection per request to eliminate connection state as a variable.
+    fprintf(stderr, "[inference] creating fresh client for /completion\n");
+    httplib::Result result;
+    {
+        httplib::Client fresh_cli("127.0.0.1", g_llama_port);
+        fresh_cli.set_connection_timeout(5);
+        fresh_cli.set_read_timeout(300);
+        fresh_cli.set_keep_alive(false);  // fresh connection, no keep-alive
+        fprintf(stderr, "[inference] posting to /completion (fresh connection, stream=false)\n");
+        result = fresh_cli.Post("/completion", comp_req_str, "application/json");
+        fprintf(stderr, "[inference] Post returned result=%s status=%d\n",
+                result ? "ok" : "null", result ? result->status : 0);
+    }
+
+    if (!result || result->status != 200) {
+        std::string msg;
+        if (!result) {
+            fprintf(stderr, "[inference] llama-server unreachable (no result)\n");
+            msg = "[inference error: llama-server unreachable]";
+        } else {
+            fprintf(stderr, "[inference] llama-server HTTP %d: %.500s\n",
+                    result->status, result->body.c_str());
+            msg = "[inference error: llama-server returned HTTP " +
+                  std::to_string(result->status) + "]";
+        }
+        return make_inference_error(msg);
+    }
+
+    // --- Convert /completion response → OpenAI chat.completion format ---
+    fprintf(stderr, "[inference] /completion response body_size=%zu body_preview=%.200s\n",
+            result->body.size(), result->body.c_str());
+    auto comp_resp = json::parse(result->body, nullptr, false);
+    std::string content;
+    if (!comp_resp.is_discarded() && comp_resp.contains("content")) {
+        content = comp_resp["content"].get<std::string>();
+    }
+
+    json response;
+    response["id"]      = "chatcmpl-" + std::to_string(std::time(nullptr));
+    response["object"]  = "chat.completion";
+    response["model"]   = "llamaste";
+    json msg_obj;
+    msg_obj["role"]    = "assistant";
+    msg_obj["content"] = content;
+    json choice;
+    choice["index"]        = 0;
+    choice["message"]      = msg_obj;
+    choice["finish_reason"] = "stop";
+    response["choices"] = json::array({choice});
+    json usage;
+    usage["prompt_tokens"]     = comp_resp.is_discarded() ? 0 : comp_resp.value("tokens_evaluated", 0);
+    usage["completion_tokens"] = comp_resp.is_discarded() ? 0 : comp_resp.value("tokens_predicted", 0);
+    usage["total_tokens"]      = usage["prompt_tokens"].get<int>() + usage["completion_tokens"].get<int>();
+    response["usage"] = usage;
+
+    fprintf(stderr, "[inference] generated %d tokens: %.100s\n",
+            usage["completion_tokens"].get<int>(), content.c_str());
+
+    std::string response_str = response.dump();
+
+    // --- Semantic cache store ---
+    semantic_cache_store(request_json, response_str);
+
+    return response_str;
 }
 
 #ifndef _WIN32
@@ -383,6 +649,19 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
     }
 
     if (pid == 0) {
+        // Redirect llama-server stdout/stderr to a log file.
+        // Without this, llama-server's verbose logs (when --log-disable is off) flood
+        // the serial port buffer (/dev/console), causing all stderr writes to block —
+        // including the supervisor's watchdog kick loop, which then misses kicks and
+        // triggers a softdog reboot. With this redirect, logs go to /tmp/llama-server.log
+        // and can be inspected via fs_read_file without affecting the serial port.
+        int log_fd = open("/tmp/llama-server.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+
         // Child process: build args vector for variable-length command
         std::vector<const char*> args;
         args.push_back("llama-server");
@@ -393,12 +672,11 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         args.push_back("-c"); args.push_back(c_str.c_str());
         args.push_back("-t"); args.push_back(t_str.c_str());
         args.push_back("-tb"); args.push_back(tb_str.c_str());
-        args.push_back("--mlock");
-        args.push_back("-fa");
-        args.push_back("--cache-reuse"); args.push_back("256");
-        args.push_back("--jinja");
-        args.push_back("--chat-template"); args.push_back("chatml");
-        args.push_back("--log-disable");
+        // Note: --mlock, -fa (Flash Attention), and --cache-reuse removed.
+        // -fa caused the decode step to hang indefinitely after prefill.
+        // Note: llama_inference() uses /completion endpoint with manual chatml.
+        // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
+        // args.push_back("--log-disable");
 
         if (!rpc_endpoints.empty()) {
             args.push_back("--rpc");
@@ -573,6 +851,8 @@ static void llama_monitor_thread(std::string model_path, int cpu_cores, int free
 
         g_model_loaded.store(false);
         g_inference_fn = stub_inference;
+        // Reset persistent inference client — old connection is dead after crash
+        { std::lock_guard<std::mutex> lk(g_inference_cli_mutex); g_inference_cli.reset(); }
         retries++;
 
         if (retries >= max_retries) {
@@ -948,6 +1228,7 @@ static void handle_conversations(const httplib::Request& /*req*/, httplib::Respo
 
 // POST /v1/chat/completions — OpenAI-compatible API
 static void handle_openai_completions(const httplib::Request& req, httplib::Response& res) {
+    fprintf(stderr, "[completions] ENTER body_size=%zu\n", req.body.size());
     auto body = json::parse(req.body, nullptr, false);
     if (body.is_discarded()) {
         res.status = 400;
@@ -970,6 +1251,10 @@ static void handle_openai_completions(const httplib::Request& req, httplib::Resp
         }
     }
 
+    // Extract generation params from request body (pass caller's values through)
+    int   max_tokens  = body.value("max_tokens",  2048);
+    float temperature = body.value("temperature", 0.7f);
+
     // Create a minimal conversation for the stub
     ConversationState conv;
     conv.system_prompt = g_system_prompt;
@@ -978,8 +1263,11 @@ static void handle_openai_completions(const httplib::Request& req, httplib::Resp
     }
 
     // Use current inference function to get the response
-    std::string request = build_inference_request(conv, g_tools);
+    fprintf(stderr, "[completions] calling build_inference_request max_tokens=%d\n", max_tokens);
+    std::string request = build_inference_request(conv, g_tools, max_tokens, temperature);
+    fprintf(stderr, "[completions] request_size=%zu calling inference\n", request.size());
     std::string response = g_inference_fn(request);
+    fprintf(stderr, "[completions] inference returned %zu bytes\n", response.size());
 
     res.set_content(response, "application/json");
 }
@@ -1095,6 +1383,7 @@ static void do_auto_upgrade_check(const ClusterCapacity& cap) {
 int child_main(const SupervisorConfig& config) {
     signal(SIGTERM, child_signal);
     signal(SIGINT, child_signal);
+    signal(SIGPIPE, SIG_IGN);  // ignore broken pipe — client disconnect mid-response must not crash child
 
     g_start_time = time(nullptr);
     g_boot_mode = config.boot_mode;
@@ -1324,6 +1613,8 @@ int child_main(const SupervisorConfig& config) {
                 g_llama_pid.store(0);
                 g_model_loaded.store(false);
                 g_inference_fn = stub_inference;
+                // Reset persistent client — old connection is dead after restart
+                { std::lock_guard<std::mutex> lk(g_inference_cli_mutex); g_inference_cli.reset(); }
             }
 
             // Select best model for current cluster capacity
@@ -1455,6 +1746,8 @@ int child_main(const SupervisorConfig& config) {
                     g_llama_pid.store(0);
                     g_model_loaded.store(false);
                     g_inference_fn = stub_inference;
+                    // Reset persistent client — old connection is dead
+                    { std::lock_guard<std::mutex> lk(g_inference_cli_mutex); g_inference_cli.reset(); }
                 }
             }
 

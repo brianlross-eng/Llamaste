@@ -20,6 +20,7 @@
 #include <time.h>
 #include <termios.h>
 #include <poll.h>
+#include <linux/watchdog.h>
 #endif
 
 // ---------- Format helpers (testable on host) ----------
@@ -108,12 +109,31 @@ static pid_t spawn_child(const SupervisorConfig& config) {
 }
 
 static int open_watchdog() {
-    int fd = open("/dev/watchdog", O_WRONLY);
+    // O_CLOEXEC: prevent child processes from inheriting the watchdog fd.
+    // Without this, forked children (child_main, llama-server) inherit the fd.
+    // If a child closes its inherited copy, and softdog_expect_close was set by
+    // a 'V' write, the softdog driver could interpret the close as "clean stop".
+    int fd = open("/dev/watchdog", O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         fprintf(stderr, "[supervisor] No hardware watchdog available\n");
-    } else {
-        fprintf(stderr, "[supervisor] Hardware watchdog opened\n");
+        return fd;
     }
+
+    // Extend watchdog timeout to 300s.
+    // Default softdog timeout is 60s. During slow CPU-only inference (no SIMD),
+    // a single token can take several seconds. The kicker thread kicks every 100ms,
+    // so it should never approach 300s. This is defense-in-depth against any
+    // scheduling edge case that prevents the kicker from running for a short period.
+    int timeout = 300;
+#ifdef WDIOC_SETTIMEOUT
+    if (ioctl(fd, WDIOC_SETTIMEOUT, &timeout) < 0) {
+        fprintf(stderr, "[supervisor] WDIOC_SETTIMEOUT failed (using default timeout)\n");
+    } else {
+        fprintf(stderr, "[supervisor] Watchdog timeout set to %ds\n", timeout);
+    }
+#endif
+
+    fprintf(stderr, "[supervisor] Hardware watchdog opened (fd=%d)\n", fd);
     return fd;
 }
 
@@ -543,25 +563,109 @@ static void console_display_thread(const SupervisorConfig& config) {
     fprintf(stderr, "[supervisor] Console display thread stopped\n");
 }
 
+// ---------- Dedicated watchdog kicker thread ----------
+//
+// Runs independently of the main supervisor loop.
+// Kicks the watchdog every 1 second regardless of what the main thread is
+// doing (e.g. blocked in waitpid(), fprintf(), or sleep()).
+//
+// All signals are blocked in this thread so that:
+// (a) SA_RESTART on SIGCHLD cannot cause sleep(1) to restart indefinitely
+// (b) Signal handlers run in the main thread where g_child_exited is checked
+//
+static int g_watchdog_fd = -1;  // set before kicker thread starts
+
+static void watchdog_kicker_thread() {
+    // Block ALL signals — signals must only run in the main thread.
+    sigset_t all_sigs;
+    sigfillset(&all_sigs);
+    pthread_sigmask(SIG_BLOCK, &all_sigs, nullptr);
+
+    // Open a persistent diagnostic log. Written on every kick so we can
+    // check after a reboot exactly how many kicks happened and when they stopped.
+    int log_fd = open("/data/watchdog-kicker.log",
+                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf),
+                     "[kicker] STARTED fd=%d log_fd=%d\n",
+                     g_watchdog_fd, log_fd);
+    write(STDERR_FILENO, buf, n);
+    if (log_fd >= 0) write(log_fd, buf, n);
+
+    int kick_count = 0;
+    while (!g_shutdown_requested) {
+        // Kick: write any byte to reset the softdog timer.
+        // Using '1' (not 'V') so we don't accidentally prime "clean close" flag
+        // in the softdog driver if some child fd gets closed unexpectedly.
+        int wr = -2;
+        if (g_watchdog_fd >= 0) {
+            wr = (int)write(g_watchdog_fd, "1", 1);
+        }
+        kick_count++;
+
+        // Log every 30 kicks (~3 seconds) to the persistent file.
+        // Log errors immediately to serial.
+        if (log_fd >= 0 && kick_count % 30 == 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "[kicker] kick=%d wr=%d fd=%d\n",
+                         kick_count, wr, g_watchdog_fd);
+            write(log_fd, buf, n);
+        }
+        if (wr < 0 && g_watchdog_fd >= 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "[kicker] WRITE ERROR kick=%d errno=%d\n",
+                         kick_count, errno);
+            write(STDERR_FILENO, buf, n);
+            if (log_fd >= 0) write(log_fd, buf, n);
+        }
+
+        // 100ms sleep — 10 kicks/second, well within any watchdog timeout.
+        usleep(100000);
+    }
+
+    n = snprintf(buf, sizeof(buf),
+                 "[kicker] EXITING kicks=%d shutdown=%d\n",
+                 kick_count, g_shutdown_requested);
+    write(STDERR_FILENO, buf, n);
+    if (log_fd >= 0) { write(log_fd, buf, n); close(log_fd); }
+
+    // One final kick for shutdown margin
+    kick_watchdog(g_watchdog_fd);
+}
+
 // ---------- Main supervisor loop ----------
 
 [[noreturn]] void supervisor_run(const SupervisorConfig& config) {
     struct sigaction sa = {};
     sa.sa_handler = supervisor_sigchld;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
+    // SA_RESTART: restart interrupted syscalls (e.g. sleep) after signal.
+    // SA_NOCLDSTOP: do NOT deliver SIGCHLD when child is merely stopped
+    // (SIGSTOP) or continued (SIGCONT). Without SA_NOCLDSTOP, a stop event
+    // would set g_child_exited=1 and exit the kick loop even though the child
+    // is still alive, leaving waitpid() to block indefinitely with no kicks.
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, nullptr);
 
     sa.sa_handler = supervisor_sigterm;
+    sa.sa_flags = SA_RESTART;
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT, &sa, nullptr);
 
     sa.sa_handler = supervisor_sigusr1;
     sigaction(SIGUSR1, &sa, nullptr);
 
-    int watchdog_fd = open_watchdog();
+    g_watchdog_fd = open_watchdog();
     int crash_count = 0;
     time_t last_crash = 0;
+
+    // Dedicated watchdog kicker thread: runs for the entire supervisor lifetime.
+    // Kicks g_watchdog_fd every 1 second with all signals blocked, so it can
+    // never be interrupted by SA_RESTART, blocked by fprintf(), or stalled by
+    // waitpid() in the main thread.
+    std::thread kicker_thread(watchdog_kicker_thread);
+    kicker_thread.detach();
 
     // Start console display + input threads (all boot modes)
     std::thread display_thread(console_display_thread, config);
@@ -582,15 +686,16 @@ static void console_display_thread(const SupervisorConfig& config) {
 
         fprintf(stderr, "[supervisor] Child PID %d running\n", g_child_pid);
 
-        while (!g_child_exited && !g_shutdown_requested) {
-            kick_watchdog(watchdog_fd);
-            sleep(10);
-        }
-
-        if (g_shutdown_requested) break;
-
+        // Wait for child to exit.
+        // The dedicated kicker thread handles watchdog kicks, so this waitpid()
+        // can block indefinitely without risking the softdog timeout.
         int status = 0;
         waitpid(g_child_pid, &status, 0);
+        g_child_exited = 1;
+
+        fprintf(stderr, "[supervisor] Child exited (status=%d)\n", status);
+
+        if (g_shutdown_requested) break;
 
         if (WIFEXITED(status)) {
             fprintf(stderr, "[supervisor] Child exited with code %d\n",
@@ -611,9 +716,14 @@ static void console_display_thread(const SupervisorConfig& config) {
         if (crash_count > 3) {
             fprintf(stderr,
                 "[supervisor] Too many crashes, waiting 30s before restart\n");
-            sleep(30);
+            // Kick watchdog during restart delay (30s > 60s timeout risk)
+            for (int i = 0; i < 30; i++) {
+                kick_watchdog(g_watchdog_fd);
+                sleep(1);
+            }
             crash_count = 0;
         } else {
+            kick_watchdog(g_watchdog_fd);
             sleep(2);
         }
     }
@@ -632,9 +742,9 @@ static void console_display_thread(const SupervisorConfig& config) {
         alarm(0);
     }
 
-    if (watchdog_fd >= 0) {
-        write(watchdog_fd, "V", 1);
-        close(watchdog_fd);
+    if (g_watchdog_fd >= 0) {
+        write(g_watchdog_fd, "V", 1);
+        close(g_watchdog_fd);
     }
 
     sync();
