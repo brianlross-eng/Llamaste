@@ -1349,13 +1349,47 @@ int child_main(const SupervisorConfig& config) {
                 std::string tensor_split = g_cluster.compute_tensor_split();
 
                 int free_ram_estimate = g_hwinfo.ram_free_mb - 512;
+                // Use a shorter timeout when RPC peers are involved: if peers are
+                // unreachable, llama-server never passes health and we'd block for
+                // the full timeout before the fallback can fire.
+                int rpc_wait = rpc.empty() ? 120 : 30;
                 if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc,
                                        tensor_split)) {
-                    if (wait_for_llama_server(120)) {
+                    if (wait_for_llama_server(rpc_wait)) {
                         g_model_loaded.store(true);
                         g_inference_fn = llama_inference;
                         fprintf(stderr, "[cluster] llama-server restarted: rpc=%s split=%s\n",
                                 rpc.c_str(), tensor_split.c_str());
+                        // Start a fresh monitor thread for the newly spawned server.
+                        // The original monitor from boot exits early (ECHILD) when the
+                        // topology callback steals its waitpid, leaving this server unmonitored.
+                        std::thread mon(llama_monitor_thread, model_path,
+                                        g_hwinfo.cpu_cores, free_ram_estimate);
+                        mon.detach();
+                    } else if (!rpc.empty()) {
+                        // Timed out waiting for llama-server — likely a dead RPC peer.
+                        // Kill the stuck process and retry solo so inference stays available.
+                        fprintf(stderr, "[cluster] llama-server timed out after %ds (rpc=%s) — retrying solo\n",
+                                rpc_wait, rpc.c_str());
+                        pid_t stuck = g_llama_pid.load();
+                        if (stuck > 0) {
+                            kill(stuck, SIGTERM);
+                            waitpid(stuck, nullptr, 0);
+                            g_llama_pid.store(0);
+                        }
+                        if (spawn_llama_server(model_path, g_hwinfo.cpu_cores,
+                                               free_ram_estimate, "", "")) {
+                            if (wait_for_llama_server(60)) {
+                                g_model_loaded.store(true);
+                                g_inference_fn = llama_inference;
+                                fprintf(stderr, "[cluster] llama-server started solo (fallback)\n");
+                                std::thread mon(llama_monitor_thread, model_path,
+                                                g_hwinfo.cpu_cores, free_ram_estimate);
+                                mon.detach();
+                            } else {
+                                fprintf(stderr, "[cluster] llama-server solo fallback also failed\n");
+                            }
+                        }
                     }
                 }
             }
@@ -1407,6 +1441,44 @@ int child_main(const SupervisorConfig& config) {
 
             // Re-run election (topology may have changed)
             g_cluster.run_election();
+
+#ifndef _WIN32
+            // Watchdog: detect if llama-server has crashed without the monitor thread
+            // noticing (e.g. when topology callback steals waitpid from the monitor,
+            // leaving the new RPC-mode server unmonitored).
+            if (g_model_loaded.load()) {
+                pid_t lpid = g_llama_pid.load();
+                if (lpid > 0 && kill(lpid, 0) != 0 && errno == ESRCH) {
+                    fprintf(stderr, "[heartbeat] llama-server (PID %d) died unexpectedly\n",
+                            (int)lpid);
+                    g_llama_pid.store(0);
+                    g_model_loaded.store(false);
+                    g_inference_fn = stub_inference;
+                }
+            }
+
+            // Recovery: if model is down but was previously loaded, restart solo.
+            // Fires within one heartbeat cycle (30s) of any crash — regardless of
+            // whether the monitor thread is still watching or has already exited.
+            if (!g_model_loaded.load() && g_llama_pid.load() == 0 && !g_model_name.empty()) {
+                std::string path = "/data/models/" + g_model_name;
+                if (access(path.c_str(), R_OK) == 0) {
+                    fprintf(stderr, "[heartbeat] llama-server down — restarting solo\n");
+                    int free_ram = g_hwinfo.ram_free_mb - 512;
+                    if (spawn_llama_server(path, g_hwinfo.cpu_cores, free_ram)) {
+                        if (wait_for_llama_server(60)) {
+                            g_model_loaded.store(true);
+                            g_inference_fn = llama_inference;
+                            fprintf(stderr, "[heartbeat] llama-server recovered (solo)\n");
+                            // Fresh monitor thread for the newly started server
+                            std::thread mon(llama_monitor_thread, path,
+                                            g_hwinfo.cpu_cores, free_ram);
+                            mon.detach();
+                        }
+                    }
+                }
+            }
+#endif
 
             // Auto-upgrade check: runs every 30s regardless of topology state changes.
             // This handles the standalone-forever case where the topology callback never
