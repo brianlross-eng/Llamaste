@@ -3,7 +3,7 @@
 
 $vdi = "D:\Llamaste\vm\Llamaste2\llamaste-disk.vdi"
 $newVdi = "D:\Llamaste\vm\Llamaste2\llamaste-disk-new.vdi"
-$uuid = "26fe17f1-60c3-4002-9dfc-bf27620e1d3a"
+$uuid = "8625669d-1bd7-4906-b0fd-86305055a494"
 $vboxmanage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 
 # Check if new VDI exists

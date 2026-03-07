@@ -274,6 +274,13 @@ std::string build_inference_request(
     request["messages"] = conv.to_messages_json();
     request["max_tokens"] = max_tokens;
     request["temperature"] = temperature;
+    request["stream"] = false;  // ensure non-streaming mode (streaming breaks keep-alive Post)
+
+    // Explicit stop tokens for Qwen2.5 chatml format.
+    // llama-server may run in "Content-only" mode when compiled without Jinja2 support
+    // (--jinja flag silently ignored).  Without explicit stops, generation never terminates.
+    // Qwen2.5-Instruct is trained to emit <|im_end|> after each turn — stop on that.
+    request["stop"] = json::array({"<|im_end|>", "<|endoftext|>", "<|im_start|>"});
 
     // Parse tools JSON string into a JSON array and attach
     std::string tools_str = tools.to_openai_tools_json();
