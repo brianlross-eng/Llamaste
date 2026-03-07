@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<!--
+  labwc window manager config for Llamaste desktop mode.
+  Doc: https://labwc.github.io/labwc-config.5.html
+-->
+<labwc_config>
+
+  <core>
+    <gap>4</gap>
+    <adaptiveSync>no</adaptiveSync>
+  </core>
+
+  <theme>
+    <name>Clearlooks</name>
+    <cornerRadius>4</cornerRadius>
+    <font place="ActiveWindow">
+      <name>Sans</name>
+      <size>11</size>
+      <slant>Normal</slant>
+      <weight>Bold</weight>
+    </font>
+  </theme>
+
+  <keyboard>
+    <default/>
+    <!-- Super+B: open browser to Llamaste web UI -->
+    <keybind key="Super-b">
+      <action name="Execute" command="cog http://localhost"/>
+    </keybind>
+    <!-- Super+Q or Alt+F4: close focused window -->
+    <keybind key="Super-q">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="A-F4">
+      <action name="Close"/>
+    </keybind>
+    <!-- Super+F: toggle fullscreen -->
+    <keybind key="Super-f">
+      <action name="ToggleFullscreen"/>
+    </keybind>
+    <!-- Super+D: toggle maximize -->
+    <keybind key="Super-d">
+      <action name="ToggleMaximize"/>
+    </keybind>
+    <!-- Super+Space: show desktop root menu -->
+    <keybind key="Super-space">
+      <action name="ShowMenu" menu="root-menu"/>
+    </keybind>
+    <!-- Alt+Tab: cycle windows -->
+    <keybind key="A-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <default/>
+    <context name="Root">
+      <mousebind action="Press" button="Right">
+        <action name="ShowMenu" menu="root-menu"/>
+      </mousebind>
+      <mousebind action="Press" button="Middle">
+        <action name="ShowMenu" menu="root-menu"/>
+      </mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind action="DoubleClick" button="Left">
+        <action name="ToggleMaximize"/>
+      </mousebind>
+    </context>
+  </mouse>
+
+</labwc_config>

@@ -1,0 +1,14 @@
+# labwc environment variables
+# These are set before the compositor starts and inherited by all clients.
+
+# Use software rendering if no GPU driver available (fallback)
+# LIBGL_ALWAYS_SOFTWARE=1
+
+# Force Wayland for GTK apps
+GDK_BACKEND=wayland
+
+# Force Wayland for Qt apps
+QT_QPA_PLATFORM=wayland
+
+# Wayland-native cog
+COG_PLATFORM_WL_VIEW_FULLSCREEN=0

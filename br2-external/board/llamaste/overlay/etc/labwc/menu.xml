@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!--
+  labwc root-menu for Llamaste desktop mode.
+  Right-click on the desktop to open.
+-->
+<openbox_menu>
+  <menu id="root-menu" label="Llamaste">
+
+    <item label="Open Llamaste">
+      <action name="Execute" command="cog http://localhost"/>
+    </item>
+
+    <separator/>
+
+    <item label="Reload Config">
+      <action name="Reconfigure"/>
+    </item>
+
+    <item label="Exit Desktop">
+      <action name="Exit"/>
+    </item>
+
+  </menu>
+</openbox_menu>

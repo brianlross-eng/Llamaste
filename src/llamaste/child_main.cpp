@@ -1834,93 +1834,67 @@ int child_main(const SupervisorConfig& config) {
     });
     session_expiry_thread.detach();
 
-    // --- Desktop mode: launch Wayland kiosk compositor ---
+    // --- Desktop mode: launch labwc stacking Wayland compositor ---
+    //
+    // labwc is a wlroots-based stacking WM (like Openbox for Wayland).
+    // Config in /etc/labwc/: rc.xml (keybindings/theme), menu.xml (right-click),
+    // autostart (opens cog browser after HTTP server is ready).
+    //
+    // Desktop keybindings (see /etc/labwc/rc.xml):
+    //   Super+B        — open Llamaste web UI (cog http://localhost)
+    //   Super+Q/Alt+F4 — close focused window
+    //   Super+F        — toggle fullscreen
+    //   Super+D        — toggle maximize
+    //   Alt+Tab        — cycle windows
+    //   Right-click    — root menu (open browser, exit desktop)
 #ifndef _WIN32
     if (g_boot_mode == "desktop") {
-        fprintf(stderr, "[child] Desktop mode: will launch compositor after HTTP server starts\n");
+        fprintf(stderr, "[child] Desktop mode: launching labwc compositor\n");
 
-        // Set up Wayland environment
+        // Wayland runtime dir (required by wlroots)
         mkdir("/run/user", 0755);
         mkdir("/run/user/0", 0700);
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
-        // Allow cage to start even without physical input devices (QEMU, VM)
+
+        // Allow labwc to start even without physical input devices (VM, QEMU)
         setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
 
-        // Launch compositor in a thread — polls for HTTP readiness first
+        // Point XDG config to /etc so labwc reads /etc/labwc/rc.xml etc.
+        setenv("XDG_CONFIG_DIRS", "/etc", 1);
+        setenv("XDG_CONFIG_HOME", "/etc", 1);
+
+        // PATH for autostart script and child processes
+        setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
+
+        // Force Wayland backend for GTK/Qt apps launched from autostart
+        setenv("GDK_BACKEND", "wayland", 1);
+        setenv("QT_QPA_PLATFORM", "wayland", 1);
+
         std::thread([]() {
-            // Poll for HTTP server to be listening (up to 15 seconds)
-            bool ready = false;
-            for (int i = 0; i < 75 && g_running; i++) {
-                int sock = socket(AF_INET, SOCK_STREAM, 0);
-                if (sock >= 0) {
-                    struct sockaddr_in addr = {};
-                    addr.sin_family = AF_INET;
-                    addr.sin_port = htons(80);
-                    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                        close(sock);
-                        ready = true;
-                        break;
-                    }
-                    close(sock);
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            }
-            if (!ready) {
-                fprintf(stderr, "[child] Compositor: HTTP server not ready after 15s, launching anyway\n");
-            }
-
-            // Probe for available browser binary before forking
-            // cage is a single-window Wayland compositor that runs one client
-            // We need to find which browser client is available
-            const char* browser = nullptr;
-            if (access("/usr/bin/cog", X_OK) == 0) {
-                browser = "cog";
-            } else if (access("/usr/bin/midori", X_OK) == 0) {
-                browser = "midori";
-            } else if (access("/usr/bin/chromium", X_OK) == 0) {
-                browser = "chromium";
-            }
-
             pid_t pid = fork();
             if (pid == 0) {
-                // Set PATH for child processes (cage needs it to find browser)
-                setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
-
-                // Child: exec compositor with detected browser
-                // Use execl with full paths — PID 1 has no PATH
-                if (browser && access("/usr/bin/cage", X_OK) == 0) {
-                    if (strcmp(browser, "cog") == 0) {
-                        execl("/usr/bin/cage", "cage", "-s", "--",
-                              "/usr/bin/cog", "http://localhost", nullptr);
-                    } else if (strcmp(browser, "midori") == 0) {
-                        execl("/usr/bin/cage", "cage", "-s", "--",
-                              "/usr/bin/midori", "-e", "Fullscreen", "-a",
-                              "http://localhost", nullptr);
-                    } else if (strcmp(browser, "chromium") == 0) {
-                        execl("/usr/bin/cage", "cage", "-s", "--",
-                              "/usr/bin/chromium", "--no-sandbox", "--kiosk",
-                              "http://localhost", nullptr);
-                    }
+                // Child: exec labwc — it reads /etc/labwc/rc.xml and runs
+                // /etc/labwc/autostart which waits for HTTP then opens cog.
+                execl("/usr/bin/labwc", "labwc", nullptr);
+                // Fallback: cage kiosk if labwc not found
+                if (access("/usr/bin/cog", X_OK) == 0) {
+                    execl("/usr/bin/cage", "cage", "-s", "--",
+                          "/usr/bin/cog", "http://localhost", nullptr);
                 }
-                // Last resort: weston kiosk mode (no separate browser needed)
                 execl("/usr/bin/weston", "weston", "--shell=kiosk",
                       "--continue-without-input", nullptr);
-                // All options failed
                 fprintf(stderr, "[child] No compositor available (errno=%d: %s)\n",
                         errno, strerror(errno));
                 _exit(1);
             } else if (pid > 0) {
                 g_cage_pid.store(pid);
-                fprintf(stderr, "[child] Desktop compositor launched (pid %d, browser=%s)\n",
-                        pid, browser ? browser : "weston-kiosk");
-                // Wait for compositor to exit, log it
+                fprintf(stderr, "[child] labwc compositor launched (pid %d)\n", pid);
                 int status = 0;
                 waitpid(pid, &status, 0);
                 g_cage_pid.store(0);
-                fprintf(stderr, "[child] Desktop compositor exited (status %d)\n", status);
+                fprintf(stderr, "[child] labwc compositor exited (status %d)\n", status);
             } else {
-                fprintf(stderr, "[child] Failed to fork compositor: %s\n", strerror(errno));
+                fprintf(stderr, "[child] Failed to fork labwc: %s\n", strerror(errno));
             }
         }).detach();
     }

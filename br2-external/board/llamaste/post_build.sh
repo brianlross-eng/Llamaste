@@ -124,4 +124,12 @@ else
     echo "             Download with: wget https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-low.tar.bz2"
 fi
 
+# --- labwc desktop config ---
+# The overlay (br2-external/board/llamaste/overlay/) is applied by Buildroot
+# via BR2_ROOTFS_OVERLAY, but we also ensure permissions here.
+if [ -f "${TARGET_DIR}/etc/labwc/autostart" ]; then
+    chmod 755 "${TARGET_DIR}/etc/labwc/autostart"
+    echo "[post-build] labwc autostart marked executable"
+fi
+
 echo "[post-build] Target filesystem preparation complete"

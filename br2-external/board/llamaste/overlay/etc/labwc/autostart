@@ -1,0 +1,20 @@
+#!/bin/sh
+# labwc autostart — runs when the compositor starts
+
+# Set a solid background color (dark, Llamaste palette)
+# labwc 0.6+ supports background color natively in environment
+# We use a minimal approach: set root window color via wlr-randr or just rely on
+# the compositor's default black background.
+
+# Wait for the Llamaste HTTP server to become ready (max 30s)
+i=0
+while [ $i -lt 30 ]; do
+    if curl -s http://localhost/health > /dev/null 2>&1; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+# Launch Llamaste web UI in cog browser
+cog http://localhost &
