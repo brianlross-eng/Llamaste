@@ -1,22 +1,24 @@
-# Llamaste 1.0.000a -- Installation & User Guide
+# Llamaste 1.0.0 -- Installation & User Guide
 
-Llamaste is a bootable Linux operating system where the AI IS the operating system. A single binary handles everything above the kernel -- file management, system monitoring, scheduling, and help -- all through natural conversation in your web browser.
+Llamaste is a bootable Linux operating system where the AI IS the operating system. A single binary handles everything above the kernel -- file management, system monitoring, scheduling, WiFi, and help -- all through natural conversation in your web browser.
 
 ---
 
-## What's Included in 1.0.000a (Alpha)
+## What's Included in 1.0.0
 
 - **Real AI inference** -- Qwen2.5 models via llama.cpp. Download from the Dashboard with one click; model auto-selected by RAM tier
-- **MCP server** -- expose all 44 tools to Claude Desktop and other MCP clients via `http://llamaste.local/mcp`
+- **MCP server** -- expose all 62 tools to Claude Desktop and other MCP clients via `http://llamaste.local/mcp`
 - **mDNS auto-discovery** -- `http://llamaste.local` on your LAN; MCP clients can also discover via DNS-SD (`_mcp._tcp`)
-- **Voice I/O (desktop mode)** -- say "Llamaste, what time is it?" and hear a spoken response (whisper.cpp STT + Flite TTS)
+- **Voice I/O** -- whisper.cpp STT + Piper neural TTS (download models via `voice.download_tts`); always-listening wake-phrase pipeline in desktop mode
+- **WiFi manager** -- connect, scan, forget, signal bars, open network detection (wpa_supplicant control socket)
+- **Mesh clustering** -- multi-node distributed inference via llama.cpp RPC; mDNS peer discovery; automatic model upgrade when cluster expands
+- **A/B root partitions + OTA updates** -- Ed25519-signed update bundles; GRUB boot counter rollback; `update.*` tools
 - **Redesigned web UI** -- status bar, four tabs (Chat, Files, Dashboard, System), dark terminal theme
-- **Proactive notifications** -- startup toast, health alerts (RAM / disk / temperature / model not loaded)
+- **Proactive notifications** -- startup toast, health alerts (RAM / disk / temperature / model not loaded), cluster upgrade events
 - **Heartbeat scheduler** -- cron-style and interval tasks; live SSE notifications
 - **Desktop mode** -- fullscreen kiosk browser (Cage Wayland + Cog) on a locally attached display
-- **44 built-in tools** across 11 categories
+- **62 built-in tools** across 14 categories
 - **Device authentication** -- password-protected web UI and API, bcrypt hashing, session tokens
-- **A/B root partitions** -- reserved for future OTA updates
 
 ---
 
@@ -27,7 +29,7 @@ Llamaste is a bootable Linux operating system where the AI IS the operating syst
 | CPU       | x86-64 (any)      | x86-64 with AVX2     |
 | RAM       | 4 GB              | 8--16 GB             |
 | Disk      | 8 GB              | 32+ GB               |
-| Network   | Wired Ethernet    | Wired Ethernet       |
+| Network   | Wired or WiFi     | Wired Ethernet       |
 | Boot      | BIOS or UEFI      | UEFI                 |
 
 RAM determines which AI model Llamaste will load automatically:
@@ -39,7 +41,7 @@ RAM determines which AI model Llamaste will load automatically:
 | 16 GB  | Qwen2.5-14B     | 14 B       | Great   |
 | 32 GB  | Qwen2.5-32B     | 32 B       | Best    |
 
-WiFi is not supported. You need a wired Ethernet connection with a DHCP server on your network.
+Wired Ethernet is recommended for reliability. WiFi is supported via the built-in `wifi.*` tools (requires a wpa_supplicant-compatible adapter).
 
 ---
 
@@ -263,32 +265,38 @@ Toast notifications slide in from the top-right corner. A badge on the notificat
 | **No AI Model Loaded** | 60 seconds after boot if no model is present (repeats every 30 min) |
 | **High RAM / Disk / Temperature** | When usage exceeds threshold (RAM > 85%, Disk > 90%, Temp > 80 °C) |
 | **Scheduled task fired** | When a recurring task runs and produces output |
+| **Cluster model upgrade: downloading** | When a new peer joins and a larger model now fits the pooled cluster RAM |
+| **Model upgrade ready** | When the auto-downloaded model is on disk and ready to activate |
 
 ---
 
 ## Built-In Tools
 
-Llamaste includes 44 tools across 11 categories. The AI calls these automatically during conversation, or you can ask for specific operations.
+Llamaste includes 62 tools across 14 categories. The AI calls these automatically during conversation, or you can ask for specific operations.
 
 | Category      | Tools |
 |---------------|-------|
 | **fs.**       | list_directory, read_file, write_file, delete_file, disk_usage, search |
 | **process.**  | list, info |
-| **network.**  | interfaces, connections, dns_lookup, ping, set_ip_static, set_ip_dhcp |
+| **network.**  | interfaces, connections, dns_lookup, ping, set_ip, get_ip |
 | **system.**   | info, uptime, memory, temperature, shutdown, reboot |
 | **config.**   | get, set, list, reset |
 | **model.**    | list, info, current, recommended, search, files, download, usb_import |
 | **schedule.** | create, list, delete, update |
-| **auth.**     | set_password, get_status |
+| **auth.**     | change_password, get_api_key, set_session_timeout |
 | **audio.**    | status, transcribe, speak, config, download_model |
 | **install.**  | list_disks, install, progress |
+| **wifi.**     | status, scan, connect, disconnect, list, forget |
+| **cluster.**  | status, peers, reload, capacity, models |
+| **update.**   | status, check, install, rollback |
+| **voice.**    | list_tts, download_tts |
 Destructive operations (shutdown, reboot, delete_file, install.to_disk) require a confirmation flag to execute.
 
 ---
 
 ## Connecting Claude Desktop (MCP)
 
-Llamaste exposes all 44 tools to Claude Desktop and other MCP clients via the Model Context Protocol.
+Llamaste exposes all 62 tools to Claude Desktop and other MCP clients via the Model Context Protocol.
 
 ### Quick Setup
 
@@ -401,9 +409,9 @@ The root filesystem is **immutable** (compressed squashfs). The OS cannot be mod
 
 ### No network connection
 
-- Llamaste requires a **wired Ethernet** connection. WiFi is not supported.
-- Check that the cable is connected and your network has a DHCP server.
-- The kernel obtains an IP address via `ip=dhcp` at boot time. If DHCP fails, no IP is assigned.
+- Wired Ethernet is the most reliable option. Plug in a cable and ensure your network has a DHCP server.
+- WiFi is supported via the `wifi.*` tools. After boot, open the Chat tab and ask Llamaste to scan and connect to your network, or use the WiFi card in the System tab.
+- The kernel obtains an initial IP address via `ip=dhcp` at boot time using the first wired interface. If DHCP fails, no IP is assigned on the wired interface.
 
 ### Cannot find the web UI
 
@@ -475,14 +483,14 @@ For detailed build instructions, architecture documentation, and the API referen
 
 ---
 
-## Known Limitations (Alpha)
+## Known Limitations
 
-- **No WiFi**: Only wired Ethernet is supported. WiFi drivers are not included.
-- **Voice requires desktop mode**: The whisper + Flite voice pipeline only activates in desktop mode (boots into kiosk browser). Server mode (headless) has no voice to save RAM.
+- **WiFi adapter support**: WiFi works via wpa_supplicant with a compatible kernel driver. Not all USB WiFi adapters are included in the kernel build; wired Ethernet is more reliable.
+- **Voice requires desktop mode**: The whisper STT + Piper neural TTS voice pipeline only activates in desktop mode (kiosk browser on a local display). Server mode (headless) has no voice to save RAM.
 - **Single-user**: There are no multi-user accounts. One device password protects everything.
 - **No HTTPS**: The HTTP server does not support TLS. Do not expose it to the public internet without a reverse proxy.
 - **CPU inference only**: No GPU acceleration in this release. Inference speed scales with CPU cores and AVX2 support.
-- **No OTA updates yet**: A/B partitions are reserved; update mechanism is planned for Phase 4.
+- **OTA updates are Ed25519-signed**: The `update.install` tool validates a signed manifest before writing to the inactive partition. Self-built update bundles require generating a matching key pair.
 
 ---
 
