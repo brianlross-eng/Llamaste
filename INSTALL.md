@@ -472,12 +472,12 @@ make -j$(nproc)
 
 Output files appear in `/root/llamaste-build/output/images/`:
 
-| File                 | Description                    | Size    |
-|----------------------|--------------------------------|---------|
-| `llamaste.img`       | Raw disk image                 | ~360 MB |
-| `llamaste.iso`       | Bootable ISO with installer    | ~400 MB |
-| `bzImage`            | Linux kernel                   | ~5 MB   |
-| `rootfs.squashfs`    | Root filesystem                | ~6 MB   |
+| File                 | Description                    | Size     |
+|----------------------|--------------------------------|----------|
+| `llamaste.img`       | Raw disk image                 | ~611 MB  |
+| `llamaste.iso`       | Bootable ISO with installer    | ~1.2 GB  |
+| `bzImage`            | Linux kernel                   | ~10 MB   |
+| `rootfs.squashfs`    | Root filesystem                | ~170 MB  |
 
 For detailed build instructions, architecture documentation, and the API reference, see [DEVELOPER.md](DEVELOPER.md).
 
