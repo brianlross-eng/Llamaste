@@ -252,6 +252,10 @@
               <span class="label">Network</span>
               <span class="value" id="wifi-ssid">--</span>
             </div>
+            <div class="dash-row" id="wifi-signal-row" style="display:none">
+              <span class="label">Signal</span>
+              <span class="value" id="wifi-signal-val">--</span>
+            </div>
             <div class="dash-row" id="wifi-ip-row" style="display:none">
               <span class="label">IP</span>
               <span class="value" id="wifi-ip">--</span>
@@ -262,16 +266,22 @@
                 <input type="text" id="wifi-ssid-input" placeholder="MyNetwork"
                   style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
               </div>
-              <div style="margin-bottom:6px">
-                <label style="color:#aaa;font-size:0.85em">Password (leave empty for open)</label>
-                <input type="password" id="wifi-psk-input" placeholder=""
-                  style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+              <div id="wifi-psk-row" style="margin-bottom:6px">
+                <label style="color:#aaa;font-size:0.85em">Password</label>
+                <div style="position:relative;margin-top:2px">
+                  <input type="password" id="wifi-psk-input" placeholder=""
+                    style="width:100%;padding:6px 30px 6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;box-sizing:border-box">
+                  <button id="wifi-psk-toggle" type="button" title="Show/hide password"
+                    style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:#888;font-size:1em;padding:2px 4px;line-height:1">👁</button>
+                </div>
               </div>
+              <div id="wifi-open-notice" style="display:none;color:#7ec8a0;font-size:0.82em;margin-bottom:4px">Open network — no password required</div>
             </div>
             <div class="system-actions" style="margin-top:8px" id="wifi-actions">
               <button id="wifi-scan-btn" class="btn-sm">Scan</button>
               <button id="wifi-connect-btn" class="btn-sm" style="display:none">Connect</button>
               <button id="wifi-disconnect-btn" class="btn-sm" style="display:none">Disconnect</button>
+              <button id="wifi-forget-btn" class="btn-sm" style="display:none">Forget</button>
             </div>
             <div id="wifi-scan-results" style="margin-top:8px"></div>
             <p id="wifi-status-msg" class="text-muted" style="margin-top:6px"></p>

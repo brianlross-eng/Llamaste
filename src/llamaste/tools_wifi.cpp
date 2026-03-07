@@ -67,6 +67,7 @@ static std::string handle_wifi_scan(const std::string& /*args_json*/) {
         net["ssid"]       = n.ssid;
         net["bssid"]      = n.bssid;
         net["signal_dbm"] = n.signal_dbm;
+        net["freq_mhz"]   = n.freq_mhz;
         net["security"]   = n.security;
         net["saved"]      = n.saved;
         arr.push_back(net);

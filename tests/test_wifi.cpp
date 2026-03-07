@@ -101,6 +101,7 @@ static std::vector<WiFiNetwork> test_parse_scan_results(const std::string& raw) 
 
         WiFiNetwork n;
         n.bssid = p[0];
+        try { n.freq_mhz   = std::stoi(p[1]); } catch (...) {}
         try { n.signal_dbm = std::stoi(p[2]); } catch (...) {}
         auto& fl = p[3];
         if (fl.find("WPA2") != std::string::npos)      n.security = "WPA2-PSK";
@@ -164,6 +165,8 @@ static void test_parse_scan_results() {
     TEST("first ssid", nets[0].ssid == "HomeNetwork");
     TEST("first bssid", nets[0].bssid == "aa:bb:cc:dd:ee:ff");
     TEST("first signal", nets[0].signal_dbm == -65);
+    TEST("first freq_mhz 2.4GHz", nets[0].freq_mhz == 2437);
+    TEST("second freq_mhz 5GHz", nets[1].freq_mhz == 5180);
     TEST("first security WPA2", nets[0].security == "WPA2-PSK");
     TEST("second security WPA", nets[1].security == "WPA-PSK");
     TEST("third security OPEN", nets[2].security == "OPEN");

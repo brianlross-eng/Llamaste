@@ -276,10 +276,11 @@ WiFiStatus WiFiManager::status() {
         if (eq == std::string::npos) continue;
         std::string key = str_trim(line.substr(0, eq));
         std::string val = str_trim(line.substr(eq + 1));
-        if      (key == "wpa_state")   s.state   = val;
-        else if (key == "ssid")        s.ssid    = val;
-        else if (key == "bssid")       s.bssid   = val;
-        else if (key == "ip_address")  s.ip_addr = val;
+        if      (key == "wpa_state")    s.state   = val;
+        else if (key == "ssid")         s.ssid    = val;
+        else if (key == "bssid")        s.bssid   = val;
+        else if (key == "ip_address")   s.ip_addr = val;
+        else if (key == "signal_level") { try { s.signal_dbm = std::stoi(val); } catch (...) {} }
     }
     if (s.state.empty()) s.state = "UNKNOWN";
     if (s.ip_addr.empty() && s.state == "COMPLETED") s.ip_addr = get_ip_addr();
@@ -330,6 +331,7 @@ std::vector<WiFiNetwork> WiFiManager::parse_scan_results(const std::string& raw)
 
         WiFiNetwork net;
         net.bssid      = str_trim(p[0]);
+        try { net.freq_mhz   = std::stoi(str_trim(p[1])); } catch (...) {}
         try { net.signal_dbm = std::stoi(str_trim(p[2])); } catch (...) {}
         net.security   = classify_security(str_trim(p[3]));
         net.ssid       = str_trim(p[4]);

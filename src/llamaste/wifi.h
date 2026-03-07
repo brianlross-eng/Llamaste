@@ -17,6 +17,7 @@ struct WiFiNetwork {
     std::string ssid;
     std::string bssid;
     int signal_dbm = 0;       // e.g. -65 (0 = unknown)
+    int freq_mhz   = 0;       // e.g. 2437 (0 = unknown), from SCAN_RESULTS col 2
     std::string security;     // "WPA2-PSK", "WPA-PSK", "OPEN"
     int network_id = -1;      // wpa_supplicant network id (-1 = not saved)
     bool connected = false;

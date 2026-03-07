@@ -350,15 +350,50 @@
   }
 
   // --- WiFi card ---
-  var g_wifiConnected = false;
+  var g_wifiConnectedSsid  = '';
+  var g_wifiSavedSet       = {};   // ssid → true for saved networks
+  var g_wifiScanNetworks   = [];   // last scan result array
+  var g_wifiSelectedOpen   = false; // true when selected network has no password
+
+  // Map dBm signal level to 0-4 bar quality
+  function dbmToBars(dbm) {
+    if (!dbm || dbm >= 0) return { bars: 0, label: 'Unknown',   color: '#555' };
+    if (dbm >= -50)        return { bars: 4, label: 'Excellent', color: '#00e5a0' };
+    if (dbm >= -60)        return { bars: 3, label: 'Good',      color: '#7ec8a0' };
+    if (dbm >= -70)        return { bars: 2, label: 'Fair',      color: '#e5c800' };
+    if (dbm >= -80)        return { bars: 1, label: 'Weak',      color: '#e59300' };
+    return                        { bars: 0, label: 'Poor',      color: '#e54444' };
+  }
+
+  // Render signal bars as coloured Unicode block chars
+  function renderSignalBars(dbm) {
+    var q    = dbmToBars(dbm);
+    var segs = ['▂', '▄', '▆', '█'];
+    var out  = '';
+    for (var i = 0; i < 4; i++) {
+      var lit = i < q.bars;
+      out += '<span style="color:' + (lit ? q.color : '#333') + ';font-size:1em">' + segs[i] + '</span>';
+    }
+    return '<span title="' + (dbm || '?') + ' dBm — ' + q.label + '">' + out + '</span>';
+  }
+
+  // Small frequency band badge
+  function wifiFreqBadge(freq) {
+    if (!freq) return '';
+    var band = freq < 3000 ? '2.4G' : freq < 6000 ? '5G' : '6G';
+    return '<span style="font-size:0.72em;background:#1a3a5a;color:#7ec8a0;border-radius:3px;padding:1px 4px;margin-left:4px">' + band + '</span>';
+  }
 
   function renderWifiState(data) {
     var stateEl    = document.getElementById('wifi-state');
     var ssidRow    = document.getElementById('wifi-ssid-row');
     var ssidEl     = document.getElementById('wifi-ssid');
+    var sigRow     = document.getElementById('wifi-signal-row');
+    var sigVal     = document.getElementById('wifi-signal-val');
     var ipRow      = document.getElementById('wifi-ip-row');
     var ipEl       = document.getElementById('wifi-ip');
     var disconnBtn = document.getElementById('wifi-disconnect-btn');
+    var forgetBtn  = document.getElementById('wifi-forget-btn');
     var connBtn    = document.getElementById('wifi-connect-btn');
     var scanBtn    = document.getElementById('wifi-scan-btn');
     var form       = document.getElementById('wifi-connect-form');
@@ -372,36 +407,69 @@
     }
 
     var connected = !!(data.connected || data.state === 'COMPLETED');
-    g_wifiConnected = connected;
+    g_wifiConnectedSsid = connected ? (data.ssid || '') : '';
 
     if (connected) {
       stateEl.textContent = 'Connected';
       stateEl.style.color = '#00e5a0';
-      if (ssidRow) { ssidRow.style.display = ''; ssidEl.textContent = data.ssid || ''; }
-      if (ipRow)   { ipRow.style.display = '';   ipEl.textContent  = data.ip_addr || '--'; }
-      if (disconnBtn) disconnBtn.style.display = '';
-      if (connBtn)    connBtn.style.display = 'none';
-      if (form)       form.style.display = 'none';
+      if (ssidRow) {
+        ssidRow.style.display = '';
+        ssidEl.innerHTML = (data.ssid || '') + renderSignalBars(data.signal_dbm);
+      }
+      if (sigRow && sigVal && data.signal_dbm) {
+        var q = dbmToBars(data.signal_dbm);
+        sigVal.innerHTML = renderSignalBars(data.signal_dbm) +
+          ' <span style="color:' + q.color + ';font-size:0.85em">' + data.signal_dbm + ' dBm — ' + q.label + '</span>';
+        sigRow.style.display = '';
+      } else if (sigRow) {
+        sigRow.style.display = 'none';
+      }
+      if (ipRow)      { ipRow.style.display = ''; ipEl.textContent = data.ip_addr || '--'; }
+      if (disconnBtn)   disconnBtn.style.display = '';
+      if (forgetBtn)    forgetBtn.style.display = '';
+      if (connBtn)      connBtn.style.display = 'none';
+      if (form)         form.style.display = 'none';
     } else if (!data.daemon_running) {
       stateEl.textContent = 'Not available';
       stateEl.style.color = '#888';
+      if (ssidRow)  ssidRow.style.display  = 'none';
+      if (sigRow)   sigRow.style.display   = 'none';
+      if (ipRow)    ipRow.style.display    = 'none';
+      if (disconnBtn) disconnBtn.style.display = 'none';
+      if (forgetBtn)  forgetBtn.style.display  = 'none';
     } else {
       stateEl.textContent = data.state || 'Disconnected';
       stateEl.style.color = '#aaa';
-      if (ssidRow) ssidRow.style.display = 'none';
-      if (ipRow)   ipRow.style.display = 'none';
+      if (ssidRow)  ssidRow.style.display  = 'none';
+      if (sigRow)   sigRow.style.display   = 'none';
+      if (ipRow)    ipRow.style.display    = 'none';
       if (disconnBtn) disconnBtn.style.display = 'none';
+      if (forgetBtn)  forgetBtn.style.display  = 'none';
+    }
+
+    // Re-render scan results if any (saved/connected state may have changed)
+    if (g_wifiScanNetworks.length > 0) {
+      renderScanResults(g_wifiScanNetworks, g_wifiSavedSet, g_wifiConnectedSsid);
     }
   }
 
   function fetchWifiStatus() {
-    fetch('/llamaste/wifi/status', { credentials: 'include' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d) renderWifiState(d); })
-      .catch(function () {});
+    Promise.all([
+      fetch('/llamaste/wifi/status', { credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; }),
+      fetch('/llamaste/wifi/list',   { method: 'POST', credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; })
+    ]).then(function(results) {
+      var statusData = results[0];
+      var listData   = results[1];
+      // Build saved set from list
+      g_wifiSavedSet = {};
+      if (listData && listData.networks) {
+        listData.networks.forEach(function(n) { g_wifiSavedSet[n.ssid] = true; });
+      }
+      if (statusData) renderWifiState(statusData);
+    }).catch(function() {});
   }
 
-  function renderScanResults(networks) {
+  function renderScanResults(networks, savedSet, connectedSsid) {
     var container = document.getElementById('wifi-scan-results');
     var connBtn   = document.getElementById('wifi-connect-btn');
     var form      = document.getElementById('wifi-connect-form');
@@ -419,38 +487,69 @@
     if (connBtn) connBtn.style.display = '';
 
     var list = document.createElement('div');
-    list.style.maxHeight = '160px';
-    list.style.overflowY = 'auto';
-    list.style.marginBottom = '6px';
+    list.style.cssText = 'max-height:200px;overflow-y:auto;margin-bottom:6px;border-radius:4px';
     for (var i = 0; i < networks.length; i++) {
-      var net = networks[i];
+      var net      = networks[i];
+      var isConn   = (connectedSsid && net.ssid === connectedSsid);
+      var isSaved  = !!(savedSet && savedSet[net.ssid]);
+      var isOpen   = (net.security === 'OPEN');
+
       var row = document.createElement('div');
-      row.style.cssText = 'cursor:pointer;padding:4px 0;border-bottom:1px solid #1e2d3d';
-      var nameSpan = document.createElement('div');
-      nameSpan.className = 'value';
-      nameSpan.textContent = net.ssid;
-      nameSpan.style.fontSize = '0.9em';
-      var metaSpan = document.createElement('div');
-      metaSpan.className = 'text-muted';
-      metaSpan.style.fontSize = '0.75em';
-      metaSpan.textContent = (net.security || 'OPEN') + '   ' + (net.signal_dbm || 0) + ' dBm';
-      row.appendChild(nameSpan);
-      row.appendChild(metaSpan);
-      (function (ssid) {
+      row.style.cssText = 'cursor:pointer;padding:6px 8px;border-bottom:1px solid #1e2d3d;border-radius:3px;' +
+        (isConn ? 'background:#0d2a1f;' : 'background:transparent;');
+
+      // Top line: lock/open icon + SSID + freq badge + connected tick
+      var topLine = document.createElement('div');
+      topLine.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:0.9em';
+      topLine.innerHTML =
+        '<span title="' + (isOpen ? 'Open network' : net.security) + '" style="font-size:0.85em">' + (isOpen ? '🔓' : '🔒') + '</span>' +
+        '<span style="color:' + (isConn ? '#00e5a0' : '#e0e0e0') + ';font-weight:' + (isConn ? '600' : 'normal') + '">' + net.ssid + '</span>' +
+        wifiFreqBadge(net.freq_mhz) +
+        (isConn  ? '<span style="color:#00e5a0;margin-left:4px;font-size:0.8em">✓ connected</span>' : '') +
+        (isSaved && !isConn ? '<span style="color:#7ec8a0;margin-left:4px;font-size:0.75em;opacity:0.7">saved</span>' : '');
+
+      // Bottom line: signal bars + dBm + security label
+      var metaLine = document.createElement('div');
+      metaLine.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;font-size:0.75em;color:#888';
+      metaLine.innerHTML =
+        renderSignalBars(net.signal_dbm) +
+        '<span>' + (net.signal_dbm || '?') + ' dBm</span>' +
+        '<span style="opacity:0.6">' + (net.security || 'OPEN') + '</span>';
+
+      row.appendChild(topLine);
+      row.appendChild(metaLine);
+
+      (function (ssid, open) {
         row.addEventListener('click', function () {
-          var inp = document.getElementById('wifi-ssid-input');
-          if (inp) { inp.value = ssid; inp.focus(); }
+          // Highlight selected row
+          var rows = list.querySelectorAll('[data-wifi-row]');
+          for (var j = 0; j < rows.length; j++) rows[j].style.background = 'transparent';
+          row.style.background = '#0d2840';
+
+          var inp       = document.getElementById('wifi-ssid-input');
+          var pskRow    = document.getElementById('wifi-psk-row');
+          var openNote  = document.getElementById('wifi-open-notice');
+          var pskInp    = document.getElementById('wifi-psk-input');
+          if (inp) { inp.value = ssid; }
+          g_wifiSelectedOpen = open;
+          if (pskRow)   pskRow.style.display   = open ? 'none' : '';
+          if (openNote) openNote.style.display  = open ? ''     : 'none';
+          if (pskInp && !open) { pskInp.value = ''; pskInp.focus(); }
         });
-      })(net.ssid);
+      })(net.ssid, isOpen);
+
+      row.setAttribute('data-wifi-row', '1');
       list.appendChild(row);
     }
     container.appendChild(list);
   }
 
-  var wifiScanBtn = document.getElementById('wifi-scan-btn');
-  var wifiConnBtn = document.getElementById('wifi-connect-btn');
-  var wifiDiscBtn = document.getElementById('wifi-disconnect-btn');
-  var wifiMsg     = document.getElementById('wifi-status-msg');
+  var wifiScanBtn   = document.getElementById('wifi-scan-btn');
+  var wifiConnBtn   = document.getElementById('wifi-connect-btn');
+  var wifiDiscBtn   = document.getElementById('wifi-disconnect-btn');
+  var wifiForgetBtn = document.getElementById('wifi-forget-btn');
+  var wifiPskToggle = document.getElementById('wifi-psk-toggle');
+  var wifiMsg       = document.getElementById('wifi-status-msg');
 
   function setWifiMsg(txt, isErr) {
     if (!wifiMsg) return;
@@ -473,7 +572,8 @@
             setWifiMsg(d.error || 'Scan failed', true);
           } else {
             setWifiMsg(d.count + ' network(s) found', false);
-            renderScanResults(d.networks || []);
+            g_wifiScanNetworks = d.networks || [];
+            renderScanResults(g_wifiScanNetworks, g_wifiSavedSet, g_wifiConnectedSsid);
           }
         })
         .catch(function () {
@@ -488,8 +588,8 @@
     wifiConnBtn._wired = true;
     wifiConnBtn.addEventListener('click', function () {
       var ssid = (document.getElementById('wifi-ssid-input') || {}).value || '';
-      var psk  = (document.getElementById('wifi-psk-input')  || {}).value || '';
-      if (!ssid) { setWifiMsg('Enter an SSID', true); return; }
+      var psk  = g_wifiSelectedOpen ? '' : ((document.getElementById('wifi-psk-input') || {}).value || '');
+      if (!ssid) { setWifiMsg('Select or enter a network', true); return; }
       wifiConnBtn.disabled = true;
       wifiConnBtn.textContent = 'Connecting…';
       setWifiMsg('Connecting to ' + ssid + '…', false);
@@ -506,6 +606,9 @@
             setWifiMsg(d.error || 'Connection failed', true);
           } else {
             setWifiMsg('Connected! IP: ' + (d.ip_addr || '…'), false);
+            g_wifiScanNetworks = [];
+            var sc = document.getElementById('wifi-scan-results');
+            if (sc) while (sc.firstChild) sc.removeChild(sc.firstChild);
             fetchWifiStatus();
           }
         })
@@ -529,6 +632,38 @@
           fetchWifiStatus();
         })
         .catch(function () { wifiDiscBtn.disabled = false; });
+    });
+  }
+
+  if (wifiForgetBtn && !wifiForgetBtn._wired) {
+    wifiForgetBtn._wired = true;
+    wifiForgetBtn.addEventListener('click', function () {
+      var ssid = g_wifiConnectedSsid;
+      if (!ssid) { setWifiMsg('Not connected to a network', true); return; }
+      wifiForgetBtn.disabled = true;
+      setWifiMsg('Forgetting ' + ssid + '…', false);
+      fetch('/llamaste/wifi/forget', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid: ssid })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          wifiForgetBtn.disabled = false;
+          setWifiMsg(d.success ? ('Forgot ' + ssid) : (d.error || 'Failed'), !d.success);
+          if (d.success) fetchWifiStatus();
+        })
+        .catch(function () { wifiForgetBtn.disabled = false; });
+    });
+  }
+
+  if (wifiPskToggle && !wifiPskToggle._wired) {
+    wifiPskToggle._wired = true;
+    wifiPskToggle.addEventListener('click', function () {
+      var inp = document.getElementById('wifi-psk-input');
+      if (!inp) return;
+      inp.type = (inp.type === 'password') ? 'text' : 'password';
+      wifiPskToggle.textContent = (inp.type === 'password') ? '👁' : '🙈';
     });
   }
 
