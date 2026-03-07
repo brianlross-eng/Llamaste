@@ -4,9 +4,10 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) + PUSW COMPLETE. 55 tools, 184 tests/12 suites.
-- **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI.
+- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) + WiFi + PUSW COMPLETE. 62 tools, 13 suites.
+- **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
+- **Recovery hardening**: Dead-peer crash recovery 239s → 10s (fresh monitor thread per topology spawn).
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
 - **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
@@ -109,15 +110,14 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **WiFi support** — Wireless networking (wpa_supplicant/iwd, scan/connect tools)
-2. **Clean downloadable ISO** — Polished ISO image ready for end-user download and install
-3. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
-4. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+1. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
+2. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+3. **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (VirtualBox host-only doesn't forward multicast)
 
 ### Backlog
-- **More TTS voices** — Expand Piper voice table (more accents, quality levels)
 - **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
-- **Model auto-download on cluster formation** — When cluster has enough pooled RAM for larger model, auto-download it
+- **More TTS voices** — Additional locales (en_SC, en_IN, etc.) if needed
+- **Model auto-download on cluster formation** — Already implemented; test on real hardware
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
