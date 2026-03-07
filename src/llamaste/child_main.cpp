@@ -1095,48 +1095,52 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline — TTS in all modes, full STT+listen in desktop only
+    // Initialize voice pipeline — TTS in server/desktop modes, SKIP in live (installer).
+    // Live mode has no espeak-ng data dir or TTS models; the installer doesn't need voice.
     VoicePipeline voice_pipeline;
     {
         extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
 #ifndef _WIN32
-        VoiceConfig vcfg;
-
-        if (voice_pipeline.init(vcfg)) {
-            g_voice = &voice_pipeline;
-            fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
-                    voice_pipeline.tts_engine_name().c_str());
-
-            // Desktop mode: enable always-listening (ALSA capture + VAD)
-            if (g_boot_mode == "desktop" &&
-                access(vcfg.whisper_model.c_str(), R_OK) == 0) {
-                // Wire command callback: voice commands go through the agent loop
-                voice_pipeline.set_command_callback([&](const std::string& command) {
-                    fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
-
-                    ConversationState conv;
-                    conv.system_prompt = g_system_prompt;
-                    conv.add_user_message(command);
-                    std::string response = agent_turn(conv, g_tools, g_inference_fn);
-
-                    fprintf(stderr, "[voice] Agent response: %.80s%s\n",
-                            response.c_str(),
-                            response.size() > 80 ? "..." : "");
-
-                    // Speak the response via TTS
-                    if (!response.empty()) {
-                        voice_pipeline.speak(response);
-                    }
-                });
-
-                // Start the always-listening thread (ALSA capture + VAD)
-                voice_pipeline.start();
-            } else {
-                fprintf(stderr, "[child] Server mode: TTS available via API, STT disabled\n");
-            }
+        if (g_boot_mode == "live") {
+            fprintf(stderr, "[child] Live mode: voice pipeline disabled (no TTS needed)\n");
         } else {
-            fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
-                    voice_pipeline.last_error().c_str());
+            VoiceConfig vcfg;
+            if (voice_pipeline.init(vcfg)) {
+                g_voice = &voice_pipeline;
+                fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
+                        voice_pipeline.tts_engine_name().c_str());
+
+                // Desktop mode: enable always-listening (ALSA capture + VAD)
+                if (g_boot_mode == "desktop" &&
+                    access(vcfg.whisper_model.c_str(), R_OK) == 0) {
+                    // Wire command callback: voice commands go through the agent loop
+                    voice_pipeline.set_command_callback([&](const std::string& command) {
+                        fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
+
+                        ConversationState conv;
+                        conv.system_prompt = g_system_prompt;
+                        conv.add_user_message(command);
+                        std::string response = agent_turn(conv, g_tools, g_inference_fn);
+
+                        fprintf(stderr, "[voice] Agent response: %.80s%s\n",
+                                response.c_str(),
+                                response.size() > 80 ? "..." : "");
+
+                        // Speak the response via TTS
+                        if (!response.empty()) {
+                            voice_pipeline.speak(response);
+                        }
+                    });
+
+                    // Start the always-listening thread (ALSA capture + VAD)
+                    voice_pipeline.start();
+                } else {
+                    fprintf(stderr, "[child] Server mode: TTS available via API, STT disabled\n");
+                }
+            } else {
+                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
+                        voice_pipeline.last_error().c_str());
+            }
         }
 #endif
     }

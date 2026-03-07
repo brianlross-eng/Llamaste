@@ -276,47 +276,48 @@ struct TtsVoiceInfo {
     int sample_rate;        // Output sample rate
     const char* quality;    // x-low, low, medium, high
     const char* gender;     // male, female
+    const char* locale;     // BCP-47 locale (en_US, en_GB, ...)
 };
 
 static const TtsVoiceInfo TTS_VOICES[] = {
     // ── American English (en_US) ──
     {"amy-low",       "en_US-amy-low.onnx",
      "csukuangfj/vits-piper-en_US-amy-low",
-     63, 16000, "low", "female"},
+     63, 16000, "low", "female", "en_US"},
     {"lessac-medium", "en_US-lessac-medium.onnx",
      "csukuangfj/vits-piper-en_US-lessac-medium",
-     63, 22050, "medium", "female"},
+     63, 22050, "medium", "female", "en_US"},
     {"lessac-high",   "en_US-lessac-high.onnx",
      "csukuangfj/vits-piper-en_US-lessac-high",
-     114, 22050, "high", "female"},
+     114, 22050, "high", "female", "en_US"},
     {"ryan-low",      "en_US-ryan-low.onnx",
      "csukuangfj/vits-piper-en_US-ryan-low",
-     63, 16000, "low", "male"},
+     63, 16000, "low", "male", "en_US"},
     {"ryan-high",     "en_US-ryan-high.onnx",
      "csukuangfj/vits-piper-en_US-ryan-high",
-     121, 22050, "high", "male"},
+     121, 22050, "high", "male", "en_US"},
     {"danny-low",     "en_US-danny-low.onnx",
      "csukuangfj/vits-piper-en_US-danny-low",
-     63, 16000, "low", "male"},
+     63, 16000, "low", "male", "en_US"},
     {"hfc_female-medium", "en_US-hfc_female-medium.onnx",
      "csukuangfj/vits-piper-en_US-hfc_female-medium",
-     63, 22050, "medium", "female"},
+     63, 22050, "medium", "female", "en_US"},
     // ── British English (en_GB) ──
     {"alba-medium",   "en_GB-alba-medium.onnx",
      "csukuangfj/vits-piper-en_GB-alba-medium",
-     63, 22050, "medium", "female"},
+     63, 22050, "medium", "female", "en_GB"},
     {"cori-high",     "en_GB-cori-high.onnx",
      "csukuangfj/vits-piper-en_GB-cori-high",
-     114, 22050, "high", "female"},
+     114, 22050, "high", "female", "en_GB"},
     {"alan-low",      "en_GB-alan-low.onnx",
      "csukuangfj/vits-piper-en_GB-alan-low",
-     63, 16000, "low", "male"},
+     63, 16000, "low", "male", "en_GB"},
     {"northern_english_male-medium", "en_GB-northern_english_male-medium.onnx",
      "csukuangfj/vits-piper-en_GB-northern_english_male-medium",
-     63, 22050, "medium", "male"},
+     63, 22050, "medium", "male", "en_GB"},
     {"southern_english_female-low", "en_GB-southern_english_female-low.onnx",
      "csukuangfj/vits-piper-en_GB-southern_english_female-low",
-     63, 16000, "low", "female"},
+     63, 16000, "low", "female", "en_GB"},
 };
 static const int TTS_VOICE_COUNT = sizeof(TTS_VOICES) / sizeof(TTS_VOICES[0]);
 
@@ -493,6 +494,7 @@ static std::string handle_voice_list_tts(const std::string& /*args_json*/) {
         json v;
         v["name"] = TTS_VOICES[i].name;
         v["onnx_file"] = TTS_VOICES[i].onnx_file;
+        v["locale"] = TTS_VOICES[i].locale;
         v["size_mb"] = TTS_VOICES[i].approx_mb;
         v["sample_rate"] = TTS_VOICES[i].sample_rate;
         v["quality"] = TTS_VOICES[i].quality;
@@ -632,14 +634,15 @@ void register_audio_tools(ToolRegistry& reg) {
         .name = "voice.download_tts",
         .description = "Download a Piper neural TTS voice model from HuggingFace. "
                        "Downloads ONNX model + tokens to /data/models/tts/. "
-                       "Default voice: amy-low (16MB, female). "
+                       "Default voice: amy-low (63MB, female, en_US). "
+                       "Use voice.list_tts to see all 12 available voices (en_US and en_GB). "
                        "Restart voice pipeline after download to activate.",
         .parameters = R"json({
             "type": "object",
             "properties": {
                 "voice": {
                     "type": "string",
-                    "description": "Voice name: amy-low (16MB, female) or lessac-medium (63MB, male)",
+                    "description": "Voice name (e.g. amy-low, ryan-high, alan-low, cori-high). Use voice.list_tts to see all options.",
                     "default": "amy-low"
                 }
             }
