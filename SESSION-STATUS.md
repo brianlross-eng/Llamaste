@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-08 (WiFi support complete — 7 tools, web UI card, 13 test suites)
+**Last updated**: 2026-03-09 (WiFi UI polish, cluster model auto-download, v1.0.0 ISO built)
 
 ---
 
@@ -89,7 +89,40 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-08) -- WiFi Support (Phase 6)
+## Latest Session (2026-03-09) -- WiFi UI Polish, Cluster Auto-Download, ISO
+
+### Phase D: WiFi UI Polish — COMPLETE (b390407)
+- `wifi.h`: Added `freq_mhz` field to `WiFiNetwork`
+- `wifi.cpp`: Parse `freq_mhz` from SCAN_RESULTS col 1; parse `signal_level` from STATUS
+- `tools_wifi.cpp`: Added `freq_mhz` to scan JSON
+- `index.html`: WiFi card rework — signal row, psk-toggle eye button, open-notice div, forget button
+- `system.js`: New globals (g_wifiConnectedSsid, g_wifiSavedSet, g_wifiScanNetworks, g_wifiSelectedOpen),
+  `dbmToBars()`, `renderSignalBars()` (colored ▂▄▆█), `wifiFreqBadge()` (2.4G/5G/6G),
+  parallel fetch wifi.status + wifi.list, rich scan rows with lock/open icon + signal bars + saved badge + connected highlight
+- `test_wifi.cpp`: freq_mhz assertions + stub fix
+- 39 WiFi tests, 13 suites all pass. Deployed to VDI.
+
+### Phase E: Cluster Model Auto-Download — COMPLETE (3090fc2)
+- `tools_model_download.h`: NEW — exposes ModelInfo, get_model_table(), recommend_model(), build_hf_download_url()
+- `tools_model_download.cpp`: Added #include of new header; removed duplicate struct
+- `child_main.cpp`: topology_cb_ extended — when upgrade_available and gguf not on disk,
+  look up repo_id from model table, start background libcurl download with resume support,
+  push SSE notifications ("downloading..." → "ready"), call g_cluster.run_election() on success
+- `g_upgrade_downloading` atomic<bool> guards against concurrent downloads
+- 13 suites all pass. Deployed to VDI.
+
+### Phase A: Clean Downloadable ISO — COMPLETE (5d9d258)
+- `INSTALL.md`: Full v1.0.0 update — 62 tools / 14 categories, WiFi, mesh clustering,
+  A/B OTA updates, Piper neural TTS, cluster auto-upgrade; removed stale limitations;
+  updated tool table with wifi.*, cluster.*, update.*, voice.*; updated artifact sizes
+- `build-iso.sh`: No changes needed (already complete)
+- ISO built: `/root/llamaste-build/output/images/llamaste.iso` — 1.2 GB
+- Artifacts: llamaste.img 611 MB, llamaste.iso 1.2 GB, bzImage 10 MB, squashfs 170 MB
+- All pushed to GitHub
+
+---
+
+## Previous Session (2026-03-08) -- WiFi Support (Phase 6)
 
 ### WiFi Implementation Complete
 
