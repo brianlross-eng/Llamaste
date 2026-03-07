@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-10 (AVX2 SIMD enabled: ~500x inference speedup, ~14 tok/s on 1.5B model)
+**Last updated**: 2026-03-10 (Live ISO squashfs pivot + desktop mode + hardware fixes; new 1396MB ISO built and flashed)
 
 ---
 
@@ -89,7 +89,64 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-09 cont. 5) -- Server Speed Optimizations
+## Latest Session (2026-03-10 cont.) -- Live ISO Squashfs Pivot + Desktop Mode
+
+### Phase: Live ISO / Hardware Boot — COMPLETE (6b3ca50..789fb34)
+
+All work targeted making the ISO actually boot correctly on real hardware with live mode and desktop mode.
+
+| Component | Status |
+|-----------|--------|
+| `do_live_pivot()` in init.cpp — squashfs overlay pivot | DONE (6b3ca50) |
+| `CONFIG_BLK_DEV_LOOP=y` + `CONFIG_OVERLAY_FS=y` | DONE (6b3ca50) |
+| Desktop GRUB entries (`llamaste.mode=desktop`) | DONE (6b3ca50) |
+| `WLR_NO_HARDWARE_CURSORS=1` + `WLR_RENDERER=pixman` | DONE (4ad950c) |
+| grub-live.cfg: `/dev/sdb` default, `/dev/sdc` fallback | DONE (4455132) |
+| grub-live.cfg: `default=1` (desktop), `timeout=30`, numbered labels | DONE (789fb34) |
+| Full ISO rebuild: 1396.4MB | DONE |
+| ISO copied to `D:\Llamaste\llamaste.iso` and flashed | In progress (user flashing) |
+
+**Key technical details**:
+- `do_live_pivot()` guard: `/boot/bzImage` exists on ISO root, NOT in rootfs.squashfs → no infinite re-exec
+- Loop device: `LOOP_CTL_GET_FREE` ioctl on `/dev/loop-control`; `LOOP_SET_FD` to attach squashfs
+- `MS_PRIVATE | MS_REC` required before `MS_MOVE` (kernel rejects MS_MOVE on shared mounts)
+- `WLR_NO_HARDWARE_CURSORS=1`: simpledrm (EFI framebuffer DRM) has no HW cursor planes → wlroots abort without this
+- `WLR_RENDERER=pixman`: software renderer when no GPU driver active; overridable from autostart
+- Hardware: Intel Core Ultra 9 275HX — SD card reader = `/dev/sda`, USB flash = `/dev/sdb`
+- Build-iso.sh reads grub-live.cfg from BOARD_DIR in VM's git checkout → must `git pull` before rebuild
+- WiFi (wpa_supplicant) requires squashfs pivot — binary not in ISO root skeleton
+
+**Hardware test pending**: User flashing new ISO. At start of next session, verify:
+1. New numbered GRUB menu (30s desktop-mode default)
+2. Serial: `[init] Live pivot: pivoting to full squashfs system` + `[init] Live pivot: complete — re-executing`
+3. Desktop: labwc compositor starts, cog browser opens to http://localhost
+4. WiFi: `[child] wpa_supplicant spawned` in serial output
+
+---
+
+## Previous Session (2026-03-10) -- AVX2 SIMD Inference Speedup
+
+### Enable AVX2 SIMD in llama-server — COMPLETE (a520b90)
+
+Changed `GGML_NATIVE=OFF` → `GGML_NATIVE=ON` in `br2-external/package/llama-server/llama-server.mk`.
+
+**Why this works**: Build machine is WSL2 on Intel Core Ultra 9 275HX (Meteor Lake, AVX2/AVX512).
+VirtualBox passes through host CPU flags to guests, so NATIVE builds work correctly in VM.
+
+**Results** (1.5B Q4_K_M Qwen2.5, 2 vCPUs in VBox):
+- Before (scalar): ~36 sec/token (~0.028 tok/s)
+- After (AVX2): **~14 tok/s** (~1.8-3s for short responses)
+- Speedup: **~500x** on decode, ~19x on full request including prompt
+
+**Verified on VDI** (Llamaste2):
+- `system.info` → `Intel Core Ultra 9 275HX` ✓
+- `v1/chat/completions` short response: 12.9s, 7 tokens
+- `v1/chat/completions` count-to-20: 3.7s, 51 decode tokens (KV cache warm) = ~14 tok/s
+- Inference is now genuinely interactive and fast enough for normal use
+
+---
+
+## Previous Session (2026-03-09 cont. 5) -- Server Speed Optimizations
 
 ### Phase 1 (trivial/low effort) — COMPLETE (e226555, e18731e)
 
@@ -119,29 +176,7 @@ Next: grammar-constrained tool JSON → HTTP keep-alive → semantic cache.
 
 ---
 
-## Latest Session (2026-03-10) -- AVX2 SIMD Inference Speedup
-
-### Enable AVX2 SIMD in llama-server — COMPLETE (a520b90)
-
-Changed `GGML_NATIVE=OFF` → `GGML_NATIVE=ON` in `br2-external/package/llama-server/llama-server.mk`.
-
-**Why this works**: Build machine is WSL2 on Intel Core Ultra 9 275HX (Meteor Lake, AVX2/AVX512).
-VirtualBox passes through host CPU flags to guest, so NATIVE code runs correctly in VM.
-
-**Results** (1.5B Q4_K_M Qwen2.5, 2 vCPUs in VBox):
-- Before (scalar): ~36 sec/token (~0.028 tok/s)
-- After (AVX2): **~14 tok/s** (~1.8-3s for short responses)
-- Speedup: **~500x** on decode, ~19x on full request including prompt
-
-**Verified on VDI** (Llamaste2):
-- `system.info` → `Intel Core Ultra 9 275HX` ✓
-- `v1/chat/completions` short response: 12.9s, 7 tokens
-- `v1/chat/completions` count-to-20: 3.7s, 51 decode tokens (KV cache warm) = ~14 tok/s
-- Inference is now genuinely interactive and fast enough for normal use
-
----
-
-## Latest Session (2026-03-09 cont. 4) -- TTS Voice Expansion
+## Previous Session (2026-03-09 cont. 4) -- TTS Voice Expansion
 
 ### TTS Voice Table Expansion — COMPLETE (2902ff5)
 
@@ -511,10 +546,11 @@ crashes (SIGABRT/etc), falls back to espeak-ng. Prevents crash-restart loop.
 ## Next Steps
 
 ### Immediate
-1. **Enable SIMD for production** -- Enable AVX2 (`-DGGML_AVX2=ON`) in llama-server Buildroot package for ~5-10x inference speedup on real hardware. Currently GGML_NATIVE=OFF (scalar only) → 250s/response on VM. Test if VirtualBox guest supports AVX2 CPUID bits.
-2. **Real hardware test** -- Boot and validate on physical x86_64 machine (SIMD will make huge difference here)
-3. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two instances on same subnet
-4. **More TTS voices** -- Add additional Piper voices (e.g. additional locales)
+1. **Verify new ISO on real hardware** — Boot 1396MB USB, check serial output for live pivot messages, WiFi, labwc desktop
+2. **Install to NVMe** — Boot live → install → test inference speed on bare metal (GGML_NATIVE=ON + real CPU, no VirtualBox overhead)
+3. **Public GitHub repo** — Set up and publish Llamaste publicly
+4. **Grammar-constrained tool JSON** — Add JSON schema for tool dispatch (speed + reliability)
+5. **Real two-VM mDNS test** — Validate auto-discovery on real LAN (needs 2 physical machines or proper VMs)
 
 ### Watchdog Fix (DONE, 2026-03-07, commit 2c16742)
 - **Root cause**: softdog (60s timeout) fired during slow CPU-only inference (~250s/response)

@@ -4,7 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) + WiFi + PUSW COMPLETE. 62 tools, 13 suites.
+- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. 1396MB ISO built and flashed. 62 tools, 13 suites.
+- **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
 - **Recovery hardening**: Dead-peer crash recovery 239s → 10s (fresh monitor thread per topology spawn).
@@ -63,7 +64,14 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Declaration order in child_main.cpp**: globals must appear before functions that use them
 - **Linux includes**: `mount()`/`umount()` need `#include <sys/mount.h>`, guard with `#ifndef _WIN32`
 - **GGML_NATIVE=ON**: Build llama.cpp with `-march=native` for AVX2/AVX512 on the build CPU. VirtualBox passes through host CPU flags to guests, so NATIVE builds work correctly in VMs. Result: ~500x inference speedup (scalar 0.028 tok/s → AVX2 ~14 tok/s on 1.5B Q4_K_M). Set in `llama-server.mk`.
-- **ISO build**: `scripts/build-iso.sh /root/llamaste-build` — needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`
+- **ISO build**: `scripts/build-iso.sh /root/llamaste-build` — needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`. Must `git pull` in WSL2 first — BOARD_DIR is resolved relative to script path, so grub-live.cfg is read from the VM's git checkout, not build output.
+- **Squashfs live pivot**: `do_live_pivot()` in init.cpp uses loop device + overlayfs. Guard: `/boot/bzImage` present on ISO root but NOT in rootfs.squashfs → no infinite re-exec after pivot + re-execv. Needs `CONFIG_BLK_DEV_LOOP=y` + `CONFIG_OVERLAY_FS=y` in linux.config.
+- **Loop device API**: `LOOP_CTL_GET_FREE` ioctl on `/dev/loop-control` to get free loop number; `LOOP_SET_FD` ioctl on `/dev/loopN` to attach file. Requires `#include <linux/loop.h>`.
+- **MS_PRIVATE | MS_REC before MS_MOVE**: Kernel rejects MS_MOVE on shared mounts. Must make root private (`mount(nullptr, "/", nullptr, MS_PRIVATE|MS_REC, nullptr)`) before `mount(".", "/", nullptr, MS_MOVE, nullptr)` in switch_root pivot.
+- **WLR_NO_HARDWARE_CURSORS=1**: Required for labwc/wlroots on simpledrm (EFI framebuffer DRM). simpledrm has no hardware cursor plane support — without this flag wlroots aborts during cursor setup.
+- **WLR_RENDERER=pixman**: Software renderer fallback for labwc when no GPU driver is active (simpledrm only). Set in child_main.cpp desktop env block; overridable from /etc/labwc/autostart.
+- **SD card reader device ordering**: On Intel Core Ultra 9 275HX, internal SD card reader uses USB mass storage protocol and enumerates as `/dev/sda`. USB flash drive pushed to `/dev/sdb`. GRUB live config must list `/dev/sdb` first.
+- **WiFi requires squashfs pivot**: wpa_supplicant lives at `/usr/sbin/wpa_supplicant` in the squashfs (full system), NOT in the ISO root skeleton. Without live pivot, `spawn_wpa_supplicant()` fails silently with ENOENT.
 - **QEMU E2E tests**: `scripts/qemu-boot-test.sh /root/llamaste-build/output/images/llamaste.img`
 - **EFI boot test**: `scripts/test-efi-boot.sh` (QEMU + OVMF)
 - **Install flow test**: `scripts/qemu-install-test.sh` (ISO boot → install → verify → reboot)
@@ -114,10 +122,11 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Enable SIMD (AVX2)**: Add `-DGGML_AVX2=ON` to llama-server Buildroot package for ~5-10x inference speedup. Check if VBox guest exposes AVX2.
-2. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (SIMD will work there)
+1. **Verify new ISO on real hardware** — Boot 1396MB USB, check serial for `[init] Live pivot:`, verify WiFi, labwc desktop
+2. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
 3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
-3. **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (VirtualBox host-only doesn't forward multicast)
+4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
+5. **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (needs 2 physical machines)
 
 ### Backlog
 - **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
