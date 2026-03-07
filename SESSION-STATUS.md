@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (ISO smoke test PASS, TTS locale field, cluster auto-download bugfixes E2E verified)
+**Last updated**: 2026-03-09 (Neural TTS E2E verified, multi-node cluster analysis verified, auto-download 3-bug fix)
 
 ---
 
@@ -86,6 +86,35 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 **Notable**: `parse_list_networks` hardened to handle empty flags field (trailing `\t` trimmed
 by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
+
+---
+
+## Latest Session (2026-03-09 cont. 2) -- Neural TTS E2E + Multi-Node Cluster Verified
+
+### Task 1: Neural TTS E2E — COMPLETE ✓
+
+- VM already had amy-low model on data partition (preserved from prior session)
+- `audio.status`: `tts_engine: "sherpa-onnx"`, `whisper_loaded: true` — sherpa-onnx active
+- Called `audio.speak` with `{"text": "Hello from Llamaste..."}` via `/llamaste/tool`
+- Result: `duration_seconds: 4.08`, `sample_rate: 16000`, `samples: 65280`, `tts_engine: "sherpa-onnx"` ✓
+- **Note**: `/llamaste/tool` endpoint expects params in `{"name": "...", "arguments": {...}}` format
+  (not top-level), confirmed from child_main.cpp line 1884: `if (body.contains("arguments"))`
+
+### Task 2: Multi-Node Cluster Analysis — COMPLETE ✓
+
+- Baseline: `node_count: 1`, `total_ram_mb: 3917`, `usable_ram_mb: 2741`, `recommended_gguf: "qwen2.5-1.5b..."`
+- Injected fake peer via `/llamaste/cluster/add-peer`:
+  `{ip: "10.0.2.16", hostname: "llamaste-2", ram_mb: 3000, cpu_cores: 2}`
+- Result: `role: coordinator`, `peer_count: 1` ✓
+- `cluster.capacity` with 2 nodes: `{node_count: 2, total_ram_mb: 6917, usable_ram_mb: 4841,
+  tensor_split: "1,1", total_cores: 4, upgrade_available: true}` ✓
+- All capacity pooling, tensor-split computation, and upgrade detection verified correct
+
+**Known limitation (RPC recovery)**: When injecting a fake peer, the topology callback restarts
+llama-server with `--rpc <fake_ip>:50052`. With no real peer, `wait_for_llama_server(120)` times
+out (120s). After peer expiry (90s), state returns to STANDALONE — but llama-server needs a
+clean reboot to restart without the RPC flag. Reboot restores `inference_ready: true` in ~31s.
+This is expected in VirtualBox NAT (no host-only network); real deployments use mDNS on LAN.
 
 ---
 
@@ -384,9 +413,9 @@ crashes (SIGABRT/etc), falls back to espeak-ng. Prevents crash-restart loop.
 ## Next Steps
 
 ### Immediate
-1. **End-to-end neural TTS test** -- Download amy-low model on VM, verify sherpa-onnx activates and speaks
-2. **Multi-node integration test** -- Test auto-offload with 2+ VMs on same network
-3. **More TTS voices** -- Add additional Piper voices to the voice table (e.g. British, other quality levels)
+1. **More TTS voices** -- Add additional Piper voices to the voice table (e.g. British, other quality levels)
+2. **Recovery hardening** -- After `wait_for_llama_server()` timeout, retry llama-server spawn without RPC peers (currently requires reboot to recover from a dead peer)
+3. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two physical/VM instances on same subnet (host-only adapter with promiscuous mode)
 
 ---
 
