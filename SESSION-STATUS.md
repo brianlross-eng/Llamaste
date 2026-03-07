@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (Neural TTS E2E verified, multi-node cluster analysis verified, auto-download 3-bug fix)
+**Last updated**: 2026-03-09 (Recovery hardening: dead-peer crash recovery 239s → 10s)
 
 ---
 
@@ -86,6 +86,32 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 **Notable**: `parse_list_networks` hardened to handle empty flags field (trailing `\t` trimmed
 by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
+
+---
+
+## Latest Session (2026-03-09 cont. 3) -- Recovery Hardening
+
+### llama-server Crash Recovery — COMPLETE (a64da58)
+
+**Problem**: After injecting a cluster peer, llama-server restarts with `--rpc <peer>:50052`.
+If the peer is dead or unreachable, llama-server eventually crashes (~95s). Recovery back to
+inference took **239 seconds** (required reboot in practice).
+
+**Root cause**: The original monitor thread (from boot) exits early with ECHILD when the
+topology callback steals its `waitpid()`. The new RPC-mode llama-server runs unmonitored —
+no one detects its crash, or detection is slow via the heartbeat.
+
+**Three fixes** (`child_main.cpp`):
+1. **Fresh monitor thread per spawn**: Topology callback now starts a new `llama_monitor_thread`
+   for every server it spawns (RPC or fallback solo). The monitor detects crashes in ~2s and
+   respawns solo immediately.
+2. **30s RPC health timeout** (was 120s): If RPC peers are dead and llama-server never passes
+   health, the fallback fires in 30s instead of 120s.
+3. **Heartbeat watchdog**: Every 30s, checks `kill(g_llama_pid, 0)` to detect zombied processes.
+   Clears g_model_loaded and triggers solo restart as a safety net if monitor exited.
+
+**Result**: Recovery from dead-peer cluster crash: **239s → 10s** ✓
+- Verified on VDI: fake peer injected → server ran 95s with RPC → crashed → back in 10s
 
 ---
 
@@ -414,8 +440,8 @@ crashes (SIGABRT/etc), falls back to espeak-ng. Prevents crash-restart loop.
 
 ### Immediate
 1. **More TTS voices** -- Add additional Piper voices to the voice table (e.g. British, other quality levels)
-2. **Recovery hardening** -- After `wait_for_llama_server()` timeout, retry llama-server spawn without RPC peers (currently requires reboot to recover from a dead peer)
-3. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two physical/VM instances on same subnet (host-only adapter with promiscuous mode)
+2. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two physical/VM instances on same subnet (host-only adapter with promiscuous mode)
+3. **Real hardware test** -- Boot and validate on a physical x86_64 machine
 
 ---
 
