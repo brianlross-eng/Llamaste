@@ -5,6 +5,7 @@
 // based on available RAM.
 
 #include "tools.h"
+#include "tools_model_download.h"
 #include "json.hpp"
 #include <string>
 #include <cstring>
@@ -36,16 +37,8 @@ static int statvfs(const char*, struct { uint64_t f_bavail; uint64_t f_frsize; }
 using json = nlohmann::json;
 
 // =========================================================================
-// Model table (shared with main.cpp select_model — single source of truth)
+// Model table (shared with child_main.cpp auto-upgrade — single source of truth)
 // =========================================================================
-
-struct ModelInfo {
-    const char* name;
-    const char* filename;
-    const char* repo_id;
-    int required_mb;     // Min RAM to run this model
-    int approx_size_mb;  // Approximate download size
-};
 
 static const ModelInfo MODEL_TABLE[] = {
     {"Qwen2.5-32B-Instruct",  "qwen2.5-32b-instruct-q4_k_m.gguf",
