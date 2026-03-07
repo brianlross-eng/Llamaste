@@ -294,8 +294,22 @@ extern int crypto_verify_32_tweet(const unsigned char *,const unsigned char *);
 #define crypto_verify_32_VERSION crypto_verify_32_tweet_VERSION
 #define crypto_verify_32_IMPLEMENTATION "crypto_verify/32/tweet"
 
-/* --- Detached signature verification (added for Llamaste) ---
- * Verifies an Ed25519 detached signature.
+/* --- Detached signature helpers (added for Llamaste) --- */
+
+/* Create an Ed25519 detached signature.
+ * sig: output, 64-byte signature
+ * msg: message bytes
+ * msg_len: length of message
+ * sk: 64-byte secret key
+ * Returns 0 on success, -1 on failure.
+ */
+extern int crypto_sign_ed25519_sign_detached(
+    unsigned char *sig,
+    const unsigned char *msg,
+    unsigned long long msg_len,
+    const unsigned char *sk);
+
+/* Verify an Ed25519 detached signature.
  * sig: 64-byte signature
  * msg: message bytes
  * msg_len: length of message

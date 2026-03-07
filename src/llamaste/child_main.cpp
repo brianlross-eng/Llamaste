@@ -2221,61 +2221,20 @@ int child_main(const SupervisorConfig& config) {
     // --- Update endpoints ---
     svr.Get("/llamaste/update/status", require_auth(
         [](const httplib::Request&, httplib::Response& res) {
-        json status;
-        status["version"] = LLAMASTE_VERSION;
-        status["active_slot"] = detect_current_slot();
-        status["inactive_slot"] = inactive_slot(detect_current_slot());
-        // Check if inactive slot has metadata
-        std::string inact = inactive_slot(detect_current_slot());
-        std::string meta_path = "/data/llamaste/slots/" + inact + ".json";
-        std::ifstream mf(meta_path);
-        if (mf.is_open()) {
-            try {
-                json meta = json::parse(mf);
-                status["inactive_version"] = meta.value("version", "");
-            } catch (...) {}
-        }
-        status["update_state"] = "idle";
-        res.set_content(status.dump(), "application/json");
+        std::string result = g_tools.dispatch("update.status", "{}");
+        res.set_content(result, "application/json");
     }));
 
     svr.Post("/llamaste/update/check", require_auth(
         [](const httplib::Request&, httplib::Response& res) {
-        json result;
-        result["current_version"] = LLAMASTE_VERSION;
-        result["available"] = false;
-        result["message"] = "Online update checking coming soon. Upload a .update file via the web UI.";
-        res.set_content(result.dump(), "application/json");
+        std::string result = g_tools.dispatch("update.check", "{}");
+        res.set_content(result, "application/json");
     }));
 
     svr.Post("/llamaste/update/rollback", require_auth(
         [](const httplib::Request&, httplib::Response& res) {
-        std::string grubenv_path = find_grubenv_path();
-        if (grubenv_path.empty()) {
-            json err;
-            err["error"] = "grubenv not found — cannot switch slot";
-            res.status = 500;
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
-        std::string current = detect_current_slot();
-        std::string new_slot = inactive_slot(current);
-        auto vars = grubenv_read(grubenv_path);
-        vars["active_slot"] = new_slot;
-        vars["boot_success"] = "0";
-        vars["boot_counter"] = "3";
-        if (grubenv_write(grubenv_path, vars)) {
-            json ok;
-            ok["success"] = true;
-            ok["new_slot"] = new_slot;
-            ok["message"] = "Switched to slot " + new_slot + ". Reboot to activate.";
-            res.set_content(ok.dump(), "application/json");
-        } else {
-            json err;
-            err["error"] = "Failed to write grubenv";
-            res.status = 500;
-            res.set_content(err.dump(), "application/json");
-        }
+        std::string result = g_tools.dispatch("update.rollback", "{}");
+        res.set_content(result, "application/json");
     }));
 
     // --- MCP server (Model Context Protocol, spec 2025-03-26) ---

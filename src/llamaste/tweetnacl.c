@@ -817,7 +817,25 @@ int crypto_sign_open(u8 *m,u64 *mlen,const u8 *sm,u64 n,const u8 *pk)
   return 0;
 }
 
-/* --- Detached signature verification wrapper (added for Llamaste) --- */
+/* --- Detached signature helpers (added for Llamaste) --- */
+
+int crypto_sign_ed25519_sign_detached(
+    unsigned char *sig,
+    const unsigned char *msg,
+    unsigned long long msg_len,
+    const unsigned char *sk)
+{
+  unsigned long long sm_len;
+  unsigned char *sm = (unsigned char *)malloc(msg_len + 64);
+  if (!sm) return -1;
+
+  int ret = crypto_sign_ed25519(sm, &sm_len, msg, msg_len, sk);
+  if (ret == 0) {
+    memcpy(sig, sm, 64);
+  }
+  free(sm);
+  return ret;
+}
 
 int crypto_sign_ed25519_verify_detached(
     const unsigned char *sig,
@@ -849,4 +867,91 @@ int crypto_sign_ed25519_verify_detached(
   if (heap) { free(sm); free(m); }
 
   return ret;
+}
+
+/* --- SHA-256 implementation (added for Llamaste update hashing) ---
+ * Minimal, standalone SHA-256. Public domain.
+ * Provides crypto_hash_sha256_tweet() and crypto_hashblocks_sha256_tweet().
+ */
+
+static const unsigned int sha256_K[64] = {
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+#define SHA256_ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+#define SHA256_CH(x,y,z) (((x)&(y))^((~(x))&(z)))
+#define SHA256_MAJ(x,y,z) (((x)&(y))^((x)&(z))^((y)&(z)))
+#define SHA256_S0(x) (SHA256_ROR(x,2)^SHA256_ROR(x,13)^SHA256_ROR(x,22))
+#define SHA256_S1(x) (SHA256_ROR(x,6)^SHA256_ROR(x,11)^SHA256_ROR(x,25))
+#define SHA256_s0(x) (SHA256_ROR(x,7)^SHA256_ROR(x,18)^((x)>>3))
+#define SHA256_s1(x) (SHA256_ROR(x,17)^SHA256_ROR(x,19)^((x)>>10))
+
+static unsigned int sha256_load32(const unsigned char *p) {
+  return ((unsigned int)p[0]<<24)|((unsigned int)p[1]<<16)|((unsigned int)p[2]<<8)|p[3];
+}
+static void sha256_store32(unsigned char *p, unsigned int v) {
+  p[0]=(unsigned char)(v>>24); p[1]=(unsigned char)(v>>16);
+  p[2]=(unsigned char)(v>>8);  p[3]=(unsigned char)v;
+}
+
+int crypto_hashblocks_sha256_tweet(unsigned char *state,
+                                    const unsigned char *data,
+                                    unsigned long long len) {
+  unsigned int S[8], W[64], T1, T2;
+  unsigned int a,b,c,d,e,f,g,h;
+  int i;
+  for (i=0;i<8;i++) S[i] = sha256_load32(state+4*i);
+  while (len >= 64) {
+    for (i=0;i<16;i++) W[i] = sha256_load32(data+4*i);
+    for (i=16;i<64;i++) W[i] = SHA256_s1(W[i-2])+W[i-7]+SHA256_s0(W[i-15])+W[i-16];
+    a=S[0]; b=S[1]; c=S[2]; d=S[3]; e=S[4]; f=S[5]; g=S[6]; h=S[7];
+    for (i=0;i<64;i++) {
+      T1 = h+SHA256_S1(e)+SHA256_CH(e,f,g)+sha256_K[i]+W[i];
+      T2 = SHA256_S0(a)+SHA256_MAJ(a,b,c);
+      h=g; g=f; f=e; e=d+T1; d=c; c=b; b=a; a=T1+T2;
+    }
+    S[0]+=a; S[1]+=b; S[2]+=c; S[3]+=d;
+    S[4]+=e; S[5]+=f; S[6]+=g; S[7]+=h;
+    data += 64; len -= 64;
+  }
+  for (i=0;i<8;i++) sha256_store32(state+4*i, S[i]);
+  return (int)len;
+}
+
+static const unsigned char sha256_iv[32] = {
+  0x6a,0x09,0xe6,0x67, 0xbb,0x67,0xae,0x85,
+  0x3c,0x6e,0xf3,0x72, 0xa5,0x4f,0xf5,0x3a,
+  0x51,0x0e,0x52,0x7f, 0x9b,0x05,0x68,0x8c,
+  0x1f,0x83,0xd9,0xab, 0x5b,0xe0,0xcd,0x19
+};
+
+int crypto_hash_sha256_tweet(unsigned char *out,
+                              const unsigned char *m,
+                              unsigned long long n) {
+  unsigned char h[32], padded[128];
+  unsigned long long bits = n * 8;
+  int i;
+  memcpy(h, sha256_iv, 32);
+  crypto_hashblocks_sha256_tweet(h, m, n);
+  m += n - (n & 63);
+  n &= 63;
+  memset(padded, 0, 128);
+  memcpy(padded, m, (size_t)n);
+  padded[n] = 0x80;
+  if (n < 56) {
+    for (i=0;i<8;i++) padded[56+i] = (unsigned char)(bits >> (56-8*i));
+    crypto_hashblocks_sha256_tweet(h, padded, 64);
+  } else {
+    for (i=0;i<8;i++) padded[120+i] = (unsigned char)(bits >> (56-8*i));
+    crypto_hashblocks_sha256_tweet(h, padded, 128);
+  }
+  memcpy(out, h, 32);
+  return 0;
 }

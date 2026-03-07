@@ -88,6 +88,42 @@ bool verify_update_signature(
     const unsigned char* pubkey
 );
 
+// --- SHA-256 ---
+
+// Compute SHA-256 of data and return as lowercase hex string (64 chars).
+std::string sha256_hex(const unsigned char* data, size_t len);
+
+// Compute SHA-256 of a file's contents starting at byte offset.
+// Returns hex string, or empty string on error.
+std::string sha256_file(const std::string& path, uint64_t offset = 0);
+
+// --- .update file parsing ---
+
+// Magic bytes at the start of every .update file
+static const char UPDATE_MAGIC[4] = {'L', 'M', 'U', 'P'};
+static const uint32_t UPDATE_FORMAT_VERSION = 1;
+
+struct UpdateFileInfo {
+    bool valid = false;
+    std::string error;
+    UpdateManifest manifest;
+    std::string manifest_json;          // raw JSON for signature verification
+    unsigned char signature[64] = {};   // Ed25519 signature of manifest_json
+    uint64_t payload_offset = 0;        // byte offset where squashfs starts
+    uint64_t payload_size = 0;          // size of squashfs payload
+};
+
+// Parse a .update file header. Does NOT read/verify payload.
+UpdateFileInfo parse_update_file(const std::string& path);
+
+// Verify and install an update from a .update file:
+// 1. Parse header, verify signature against embedded public key
+// 2. Compute SHA-256 of payload, compare to manifest
+// 3. Write payload to inactive partition
+// 4. Update grubenv for next boot
+// Returns JSON result string.
+std::string install_update(const std::string& path);
+
 // --- ESP / grubenv helpers ---
 
 // Search well-known paths for grubenv on the ESP.

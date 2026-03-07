@@ -30,3 +30,17 @@ tests/test_*
 *.img
 *.img.xz
 *.iso
+
+# Update signing keys (NEVER commit secret keys!)
+signing-key.secret
+signing-key.pub
+*.secret
+
+# Update packages
+*.update
+
+# Host tool binaries
+tools/keygen
+tools/sign-helper
+tools/keygen.exe
+tools/sign-helper.exe

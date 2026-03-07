@@ -1,9 +1,9 @@
 # finish-deploy.ps1 — Replace VDI, fix UUID, start VM
 # Run: powershell.exe -ExecutionPolicy Bypass -File D:\Llamaste\scripts\finish-deploy.ps1
 
-$vdi = "D:\Llamaste\vm\Llamaste\llamaste-disk.vdi"
-$newVdi = "D:\Llamaste\vm\Llamaste\llamaste-disk-new.vdi"
-$uuid = "144eeb0b-4df1-4213-ab6e-ac0c3ed35bf0"
+$vdi = "D:\Llamaste\vm\Llamaste2\llamaste-disk.vdi"
+$newVdi = "D:\Llamaste\vm\Llamaste2\llamaste-disk-new.vdi"
+$uuid = "26fe17f1-60c3-4002-9dfc-bf27620e1d3a"
 $vboxmanage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 
 # Check if new VDI exists
@@ -57,6 +57,6 @@ Write-Host "[deploy] Fixing UUID..."
 
 # Start VM
 Write-Host "[deploy] Starting VM..."
-& $vboxmanage startvm Llamaste --type headless
+& $vboxmanage startvm Llamaste2 --type headless
 
 Write-Host "[deploy] Done! Check http://localhost:8080 in ~5 seconds"

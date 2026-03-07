@@ -8,8 +8,8 @@
 set -e
 
 SQUASHFS=/root/llamaste-build/output/images/rootfs.squashfs
-VDI=/mnt/d/Llamaste/vm/Llamaste/llamaste-disk.vdi
-VDI_TMP=/mnt/d/Llamaste/vm/Llamaste/llamaste-disk-new.vdi
+VDI=/mnt/d/Llamaste/vm/Llamaste2/llamaste-disk.vdi
+VDI_TMP=/mnt/d/Llamaste/vm/Llamaste2/llamaste-disk-new.vdi
 RAW=/tmp/llamaste-deploy.raw
 
 if [ ! -f "$SQUASHFS" ]; then
