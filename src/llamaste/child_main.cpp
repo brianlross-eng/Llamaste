@@ -395,6 +395,7 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         args.push_back("-tb"); args.push_back(tb_str.c_str());
         args.push_back("--mlock");
         args.push_back("-fa");
+        args.push_back("--cache-reuse"); args.push_back("256");
         args.push_back("--jinja");
         args.push_back("--chat-template"); args.push_back("chatml");
         args.push_back("--log-disable");
@@ -543,7 +544,7 @@ static bool wait_for_llama_server(int timeout_seconds) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
