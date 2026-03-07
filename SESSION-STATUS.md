@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (Recovery hardening: dead-peer crash recovery 239s → 10s)
+**Last updated**: 2026-03-09 (TTS voice table: 12 → 20 voices, en_AU added)
 
 ---
 
@@ -86,6 +86,26 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 **Notable**: `parse_list_networks` hardened to handle empty flags field (trailing `\t` trimmed
 by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
+
+---
+
+## Latest Session (2026-03-09 cont. 4) -- TTS Voice Expansion
+
+### TTS Voice Table Expansion — COMPLETE (2902ff5)
+
+Expanded `TTS_VOICES[]` in `tools_audio.cpp` from 12 to 20 voices.
+
+**New voices added (8)**:
+- en_US: `hfc_male-medium` (male complement to hfc_female), `kathleen-low` (compact female),
+  `joe-medium`, `john-medium` (additional male voices)
+- en_GB: `cori-medium` (medium tier for existing cori-high), `jenny_dioco-medium` (new female),
+  `alan-medium` (medium tier for existing alan-low)
+- en_AU: `ray-medium` — **first Australian English voice**
+
+Updated `voice.download_tts` tool description to reflect 20 voices and en_US/en_GB/en_AU coverage.
+
+**Verified on VDI**: `voice.list_tts` returns 20 voices, `active_engine: sherpa-onnx` ✓
+All 13 test suites pass (Suite 10: Audio Tools includes voice table coverage).
 
 ---
 
