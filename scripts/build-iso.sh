@@ -64,6 +64,16 @@ mkdir -p "${ISO_ROOT}/run"
 mkdir -p "${ISO_ROOT}/data"
 mkdir -p "${ISO_ROOT}/etc"
 
+# Live pivot working directories for do_live_pivot() in init.cpp.
+# ISO9660 is read-only at runtime — mkdir() on the mounted ISO returns EROFS.
+# These dirs MUST exist in the ISO image so that pivot can mount tmpfs/squashfs
+# on them. Without these, mount("tmpfs","/live/tmpfs",...) fails with ENOENT,
+# the pivot silently returns false, and labwc / WiFi are unavailable (they live
+# in rootfs.squashfs, not the sparse ISO root).
+mkdir -p "${ISO_ROOT}/live/squashfs"   # squashfs loop-device mount point (ro)
+mkdir -p "${ISO_ROOT}/live/tmpfs"      # overlay upper + work layer (tmpfs 512M)
+mkdir -p "${ISO_ROOT}/live/root"       # overlayfs new root (becomes / after pivot)
+
 # Minimal /etc for PID 1
 echo "llamaste" > "${ISO_ROOT}/etc/hostname"
 cat > "${ISO_ROOT}/etc/hosts" << 'HOSTS'
