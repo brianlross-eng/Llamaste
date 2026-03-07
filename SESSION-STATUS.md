@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (TTS voice table: 12 → 20 voices, en_AU added)
+**Last updated**: 2026-03-09 (Server speed optimizations: voice disabled, poll 100ms, cache-reuse)
 
 ---
 
@@ -86,6 +86,36 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 **Notable**: `parse_list_networks` hardened to handle empty flags field (trailing `\t` trimmed
 by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
+
+---
+
+## Latest Session (2026-03-09 cont. 5) -- Server Speed Optimizations
+
+### Phase 1 (trivial/low effort) — COMPLETE (e226555, e18731e)
+
+**Audited and applied** the following speed improvements:
+
+| Item | Status | Result |
+|------|--------|--------|
+| Voice pipeline in server mode | **FIXED** — gated to desktop-only | Sherpa-onnx fork-test no longer runs in server mode |
+| Poll interval 500ms → 100ms | **DONE** — `wait_for_llama_server` loop | Faster server startup detection |
+| `--cache-reuse 256` | **DONE** — added to `spawn_llama_server` args | KV chunk reuse on partial prefix match |
+| `--lookup-cache-dynamic` | **REVERTED** — not supported by `llama-server` | Was causing inference_ready=false (CLI-only flag) |
+| CPU governor "performance" | Already done (init_tune_performance) | No change needed |
+| Transparent hugepages "madvise" | Already done (init_tune_performance) | No change needed |
+| Tool registry O(1) dispatch | Already `std::unordered_map` | No change needed |
+| `-fa` / `--mlock` | Already in spawn_llama_server args | No change needed |
+| `cache_prompt` | Default=true in llama-server b5460 (server.cpp line 94) | No change needed |
+
+**Key gotcha**: `--lookup-cache-dynamic` exists in `common/arg.cpp` (for `llama-lookup` CLI tool)
+but is **not referenced** in `tools/server/server.cpp`. Passing it to llama-server causes silent failure.
+N-gram speculative decoding is only available in standalone CLI tools in b5460, not llama-server.
+
+**Commits**: `e226555` (voice gating), `e18731e` (poll + cache-reuse + lookup-cache revert)
+
+### Phase 2 (medium/high effort) — IN PROGRESS
+
+Next: grammar-constrained tool JSON → HTTP keep-alive → semantic cache.
 
 ---
 
