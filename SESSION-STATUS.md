@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-08 (Multi-node integration test PASSED, cluster mutex deadlock fixed)
+**Last updated**: 2026-03-08 (WiFi support complete — 7 tools, web UI card, 13 test suites)
 
 ---
 
@@ -70,9 +70,49 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | Test-only tool dispatch endpoint | DONE (ffdfdff) |
 | Model management API (list, info, download, USB import) | DONE (ffdfdff) |
 
+### Phase 6: WiFi Support -- COMPLETE (223534c)
+
+| Component | Status |
+|-----------|--------|
+| wifi.h/cpp: WiFiManager (wpa_supplicant Unix socket control) | DONE (223534c) |
+| tools_wifi.cpp: 7 tools (status, scan, connect, disconnect, list, forget, enable) | DONE (223534c) |
+| child_main.cpp: spawn wpa_supplicant + dhcpcd, register tools, HTTP endpoints | DONE (223534c) |
+| defconfig: wpa_supplicant, dhcpcd, linux-firmware (Intel/Realtek/Qualcomm) | DONE (223534c) |
+| linux.config: full WiFi kernel stack (cfg80211, mac80211, iwlwifi, rtw88, ath10k) | DONE (223534c) |
+| Web UI: WiFi dashboard card (status, scan results, connect/disconnect UI) | DONE (223534c) |
+| tests/test_wifi.cpp: Suite 13 — 37 tests all pass | DONE (223534c) |
+| host-test.sh: Suite 13, Suites 5+8 compile commands updated | DONE (223534c) |
+| Deployed to VDI — tools_count: 62, wifi.status endpoint verified | DONE |
+
+**Notable**: `parse_list_networks` hardened to handle empty flags field (trailing `\t` trimmed
+by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
+
 ---
 
-## Latest Session (2026-03-08) -- Multi-Node Integration Test + Cluster Fix
+## Latest Session (2026-03-08) -- WiFi Support (Phase 6)
+
+### WiFi Implementation Complete
+
+- **WiFiManager** (`wifi.h/cpp`): wpa_supplicant Unix DGRAM socket protocol
+  - Interface detection via `/sys/class/net/<iface>/phy80211/`
+  - `open_ctrl()`: binds `/tmp/wpa_ctrl_<pid>_N`, connects to `/run/wpa_supplicant/<iface>`
+  - `wpa()`: sends command, poll-waits reply, skips event messages (`<priority>...`)
+  - Graceful no-op on hosts without WiFi (returns false/empty instead of crashing)
+  - Full Windows stub for host-side compilation
+
+- **7 new tools** (57 + 7 = ... wait, was 55, then 57 after cluster fix, now 62)
+  - wifi.status, wifi.scan, wifi.connect(ssid, psk), wifi.disconnect
+  - wifi.list, wifi.forget(ssid), wifi.enable(enable)
+
+- **Buildroot**: wpa_supplicant + dhcpcd + linux-firmware (Intel AX200/AX201/9000,
+  Realtek RTLwifi, Qualcomm ath10k), kernel WiFi stack built-in (no modules)
+
+- **VDI verified**: tools_count=62, wifi.status returns `available:false` (expected on
+  VirtualBox NAT — no wireless interface in /sys/class/net)
+
+---
+
+## Previous Session (2026-03-08) -- Multi-Node Integration Test + Cluster Fix
 
 ### Multi-Node Cluster Integration Test — PASSED
 
