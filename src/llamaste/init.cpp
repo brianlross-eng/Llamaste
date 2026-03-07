@@ -682,20 +682,25 @@ void init_apply_network_config() {
 //        chdir /live/root → MS_MOVE "." to "/" → chroot "." → execv
 //
 // Guard (double):
-//   • /boot/bzImage  exists on the ISO root but NOT in rootfs.squashfs
-//     (the kernel is a separate build artefact, never placed inside rootfs)
+//   • /llamaste-live-iso  is a marker file created by build-iso.sh ONLY in the
+//     ISO root directory — it is NEVER placed inside rootfs.squashfs.
+//     After the pivot + re-exec, the new root is the squashfs overlay which has
+//     no /llamaste-live-iso → guard fails → do_live_pivot() returns false immediately.
+//     *** DO NOT use /boot/bzImage as this guard ***
+//     Buildroot installs the kernel to output/target/boot/, which goes into
+//     rootfs.squashfs — so /boot/bzImage exists in BOTH the ISO root AND the
+//     squashfs, causing an infinite pivot loop on re-exec.
 //   • /install/rootfs.squashfs must also be present
 //   If either check fails, returns false and boot continues normally.
-//   After pivot the squashfs root has no /boot/bzImage so the guard always
-//   fails on the second exec — no infinite loop even with /install bind-mounted.
 // ─────────────────────────────────────────────────────────────────────────────
 bool do_live_pivot(char** argv) {
 #ifdef _WIN32
     (void)argv;
     return false;
 #else
-    // Guard 1: bzImage only lives on the ISO root, not inside rootfs.squashfs
-    if (access("/boot/bzImage", R_OK) != 0)
+    // Guard 1: marker file only exists in the ISO root, never in rootfs.squashfs.
+    // build-iso.sh creates this with: touch "${ISO_ROOT}/llamaste-live-iso"
+    if (access("/llamaste-live-iso", F_OK) != 0)
         return false;
     // Guard 2: squashfs must actually be present
     if (access("/install/rootfs.squashfs", R_OK) != 0)

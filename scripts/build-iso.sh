@@ -74,6 +74,16 @@ mkdir -p "${ISO_ROOT}/live/squashfs"   # squashfs loop-device mount point (ro)
 mkdir -p "${ISO_ROOT}/live/tmpfs"      # overlay upper + work layer (tmpfs 512M)
 mkdir -p "${ISO_ROOT}/live/root"       # overlayfs new root (becomes / after pivot)
 
+# Pivot detection marker — ONLY in the ISO root, NEVER in rootfs.squashfs.
+# do_live_pivot() checks for this file to detect "am I booting from the live ISO?"
+# After the squashfs pivot + re-exec, this file does not exist in the squashfs
+# overlay root → Guard 1 fails → do_live_pivot() returns false → no infinite loop.
+#
+# NOTE: Do NOT use /boot/bzImage as the guard — Buildroot installs the kernel
+# to output/target/boot/ which ends up inside rootfs.squashfs, so that file
+# exists in BOTH the ISO root and the squashfs → causes an infinite pivot loop.
+touch "${ISO_ROOT}/llamaste-live-iso"
+
 # Minimal /etc for PID 1
 echo "llamaste" > "${ISO_ROOT}/etc/hostname"
 cat > "${ISO_ROOT}/etc/hosts" << 'HOSTS'
