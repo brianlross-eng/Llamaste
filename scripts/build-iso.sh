@@ -137,6 +137,46 @@ if [ -d "${TARGET_DIR}/etc/ssl" ]; then
     cp -r "${TARGET_DIR}/etc/ssl/certs" "${ISO_ROOT}/etc/ssl/"
 fi
 
+# --- Step 4c: Copy firmware files ---
+# linux-firmware installs to both TARGET_DIR/lib/firmware and BINARIES_DIR.
+# In our build, the target dir firmware may be absent (Buildroot quirk) but
+# the build dir always has the selected firmware files in br-firmware.tar.
+# Prefer target dir; fall back to extracting from br-firmware.tar.
+FW_DONE=0
+if [ -d "${TARGET_DIR}/lib/firmware" ] && [ "$(ls -A "${TARGET_DIR}/lib/firmware" 2>/dev/null)" ]; then
+    echo "[iso] Copying firmware files from target..."
+    mkdir -p "${ISO_ROOT}/lib/firmware"
+    cp -r "${TARGET_DIR}/lib/firmware/." "${ISO_ROOT}/lib/firmware/"
+    FW_COUNT=$(find "${ISO_ROOT}/lib/firmware" -type f | wc -l)
+    echo "[iso]   Copied ${FW_COUNT} firmware files"
+    FW_DONE=1
+fi
+if [ "$FW_DONE" = "0" ]; then
+    FW_TAR=$(find "${BUILD_DIR}/output/build/linux-firmware-"* -name "br-firmware.tar" 2>/dev/null | head -1)
+    if [ -n "$FW_TAR" ]; then
+        echo "[iso] Copying firmware files from br-firmware.tar..."
+        mkdir -p "${ISO_ROOT}/lib/firmware"
+        tar xf "$FW_TAR" -C "${ISO_ROOT}/lib/firmware/"
+        FW_COUNT=$(find "${ISO_ROOT}/lib/firmware" -type f | wc -l)
+        echo "[iso]   Copied ${FW_COUNT} firmware files"
+        FW_DONE=1
+    fi
+fi
+if [ "$FW_DONE" = "0" ]; then
+    echo "[iso]   WARNING: No firmware found — WiFi will not work in live mode"
+fi
+
+# --- Step 4d: Copy dhcpcd for live-mode networking ---
+# The llamaste binary spawns dhcpcd for DHCP. The kernel's ip=dhcp handles
+# initial boot but dhcpcd is needed for runtime network management.
+if [ -f "${TARGET_DIR}/sbin/dhcpcd" ]; then
+    echo "[iso] Copying dhcpcd..."
+    mkdir -p "${ISO_ROOT}/sbin" "${ISO_ROOT}/lib/dhcpcd" "${ISO_ROOT}/usr/share/dhcpcd"
+    cp "${TARGET_DIR}/sbin/dhcpcd" "${ISO_ROOT}/sbin/dhcpcd"
+    [ -d "${TARGET_DIR}/lib/dhcpcd" ]       && cp -r "${TARGET_DIR}/lib/dhcpcd/."       "${ISO_ROOT}/lib/dhcpcd/"
+    [ -d "${TARGET_DIR}/usr/share/dhcpcd" ] && cp -r "${TARGET_DIR}/usr/share/dhcpcd/." "${ISO_ROOT}/usr/share/dhcpcd/"
+fi
+
 LIB_COUNT=$(find "${ISO_ROOT}/lib" "${ISO_ROOT}/usr/lib" -name '*.so*' | wc -l)
 echo "[iso]   Copied ${LIB_COUNT} shared library files"
 
