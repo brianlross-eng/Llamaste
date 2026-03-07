@@ -1186,14 +1186,15 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline — TTS in server/desktop modes, SKIP in live (installer).
-    // Live mode has no espeak-ng data dir or TTS models; the installer doesn't need voice.
+    // Initialize voice pipeline — desktop mode only.
+    // Server mode: no TTS/STT needed (headless; voice is desktop-only UX).
+    // Live mode: no espeak-ng data dir or TTS models; installer doesn't need voice.
     VoicePipeline voice_pipeline;
     {
         extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
 #ifndef _WIN32
-        if (g_boot_mode == "live") {
-            fprintf(stderr, "[child] Live mode: voice pipeline disabled (no TTS needed)\n");
+        if (g_boot_mode != "desktop") {
+            fprintf(stderr, "[child] %s mode: voice pipeline disabled\n", g_boot_mode.c_str());
         } else {
             VoiceConfig vcfg;
             if (voice_pipeline.init(vcfg)) {
@@ -1202,8 +1203,7 @@ int child_main(const SupervisorConfig& config) {
                         voice_pipeline.tts_engine_name().c_str());
 
                 // Desktop mode: enable always-listening (ALSA capture + VAD)
-                if (g_boot_mode == "desktop" &&
-                    access(vcfg.whisper_model.c_str(), R_OK) == 0) {
+                if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
                     // Wire command callback: voice commands go through the agent loop
                     voice_pipeline.set_command_callback([&](const std::string& command) {
                         fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
@@ -1226,7 +1226,7 @@ int child_main(const SupervisorConfig& config) {
                     // Start the always-listening thread (ALSA capture + VAD)
                     voice_pipeline.start();
                 } else {
-                    fprintf(stderr, "[child] Server mode: TTS available via API, STT disabled\n");
+                    fprintf(stderr, "[child] Desktop mode: TTS ready, whisper model not found (STT disabled)\n");
                 }
             } else {
                 fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
