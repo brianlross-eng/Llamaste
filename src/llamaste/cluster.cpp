@@ -152,6 +152,15 @@ void ClusterManager::set_topology_change_callback(std::function<void()> cb) {
     topology_cb_ = std::move(cb);
 }
 
+void ClusterManager::fire_topology_callback() {
+    std::function<void()> cb;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        cb = topology_cb_;
+    }
+    if (cb) cb();
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5: Auto-offload — model tiers, capacity analysis, tensor split
 // ---------------------------------------------------------------------------

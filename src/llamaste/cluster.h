@@ -97,6 +97,11 @@ public:
     // Callback: called when coordinator changes (for llama-server restart)
     void set_topology_change_callback(std::function<void()> cb);
 
+    // Fire the topology callback unconditionally (regardless of state change).
+    // Used after a background model download completes to trigger llama-server
+    // startup without waiting for a topology state transition.
+    void fire_topology_callback();
+
     // --- Phase 5: Auto-offload ---
 
     // Analyze cluster capacity: sum RAM, compute tensor split, recommend model

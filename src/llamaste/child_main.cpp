@@ -997,6 +997,97 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
 }
 
 // ---------------------------------------------------------------------------
+// do_auto_upgrade_check — start background model download if a better model
+// fits available RAM but isn't on disk yet. Safe to call from any thread;
+// the g_upgrade_downloading atomic prevents concurrent downloads.
+// ---------------------------------------------------------------------------
+static void do_auto_upgrade_check(const ClusterCapacity& cap) {
+    if (!cap.upgrade_available) return;
+    const ModelInfo* mi = recommend_model((int)cap.usable_ram_mb);
+    if (!mi) return;
+    std::string dest = "/data/models/" + std::string(mi->filename);
+    if (access(dest.c_str(), R_OK) == 0) return;          // already on disk
+    if (g_upgrade_downloading.exchange(true)) return;      // already downloading
+
+    std::string repo_id = mi->repo_id;
+    std::string gguf    = mi->filename;
+    std::string model   = mi->name;
+    std::string url     = build_hf_download_url(repo_id, gguf);
+    fprintf(stderr, "[cluster] Auto-upgrade: downloading %s\n", gguf.c_str());
+
+    Notification notif;
+    notif.id    = "cluster_upgrade_start";
+    notif.type  = "cluster";
+    notif.title = "Cluster model upgrade";
+    notif.body  = "Downloading " + model + " for your expanded cluster…";
+    notif.time  = time(nullptr);
+    g_scheduler.push_notification(std::move(notif));
+
+    std::thread([dest, gguf, model, url]() {
+#ifdef HAVE_LIBCURL
+        std::string part = dest + ".part";
+        uint64_t existing = 0;
+        {
+            struct stat st;
+            if (stat(part.c_str(), &st) == 0) existing = st.st_size;
+        }
+        FILE* fp = fopen(part.c_str(), existing > 0 ? "ab" : "wb");
+        if (!fp) {
+            fprintf(stderr, "[cluster] Cannot write %s\n", part.c_str());
+            g_upgrade_downloading.store(false);
+            return;
+        }
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            fclose(fp);
+            g_upgrade_downloading.store(false);
+            return;
+        }
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
+        if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
+            curl_easy_setopt(curl, CURLOPT_CAINFO,
+                             "/etc/ssl/certs/ca-certificates.crt");
+        if (existing > 0)
+            curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
+                             (curl_off_t)existing);
+        CURLcode res = curl_easy_perform(curl);
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_cleanup(curl);
+        fclose(fp);
+
+        if (res == CURLE_OK && http_code < 400) {
+            rename(part.c_str(), dest.c_str());
+            fprintf(stderr, "[cluster] Download complete: %s\n", gguf.c_str());
+            Notification done;
+            done.id    = "cluster_upgrade_done";
+            done.type  = "cluster";
+            done.title = "Model upgrade ready";
+            done.body  = model + " downloaded — reload to activate.";
+            done.time  = time(nullptr);
+            g_scheduler.push_notification(std::move(done));
+            // Fire topology callback directly — run_election() won't re-fire
+            // it when state is already STANDALONE (no state change detected).
+            g_cluster.fire_topology_callback();
+        } else {
+            fprintf(stderr, "[cluster] Download failed for %s (curl=%d http=%ld)\n",
+                    gguf.c_str(), (int)res, http_code);
+        }
+#else
+        fprintf(stderr, "[cluster] Auto-upgrade requires libcurl (not built)\n");
+#endif
+        g_upgrade_downloading.store(false);
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
 // child_main — HTTP server entry point (called from supervisor fork)
 // ---------------------------------------------------------------------------
 
@@ -1248,120 +1339,30 @@ int child_main(const SupervisorConfig& config) {
                 fprintf(stderr, "[cluster] Keeping current model: %s\n", g_model_name.c_str());
             } else {
                 fprintf(stderr, "[cluster] No model available — staying in stub mode\n");
-                return;
+                // Don't return — fall through so do_auto_upgrade_check() still runs
             }
 
-            // Build RPC endpoints and tensor split
-            std::string rpc = g_cluster.rpc_endpoint_list();
-            std::string tensor_split = g_cluster.compute_tensor_split();
+            // Restart llama-server only if a model was found on disk
+            if (!model_path.empty()) {
+                // Build RPC endpoints and tensor split
+                std::string rpc = g_cluster.rpc_endpoint_list();
+                std::string tensor_split = g_cluster.compute_tensor_split();
 
-            int free_ram_estimate = g_hwinfo.ram_free_mb - 512;
-            if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc,
-                                   tensor_split)) {
-                if (wait_for_llama_server(120)) {
-                    g_model_loaded.store(true);
-                    g_inference_fn = llama_inference;
-                    fprintf(stderr, "[cluster] llama-server restarted: rpc=%s split=%s\n",
-                            rpc.c_str(), tensor_split.c_str());
-                }
-            }
-
-            // Auto-upgrade: if a bigger model fits the cluster but isn't downloaded,
-            // start a background download and notify the user.
-            if (cap.upgrade_available && !cap.recommended_gguf.empty()) {
-                std::string dest = "/data/models/" + cap.recommended_gguf;
-                if (access(dest.c_str(), R_OK) != 0) {
-                    // File not on disk — look up repo_id from model table
-                    const ModelInfo* mi = get_model_table();
-                    std::string repo_id;
-                    for (; mi && mi->name; ++mi) {
-                        if (mi->filename == cap.recommended_gguf) {
-                            repo_id = mi->repo_id;
-                            break;
-                        }
-                    }
-                    if (!repo_id.empty() && !g_upgrade_downloading.exchange(true)) {
-                        std::string gguf  = cap.recommended_gguf;
-                        std::string model = cap.recommended_model;
-                        std::string url   = build_hf_download_url(repo_id, gguf);
-                        fprintf(stderr, "[cluster] Auto-upgrade: downloading %s\n", gguf.c_str());
-
-                        // Notify UI
-                        Notification notif;
-                        notif.id    = "cluster_upgrade_start";
-                        notif.type  = "cluster";
-                        notif.title = "Cluster model upgrade";
-                        notif.body  = "Downloading " + model + " for your expanded cluster…";
-                        notif.time  = time(nullptr);
-                        g_scheduler.push_notification(std::move(notif));
-
-                        // Download in a detached background thread
-                        std::thread([dest, gguf, model, url]() {
-#ifdef HAVE_LIBCURL
-                            std::string part = dest + ".part";
-                            // Resume support: check for existing partial file
-                            uint64_t existing = 0;
-                            {
-                                struct stat st;
-                                if (stat(part.c_str(), &st) == 0) existing = st.st_size;
-                            }
-                            FILE* fp = fopen(part.c_str(), existing > 0 ? "ab" : "wb");
-                            if (!fp) {
-                                fprintf(stderr, "[cluster] Cannot write %s\n", part.c_str());
-                                g_upgrade_downloading.store(false);
-                                return;
-                            }
-                            CURL* curl = curl_easy_init();
-                            if (!curl) {
-                                fclose(fp);
-                                g_upgrade_downloading.store(false);
-                                return;
-                            }
-                            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-                            curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-                            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-                            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-                            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-                            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-                            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
-                            curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
-                            if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
-                                curl_easy_setopt(curl, CURLOPT_CAINFO,
-                                                 "/etc/ssl/certs/ca-certificates.crt");
-                            if (existing > 0)
-                                curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
-                                                 (curl_off_t)existing);
-                            CURLcode res = curl_easy_perform(curl);
-                            long http_code = 0;
-                            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-                            curl_easy_cleanup(curl);
-                            fclose(fp);
-
-                            if (res == CURLE_OK && http_code < 400) {
-                                rename(part.c_str(), dest.c_str());
-                                fprintf(stderr, "[cluster] Download complete: %s\n", gguf.c_str());
-                                // Notify UI
-                                Notification done;
-                                done.id    = "cluster_upgrade_done";
-                                done.type  = "cluster";
-                                done.title = "Model upgrade ready";
-                                done.body  = model + " downloaded — reload to activate.";
-                                done.time  = time(nullptr);
-                                g_scheduler.push_notification(std::move(done));
-                                // Trigger topology callback to restart llama-server
-                                g_cluster.run_election();
-                            } else {
-                                fprintf(stderr, "[cluster] Download failed for %s (curl=%d http=%ld)\n",
-                                        gguf.c_str(), (int)res, http_code);
-                            }
-#else
-                            fprintf(stderr, "[cluster] Auto-upgrade requires libcurl (not built)\n");
-#endif
-                            g_upgrade_downloading.store(false);
-                        }).detach();
+                int free_ram_estimate = g_hwinfo.ram_free_mb - 512;
+                if (spawn_llama_server(model_path, g_hwinfo.cpu_cores, free_ram_estimate, rpc,
+                                       tensor_split)) {
+                    if (wait_for_llama_server(120)) {
+                        g_model_loaded.store(true);
+                        g_inference_fn = llama_inference;
+                        fprintf(stderr, "[cluster] llama-server restarted: rpc=%s split=%s\n",
+                                rpc.c_str(), tensor_split.c_str());
                     }
                 }
             }
+
+            // Auto-upgrade: if a better model fits RAM but isn't on disk, download it.
+            // Uses shared helper to avoid code duplication with heartbeat path.
+            do_auto_upgrade_check(cap);
 #endif
         });
     }
@@ -1406,6 +1407,14 @@ int child_main(const SupervisorConfig& config) {
 
             // Re-run election (topology may have changed)
             g_cluster.run_election();
+
+            // Auto-upgrade check: runs every 30s regardless of topology state changes.
+            // This handles the standalone-forever case where the topology callback never
+            // fires (it only fires on state *transitions*, not stable state).
+            if (!g_model_loaded.load()) {
+                auto cap = g_cluster.analyze_capacity();
+                do_auto_upgrade_check(cap);
+            }
         }
     });
     cluster_heartbeat_thread.detach();
