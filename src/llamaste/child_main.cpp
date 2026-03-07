@@ -1856,8 +1856,21 @@ int child_main(const SupervisorConfig& config) {
         mkdir("/run/user/0", 0700);
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
 
-        // Allow labwc to start even without physical input devices (VM, QEMU)
+        // Allow labwc to start even without physical input devices (VM, QEMU, live ISO)
         setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
+
+        // simpledrm (EFI framebuffer DRM) does not support hardware cursors.
+        // Without this flag wlroots aborts during cursor plane setup on real hardware
+        // when no native GPU driver is present (Xe/i915 firmware not yet loaded).
+        setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+
+        // Force pixman software renderer as fallback when no GPU driver is active.
+        // wlroots will use GL/Vulkan if available; pixman ensures we always get a
+        // display even with simpledrm only (no 3D acceleration).
+        // Can be overridden by setting WLR_RENDERER=gles2 from /etc/labwc/autostart
+        // once a proper GPU driver is confirmed.
+        if (!getenv("WLR_RENDERER"))
+            setenv("WLR_RENDERER", "pixman", 1);
 
         // Point XDG config to /etc so labwc reads /etc/labwc/rc.xml etc.
         setenv("XDG_CONFIG_DIRS", "/etc", 1);
