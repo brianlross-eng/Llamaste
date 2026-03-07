@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) COMPLETE. 55 tools, 182 tests/12 suites.
+- **Phase**: Phase 5 (mesh auto-offload) + Phase B (neural TTS) + PUSW COMPLETE. 55 tools, 184 tests/12 suites.
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI.
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
@@ -109,11 +109,10 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Production update signing workflow** — Ed25519 keypair generation, build script to create signed `.update` packages (manifest + squashfs + signature). **Hosting: GitHub Releases** (free, CDN-backed). `update.check` polls `raw.githubusercontent.com/USER/llamaste/main/latest.json`; packages served from release assets. Verification side already built (Phase 4 TweetNaCl).
-2. **WiFi support** — Wireless networking (wpa_supplicant/iwd, scan/connect tools)
-3. **Clean downloadable ISO** — Polished ISO image ready for end-user download and install
-4. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
-5. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+1. **WiFi support** — Wireless networking (wpa_supplicant/iwd, scan/connect tools)
+2. **Clean downloadable ISO** — Polished ISO image ready for end-user download and install
+3. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
+4. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 
 ### Backlog
 - **More TTS voices** — Expand Piper voice table (more accents, quality levels)
