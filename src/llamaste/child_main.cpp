@@ -26,6 +26,7 @@
 #include "mcp_server.h"
 #include "updater.h"
 #include "version.h"
+#include "wifi.h"
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
@@ -94,6 +95,9 @@ static AuthManager g_auth;
 
 // Mesh clustering
 static ClusterManager g_cluster;
+
+// WiFi manager
+static WiFiManager g_wifi;
 
 // Desktop compositor PID (set by compositor launch thread)
 #ifndef _WIN32
@@ -434,6 +438,74 @@ static bool spawn_rpc_server() {
             pid, g_rpc_port);
     return true;
 }
+
+// Spawn wpa_supplicant for WiFi management on the given interface.
+// Config is created at /data/llamaste/wifi/wpa.conf if absent.
+#ifndef _WIN32
+static void spawn_wpa_supplicant(const std::string& iface) {
+    // Ensure config directory and skeleton config exist
+    mkdir("/data/llamaste", 0755);
+    mkdir("/data/llamaste/wifi", 0755);
+
+    const char* conf = "/data/llamaste/wifi/wpa.conf";
+    struct stat st;
+    if (stat(conf, &st) != 0) {
+        // Write minimal wpa_supplicant.conf skeleton
+        FILE* f = fopen(conf, "w");
+        if (f) {
+            fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
+            fprintf(f, "ctrl_interface_group=0\n");
+            fprintf(f, "update_config=1\n");
+            fclose(f);
+        }
+    }
+
+    // Ensure control directory exists
+    mkdir("/run/wpa_supplicant", 0755);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[child] Failed to fork wpa_supplicant: %s\n",
+                strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+              "-B",           // background (daemonize)
+              "-i", iface.c_str(),
+              "-c", conf,
+              "-D", "nl80211,wext",
+              (char*)nullptr);
+        fprintf(stderr, "[child] execl wpa_supplicant failed: %s\n",
+                strerror(errno));
+        _exit(127);
+    }
+    // wpa_supplicant daemonizes, so the child exits quickly — no need to track pid
+    int wstatus;
+    waitpid(pid, &wstatus, 0);
+    // The real daemon is now running in the background with its own PID file
+    fprintf(stderr, "[child] wpa_supplicant spawned on %s\n", iface.c_str());
+}
+
+static void spawn_dhcpcd(const std::string& iface) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[child] Failed to fork dhcpcd: %s\n", strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        execl("/usr/sbin/dhcpcd", "dhcpcd",
+              "-b",            // background
+              iface.c_str(),
+              (char*)nullptr);
+        fprintf(stderr, "[child] execl dhcpcd failed: %s\n", strerror(errno));
+        _exit(127);
+    }
+    int wstatus;
+    waitpid(pid, &wstatus, 0);
+    fprintf(stderr, "[child] dhcpcd spawned on %s\n", iface.c_str());
+}
+#endif // _WIN32
 
 // Poll llama-server /health until ready (or timeout)
 static bool wait_for_llama_server(int timeout_seconds) {
@@ -957,6 +1029,7 @@ int child_main(const SupervisorConfig& config) {
     register_auth_tools(g_tools, g_auth);
     register_cluster_tools(g_tools, g_cluster);
     register_update_tools(g_tools);
+    register_wifi_tools(g_tools, g_wifi);
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware
@@ -1253,6 +1326,22 @@ int child_main(const SupervisorConfig& config) {
     g_auth.load_config("/data/config");
     fprintf(stderr, "[child] Auth: setup_complete=%s\n",
             g_auth.is_setup_complete() ? "yes" : "no (first-boot mode)");
+
+    // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found
+#ifndef _WIN32
+    if (g_wifi.init()) {
+        const std::string& wifi_iface = g_wifi.has_wifi() ?
+            g_wifi.status().iface : "";
+        if (!wifi_iface.empty()) {
+            spawn_wpa_supplicant(wifi_iface);
+            // Give wpa_supplicant a moment to create its control socket
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Re-open control socket now that daemon is running
+            g_wifi.init();
+            spawn_dhcpcd(wifi_iface);
+        }
+    }
+#endif
 
     // Start session expiry thread (runs every 60 seconds)
     std::thread session_expiry_thread([]() {
@@ -2235,6 +2324,43 @@ int child_main(const SupervisorConfig& config) {
         [](const httplib::Request&, httplib::Response& res) {
         std::string result = g_tools.dispatch("update.rollback", "{}");
         res.set_content(result, "application/json");
+    }));
+
+    // --- WiFi endpoints ---
+    svr.Get("/llamaste/wifi/status", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.status", "{}"), "application/json");
+    }));
+
+    svr.Post("/llamaste/wifi/scan", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.scan", "{}"), "application/json");
+    }));
+
+    svr.Post("/llamaste/wifi/connect", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.connect", req.body),
+                        "application/json");
+    }));
+
+    svr.Post("/llamaste/wifi/disconnect", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.disconnect", "{}"), "application/json");
+    }));
+
+    svr.Get("/llamaste/wifi/list", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.list", "{}"), "application/json");
+    }));
+
+    svr.Post("/llamaste/wifi/forget", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.forget", req.body), "application/json");
+    }));
+
+    svr.Post("/llamaste/wifi/enable", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        res.set_content(g_tools.dispatch("wifi.enable", req.body), "application/json");
     }));
 
     // --- MCP server (Model Context Protocol, spec 2025-03-26) ---

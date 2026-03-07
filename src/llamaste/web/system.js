@@ -349,6 +349,193 @@
     });
   }
 
+  // --- WiFi card ---
+  var g_wifiConnected = false;
+
+  function renderWifiState(data) {
+    var stateEl    = document.getElementById('wifi-state');
+    var ssidRow    = document.getElementById('wifi-ssid-row');
+    var ssidEl     = document.getElementById('wifi-ssid');
+    var ipRow      = document.getElementById('wifi-ip-row');
+    var ipEl       = document.getElementById('wifi-ip');
+    var disconnBtn = document.getElementById('wifi-disconnect-btn');
+    var connBtn    = document.getElementById('wifi-connect-btn');
+    var scanBtn    = document.getElementById('wifi-scan-btn');
+    var form       = document.getElementById('wifi-connect-form');
+    if (!stateEl) return;
+
+    if (!data || !data.available) {
+      stateEl.textContent = 'No WiFi hardware';
+      stateEl.style.color = '#888';
+      if (scanBtn) scanBtn.style.display = 'none';
+      return;
+    }
+
+    var connected = !!(data.connected || data.state === 'COMPLETED');
+    g_wifiConnected = connected;
+
+    if (connected) {
+      stateEl.textContent = 'Connected';
+      stateEl.style.color = '#00e5a0';
+      if (ssidRow) { ssidRow.style.display = ''; ssidEl.textContent = data.ssid || ''; }
+      if (ipRow)   { ipRow.style.display = '';   ipEl.textContent  = data.ip_addr || '--'; }
+      if (disconnBtn) disconnBtn.style.display = '';
+      if (connBtn)    connBtn.style.display = 'none';
+      if (form)       form.style.display = 'none';
+    } else if (!data.daemon_running) {
+      stateEl.textContent = 'Not available';
+      stateEl.style.color = '#888';
+    } else {
+      stateEl.textContent = data.state || 'Disconnected';
+      stateEl.style.color = '#aaa';
+      if (ssidRow) ssidRow.style.display = 'none';
+      if (ipRow)   ipRow.style.display = 'none';
+      if (disconnBtn) disconnBtn.style.display = 'none';
+    }
+  }
+
+  function fetchWifiStatus() {
+    fetch('/llamaste/wifi/status', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) renderWifiState(d); })
+      .catch(function () {});
+  }
+
+  function renderScanResults(networks) {
+    var container = document.getElementById('wifi-scan-results');
+    var connBtn   = document.getElementById('wifi-connect-btn');
+    var form      = document.getElementById('wifi-connect-form');
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+
+    if (!networks || networks.length === 0) {
+      var p = document.createElement('p');
+      p.className = 'text-muted';
+      p.textContent = 'No networks found.';
+      container.appendChild(p);
+      return;
+    }
+    if (form)    form.style.display = '';
+    if (connBtn) connBtn.style.display = '';
+
+    var list = document.createElement('div');
+    list.style.maxHeight = '160px';
+    list.style.overflowY = 'auto';
+    list.style.marginBottom = '6px';
+    for (var i = 0; i < networks.length; i++) {
+      var net = networks[i];
+      var row = document.createElement('div');
+      row.style.cssText = 'cursor:pointer;padding:4px 0;border-bottom:1px solid #1e2d3d';
+      var nameSpan = document.createElement('div');
+      nameSpan.className = 'value';
+      nameSpan.textContent = net.ssid;
+      nameSpan.style.fontSize = '0.9em';
+      var metaSpan = document.createElement('div');
+      metaSpan.className = 'text-muted';
+      metaSpan.style.fontSize = '0.75em';
+      metaSpan.textContent = (net.security || 'OPEN') + '   ' + (net.signal_dbm || 0) + ' dBm';
+      row.appendChild(nameSpan);
+      row.appendChild(metaSpan);
+      (function (ssid) {
+        row.addEventListener('click', function () {
+          var inp = document.getElementById('wifi-ssid-input');
+          if (inp) { inp.value = ssid; inp.focus(); }
+        });
+      })(net.ssid);
+      list.appendChild(row);
+    }
+    container.appendChild(list);
+  }
+
+  var wifiScanBtn = document.getElementById('wifi-scan-btn');
+  var wifiConnBtn = document.getElementById('wifi-connect-btn');
+  var wifiDiscBtn = document.getElementById('wifi-disconnect-btn');
+  var wifiMsg     = document.getElementById('wifi-status-msg');
+
+  function setWifiMsg(txt, isErr) {
+    if (!wifiMsg) return;
+    wifiMsg.textContent = txt;
+    wifiMsg.style.color = isErr ? '#f44' : '#888';
+  }
+
+  if (wifiScanBtn && !wifiScanBtn._wired) {
+    wifiScanBtn._wired = true;
+    wifiScanBtn.addEventListener('click', function () {
+      wifiScanBtn.disabled = true;
+      wifiScanBtn.textContent = 'Scanning…';
+      setWifiMsg('Scanning for networks…', false);
+      fetch('/llamaste/wifi/scan', { method: 'POST', credentials: 'include' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          wifiScanBtn.disabled = false;
+          wifiScanBtn.textContent = 'Scan';
+          if (!d.success) {
+            setWifiMsg(d.error || 'Scan failed', true);
+          } else {
+            setWifiMsg(d.count + ' network(s) found', false);
+            renderScanResults(d.networks || []);
+          }
+        })
+        .catch(function () {
+          wifiScanBtn.disabled = false;
+          wifiScanBtn.textContent = 'Scan';
+          setWifiMsg('Scan request failed', true);
+        });
+    });
+  }
+
+  if (wifiConnBtn && !wifiConnBtn._wired) {
+    wifiConnBtn._wired = true;
+    wifiConnBtn.addEventListener('click', function () {
+      var ssid = (document.getElementById('wifi-ssid-input') || {}).value || '';
+      var psk  = (document.getElementById('wifi-psk-input')  || {}).value || '';
+      if (!ssid) { setWifiMsg('Enter an SSID', true); return; }
+      wifiConnBtn.disabled = true;
+      wifiConnBtn.textContent = 'Connecting…';
+      setWifiMsg('Connecting to ' + ssid + '…', false);
+      fetch('/llamaste/wifi/connect', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid: ssid, psk: psk })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          wifiConnBtn.disabled = false;
+          wifiConnBtn.textContent = 'Connect';
+          if (!d.success) {
+            setWifiMsg(d.error || 'Connection failed', true);
+          } else {
+            setWifiMsg('Connected! IP: ' + (d.ip_addr || '…'), false);
+            fetchWifiStatus();
+          }
+        })
+        .catch(function () {
+          wifiConnBtn.disabled = false;
+          wifiConnBtn.textContent = 'Connect';
+          setWifiMsg('Request failed', true);
+        });
+    });
+  }
+
+  if (wifiDiscBtn && !wifiDiscBtn._wired) {
+    wifiDiscBtn._wired = true;
+    wifiDiscBtn.addEventListener('click', function () {
+      wifiDiscBtn.disabled = true;
+      fetch('/llamaste/wifi/disconnect', { method: 'POST', credentials: 'include' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          wifiDiscBtn.disabled = false;
+          setWifiMsg(d.success ? 'Disconnected' : (d.error || 'Failed'), !d.success);
+          fetchWifiStatus();
+        })
+        .catch(function () { wifiDiscBtn.disabled = false; });
+    });
+  }
+
+  // Poll WiFi status every 15 seconds
+  setInterval(fetchWifiStatus, 15000);
+  fetchWifiStatus();
+
   // --- Cluster status ---
   function updateClusterCard() {
     fetch('/llamaste/cluster/status', { credentials: 'include' })
@@ -469,6 +656,9 @@
 
     // Update update card
     updateUpdateCard();
+
+    // Update WiFi card
+    fetchWifiStatus();
   }
 
   // Export to window so switchTab can call it

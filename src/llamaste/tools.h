@@ -67,5 +67,8 @@ void register_schedule_tools(ToolRegistry& reg, Scheduler& sched);
 class AuthManager;
 void register_auth_tools(ToolRegistry& reg, AuthManager& auth);
 
+class WiFiManager;
+void register_wifi_tools(ToolRegistry& reg, WiFiManager& wifi);
+
 // Convenience: register all tool categories at once.
 void register_all_tools(ToolRegistry& reg);

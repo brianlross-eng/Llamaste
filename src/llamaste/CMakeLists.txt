@@ -24,6 +24,8 @@ set(LLAMASTE_SOURCES
     tools_audio.cpp
     tools_cluster.cpp
     tools_update.cpp
+    tools_wifi.cpp
+    wifi.cpp
     cluster.cpp
     updater.cpp
     tweetnacl.c

@@ -62,7 +62,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 1: Hardware Detection
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [1/12] Hardware Detection ---${NC}"
+echo -e "${BOLD}--- [1/13] Hardware Detection ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_hwdetect" \
     "${TESTS}/test_hwdetect.cpp" "${SRC}/hwdetect.cpp" 2>&1; then
     if "${BUILD_DIR}/test_hwdetect"; then
@@ -78,7 +78,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 2: Tools System
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [2/12] Tools System ---${NC}"
+echo -e "${BOLD}--- [2/13] Tools System ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_tools" \
     "${TESTS}/test_tools.cpp" \
     "${SRC}/tools.cpp" \
@@ -104,7 +104,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 3: Agent Loop & Prompt Builder
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [3/12] Agent Loop ---${NC}"
+echo -e "${BOLD}--- [3/13] Agent Loop ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_agent" \
     "${TESTS}/test_agent.cpp" \
     "${SRC}/agent.cpp" \
@@ -133,7 +133,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 4: Tools Integration
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [4/12] Tools Integration ---${NC}"
+echo -e "${BOLD}--- [4/13] Tools Integration ---${NC}"
 # These tests need /data directory (run as root in WSL2)
 if [ ! -d "/data" ]; then
     echo "Creating /data directory for integration tests..."
@@ -176,7 +176,7 @@ gcc -c -o "${BUILD_DIR}/tweetnacl.o" "${SRC}/tweetnacl.c" 2>&1
 # ---------------------------------------------------------------
 # Suite 5: HTTP Server
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [5/12] HTTP Server ---${NC}"
+echo -e "${BOLD}--- [5/13] HTTP Server ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${TESTS}/test_http.cpp" \
     "${SRC}/child_main.cpp" \
@@ -196,8 +196,10 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_http" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/tools_cluster.cpp" \
     "${SRC}/tools_update.cpp" \
+    "${SRC}/tools_wifi.cpp" \
     "${SRC}/updater.cpp" \
     "${BUILD_DIR}/tweetnacl.o" \
+    "${SRC}/wifi.cpp" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
@@ -219,7 +221,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 6: Network (mDNS)
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [6/12] Network (mDNS) ---${NC}"
+echo -e "${BOLD}--- [6/13] Network (mDNS) ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_net" \
     "${TESTS}/test_net.cpp" \
     "${SRC}/net_mdns.cpp" 2>&1; then
@@ -236,7 +238,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 7: Auth & Console
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [7/12] Auth & Console ---${NC}"
+echo -e "${BOLD}--- [7/13] Auth & Console ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_auth" \
     "${TESTS}/test_auth.cpp" \
     "${SRC}/bcrypt.cpp" \
@@ -255,7 +257,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 8: Inference Integration
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [8/12] Inference Integration ---${NC}"
+echo -e "${BOLD}--- [8/13] Inference Integration ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${TESTS}/test_inference.cpp" \
     "${SRC}/child_main.cpp" \
@@ -275,8 +277,10 @@ if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_inference" \
     "${SRC}/tools_audio.cpp" \
     "${SRC}/tools_cluster.cpp" \
     "${SRC}/tools_update.cpp" \
+    "${SRC}/tools_wifi.cpp" \
     "${SRC}/updater.cpp" \
     "${BUILD_DIR}/tweetnacl.o" \
+    "${SRC}/wifi.cpp" \
     "${SRC}/voice.cpp" \
     "${SRC}/mcp_server.cpp" \
     "${SRC}/hwdetect.cpp" \
@@ -298,7 +302,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 9: Model Download
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [9/12] Model Download ---${NC}"
+echo -e "${BOLD}--- [9/13] Model Download ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_model_download" \
     "${TESTS}/test_model_download.cpp" \
     "${SRC}/tools_model_download.cpp" 2>&1; then
@@ -315,7 +319,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 10: Audio Tools
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [10/12] Audio Tools ---${NC}"
+echo -e "${BOLD}--- [10/13] Audio Tools ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_audio_tools" \
     "${TESTS}/test_audio_tools.cpp" \
     "${SRC}/tools.cpp" \
@@ -341,7 +345,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 11: Cluster
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [11/12] Cluster ---${NC}"
+echo -e "${BOLD}--- [11/13] Cluster ---${NC}"
 if g++ -std=c++17 -I "${SRC}" -pthread -o "${BUILD_DIR}/test_cluster" \
     "${TESTS}/test_cluster.cpp" \
     "${SRC}/cluster.cpp" 2>&1; then
@@ -358,7 +362,7 @@ echo ""
 # ---------------------------------------------------------------
 # Suite 12: Updater
 # ---------------------------------------------------------------
-echo -e "${BOLD}--- [12/12] Updater ---${NC}"
+echo -e "${BOLD}--- [12/13] Updater ---${NC}"
 # tweetnacl.o already compiled above (before Suite 5)
 if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_updater" \
     "${TESTS}/test_updater.cpp" \
@@ -371,6 +375,23 @@ if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_updater" \
     fi
 else
     suite_fail "Updater (compile)"
+fi
+echo ""
+
+# ---------------------------------------------------------------
+# Suite 13: WiFi Manager
+# ---------------------------------------------------------------
+echo -e "${BOLD}--- [13/13] WiFi Manager ---${NC}"
+if g++ -std=c++17 -I "${SRC}" -o "${BUILD_DIR}/test_wifi" \
+    "${TESTS}/test_wifi.cpp" \
+    "${SRC}/wifi.cpp" 2>&1; then
+    if "${BUILD_DIR}/test_wifi"; then
+        suite_pass "WiFi Manager"
+    else
+        suite_fail "WiFi Manager (runtime)"
+    fi
+else
+    suite_fail "WiFi Manager (compile)"
 fi
 echo ""
 

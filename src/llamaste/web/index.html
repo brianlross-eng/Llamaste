@@ -241,6 +241,42 @@
             <p class="text-muted">Llamaste LLM-OS v0.1 — The LLM is your operating system.</p>
           </div>
 
+          <!-- WiFi -->
+          <div class="system-card" id="wifi-card">
+            <h3>WiFi</h3>
+            <div class="dash-row">
+              <span class="label">Status</span>
+              <span class="value" id="wifi-state">--</span>
+            </div>
+            <div class="dash-row" id="wifi-ssid-row" style="display:none">
+              <span class="label">Network</span>
+              <span class="value" id="wifi-ssid">--</span>
+            </div>
+            <div class="dash-row" id="wifi-ip-row" style="display:none">
+              <span class="label">IP</span>
+              <span class="value" id="wifi-ip">--</span>
+            </div>
+            <div id="wifi-connect-form" style="margin-top:10px;display:none">
+              <div style="margin-bottom:6px">
+                <label style="color:#aaa;font-size:0.85em">Network (SSID)</label>
+                <input type="text" id="wifi-ssid-input" placeholder="MyNetwork"
+                  style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+              </div>
+              <div style="margin-bottom:6px">
+                <label style="color:#aaa;font-size:0.85em">Password (leave empty for open)</label>
+                <input type="password" id="wifi-psk-input" placeholder=""
+                  style="width:100%;padding:6px 8px;background:#1a2332;color:#e0e0e0;border:1px solid #2a3a4a;border-radius:4px;margin-top:2px;box-sizing:border-box">
+              </div>
+            </div>
+            <div class="system-actions" style="margin-top:8px" id="wifi-actions">
+              <button id="wifi-scan-btn" class="btn-sm">Scan</button>
+              <button id="wifi-connect-btn" class="btn-sm" style="display:none">Connect</button>
+              <button id="wifi-disconnect-btn" class="btn-sm" style="display:none">Disconnect</button>
+            </div>
+            <div id="wifi-scan-results" style="margin-top:8px"></div>
+            <p id="wifi-status-msg" class="text-muted" style="margin-top:6px"></p>
+          </div>
+
           <!-- System Update -->
           <div class="system-card" id="update-card">
             <h3>System Update</h3>
