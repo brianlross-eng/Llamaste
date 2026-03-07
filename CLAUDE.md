@@ -94,6 +94,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Squashfs-only VDI deploy**: `vm/deploy-squashfs.sh` — VDI→RAW (qemu-img) → losetup → dd squashfs to p3 → RAW→VDI. Preserves data partition
 - **VDI resize after deploy**: Must `closemedium` old reference (UUID changes after qemu-img convert), then `modifymedium --resizebyte`, then re-attach
 - **Sherpa-onnx fork-test safety**: Fork child to test-load sherpa-onnx before real load. Catches crashes, prevents crash-restart loop. See voice.cpp
+- **Softdog watchdog timeout**: Default is 60s. CPU-only inference (no SIMD) takes ~250s on VM. Use `WDIOC_SETTIMEOUT` ioctl to extend to 300s, and a dedicated kicker thread (100ms period) in supervisor to kick reliably. `write("V", 1)` while fd open IS a valid keepalive (not "disarm").
+- **llama-server serial flooding**: Without stderr redirect, llama-server logs (decode progress) flood `/dev/console` (serial port). Redirect with `dup2(log_fd, STDERR_FILENO)` to `/tmp/llama-server.log` in forked child before execv.
+- **O_CLOEXEC on /dev/watchdog**: Always open with `O_CLOEXEC` to prevent child processes from inheriting the watchdog fd. Inherited fds + softdog `softdog_expect_close` flag = subtle interactions.
 
 ## VirtualBox VM
 - VM "Llamaste2" at `D:\Llamaste\vm\Llamaste2\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
@@ -110,8 +113,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (not just VirtualBox)
-2. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+1. **Enable SIMD (AVX2)**: Add `-DGGML_AVX2=ON` to llama-server Buildroot package for ~5-10x inference speedup. Check if VBox guest exposes AVX2.
+2. **Server mode verified on real hardware** — Boot and validate on physical x86_64 machine (SIMD will work there)
+3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 3. **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (VirtualBox host-only doesn't forward multicast)
 
 ### Backlog

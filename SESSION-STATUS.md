@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (Server speed optimizations: voice disabled, poll 100ms, cache-reuse)
+**Last updated**: 2026-03-07 (Watchdog fix: softdog no longer reboots VM during slow inference)
 
 ---
 
@@ -489,9 +489,18 @@ crashes (SIGABRT/etc), falls back to espeak-ng. Prevents crash-restart loop.
 ## Next Steps
 
 ### Immediate
-1. **More TTS voices** -- Add additional Piper voices to the voice table (e.g. British, other quality levels)
-2. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two physical/VM instances on same subnet (host-only adapter with promiscuous mode)
-3. **Real hardware test** -- Boot and validate on a physical x86_64 machine
+1. **Enable SIMD for production** -- Enable AVX2 (`-DGGML_AVX2=ON`) in llama-server Buildroot package for ~5-10x inference speedup on real hardware. Currently GGML_NATIVE=OFF (scalar only) → 250s/response on VM. Test if VirtualBox guest supports AVX2 CPUID bits.
+2. **Real hardware test** -- Boot and validate on physical x86_64 machine (SIMD will make huge difference here)
+3. **Real two-VM mDNS test** -- Validate mDNS auto-discovery with two instances on same subnet
+4. **More TTS voices** -- Add additional Piper voices (e.g. additional locales)
+
+### Watchdog Fix (DONE, 2026-03-07, commit 2c16742)
+- **Root cause**: softdog (60s timeout) fired during slow CPU-only inference (~250s/response)
+- **Fix 1**: Dedicated `watchdog_kicker_thread` in supervisor — kicks every 100ms, all signals blocked
+- **Fix 2**: Extended watchdog timeout to 300s via `WDIOC_SETTIMEOUT` ioctl (was 60s default)
+- **Fix 3**: `O_CLOEXEC` on watchdog fd — prevents child process fd inheritance complications
+- **Side fix**: Redirect llama-server stderr to `/tmp/llama-server.log` (was flooding serial port)
+- **Verified**: 1.5B model completes inference in ~250s on 2-VCPU VBox VM, no reboots
 
 ---
 
