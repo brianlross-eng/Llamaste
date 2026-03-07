@@ -10,5 +10,5 @@ GDK_BACKEND=wayland
 # Force Wayland for Qt apps
 QT_QPA_PLATFORM=wayland
 
-# Wayland-native cog
-COG_PLATFORM_WL_VIEW_FULLSCREEN=0
+# Launch cog fullscreen (fills entire display — best for kiosk/live mode)
+COG_PLATFORM_WL_VIEW_FULLSCREEN=1

@@ -81,6 +81,11 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_RTW88=y
 # Realtek RTL88xx
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_88XX=y
+# Regulatory database (signed) — required by CFG80211_REQUIRE_SIGNED_REGDB
+# Without this the kernel uses world regulatory domain (no 5GHz channels)
+BR2_PACKAGE_WIRELESS_REGDB=y
+# NOTE: Intel BE200 (Wi-Fi 7 / Typhoon Peak) firmware has NO Buildroot config option.
+# Files iwlwifi-ty-a0-gf-a0-*.ucode are in the rootfs overlay instead.
 
 # Scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_build.sh"
