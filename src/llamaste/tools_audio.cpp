@@ -290,6 +290,15 @@ static const TtsVoiceInfo TTS_VOICES[] = {
     {"lessac-high",   "en_US-lessac-high.onnx",
      "csukuangfj/vits-piper-en_US-lessac-high",
      114, 22050, "high", "female", "en_US"},
+    {"hfc_female-medium", "en_US-hfc_female-medium.onnx",
+     "csukuangfj/vits-piper-en_US-hfc_female-medium",
+     63, 22050, "medium", "female", "en_US"},
+    {"hfc_male-medium", "en_US-hfc_male-medium.onnx",
+     "csukuangfj/vits-piper-en_US-hfc_male-medium",
+     63, 22050, "medium", "male", "en_US"},
+    {"kathleen-low",  "en_US-kathleen-low.onnx",
+     "csukuangfj/vits-piper-en_US-kathleen-low",
+     63, 16000, "low", "female", "en_US"},
     {"ryan-low",      "en_US-ryan-low.onnx",
      "csukuangfj/vits-piper-en_US-ryan-low",
      63, 16000, "low", "male", "en_US"},
@@ -299,25 +308,41 @@ static const TtsVoiceInfo TTS_VOICES[] = {
     {"danny-low",     "en_US-danny-low.onnx",
      "csukuangfj/vits-piper-en_US-danny-low",
      63, 16000, "low", "male", "en_US"},
-    {"hfc_female-medium", "en_US-hfc_female-medium.onnx",
-     "csukuangfj/vits-piper-en_US-hfc_female-medium",
-     63, 22050, "medium", "female", "en_US"},
+    {"joe-medium",    "en_US-joe-medium.onnx",
+     "csukuangfj/vits-piper-en_US-joe-medium",
+     63, 22050, "medium", "male", "en_US"},
+    {"john-medium",   "en_US-john-medium.onnx",
+     "csukuangfj/vits-piper-en_US-john-medium",
+     63, 22050, "medium", "male", "en_US"},
     // ── British English (en_GB) ──
     {"alba-medium",   "en_GB-alba-medium.onnx",
      "csukuangfj/vits-piper-en_GB-alba-medium",
      63, 22050, "medium", "female", "en_GB"},
+    {"cori-medium",   "en_GB-cori-medium.onnx",
+     "csukuangfj/vits-piper-en_GB-cori-medium",
+     63, 22050, "medium", "female", "en_GB"},
     {"cori-high",     "en_GB-cori-high.onnx",
      "csukuangfj/vits-piper-en_GB-cori-high",
      114, 22050, "high", "female", "en_GB"},
+    {"jenny_dioco-medium", "en_GB-jenny_dioco-medium.onnx",
+     "csukuangfj/vits-piper-en_GB-jenny_dioco-medium",
+     63, 22050, "medium", "female", "en_GB"},
     {"alan-low",      "en_GB-alan-low.onnx",
      "csukuangfj/vits-piper-en_GB-alan-low",
      63, 16000, "low", "male", "en_GB"},
+    {"alan-medium",   "en_GB-alan-medium.onnx",
+     "csukuangfj/vits-piper-en_GB-alan-medium",
+     63, 22050, "medium", "male", "en_GB"},
     {"northern_english_male-medium", "en_GB-northern_english_male-medium.onnx",
      "csukuangfj/vits-piper-en_GB-northern_english_male-medium",
      63, 22050, "medium", "male", "en_GB"},
     {"southern_english_female-low", "en_GB-southern_english_female-low.onnx",
      "csukuangfj/vits-piper-en_GB-southern_english_female-low",
      63, 16000, "low", "female", "en_GB"},
+    // ── Australian English (en_AU) ──
+    {"ray-medium",    "en_AU-ray-medium.onnx",
+     "csukuangfj/vits-piper-en_AU-ray-medium",
+     63, 22050, "medium", "male", "en_AU"},
 };
 static const int TTS_VOICE_COUNT = sizeof(TTS_VOICES) / sizeof(TTS_VOICES[0]);
 
@@ -634,8 +659,8 @@ void register_audio_tools(ToolRegistry& reg) {
         .name = "voice.download_tts",
         .description = "Download a Piper neural TTS voice model from HuggingFace. "
                        "Downloads ONNX model + tokens to /data/models/tts/. "
-                       "Default voice: amy-low (63MB, female, en_US). "
-                       "Use voice.list_tts to see all 12 available voices (en_US and en_GB). "
+                       "Default voice: amy-low (16MB, female). "
+                       "Use voice.list_tts to see all 20 available voices (en_US, en_GB, en_AU). "
                        "Restart voice pipeline after download to activate.",
         .parameters = R"json({
             "type": "object",
