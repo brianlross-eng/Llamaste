@@ -62,6 +62,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Tool registration**: Use designated initializers (`.name = ..., .handler = ...`) — matches existing tools_*.cpp pattern
 - **Declaration order in child_main.cpp**: globals must appear before functions that use them
 - **Linux includes**: `mount()`/`umount()` need `#include <sys/mount.h>`, guard with `#ifndef _WIN32`
+- **GGML_NATIVE=ON**: Build llama.cpp with `-march=native` for AVX2/AVX512 on the build CPU. VirtualBox passes through host CPU flags to guests, so NATIVE builds work correctly in VMs. Result: ~500x inference speedup (scalar 0.028 tok/s → AVX2 ~14 tok/s on 1.5B Q4_K_M). Set in `llama-server.mk`.
 - **ISO build**: `scripts/build-iso.sh /root/llamaste-build` — needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`
 - **QEMU E2E tests**: `scripts/qemu-boot-test.sh /root/llamaste-build/output/images/llamaste.img`
 - **EFI boot test**: `scripts/test-efi-boot.sh` (QEMU + OVMF)

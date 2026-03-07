@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-07 (Watchdog fix: softdog no longer reboots VM during slow inference)
+**Last updated**: 2026-03-10 (AVX2 SIMD enabled: ~500x inference speedup, ~14 tok/s on 1.5B model)
 
 ---
 
@@ -116,6 +116,28 @@ N-gram speculative decoding is only available in standalone CLI tools in b5460, 
 ### Phase 2 (medium/high effort) — IN PROGRESS
 
 Next: grammar-constrained tool JSON → HTTP keep-alive → semantic cache.
+
+---
+
+## Latest Session (2026-03-10) -- AVX2 SIMD Inference Speedup
+
+### Enable AVX2 SIMD in llama-server — COMPLETE (a520b90)
+
+Changed `GGML_NATIVE=OFF` → `GGML_NATIVE=ON` in `br2-external/package/llama-server/llama-server.mk`.
+
+**Why this works**: Build machine is WSL2 on Intel Core Ultra 9 275HX (Meteor Lake, AVX2/AVX512).
+VirtualBox passes through host CPU flags to guest, so NATIVE code runs correctly in VM.
+
+**Results** (1.5B Q4_K_M Qwen2.5, 2 vCPUs in VBox):
+- Before (scalar): ~36 sec/token (~0.028 tok/s)
+- After (AVX2): **~14 tok/s** (~1.8-3s for short responses)
+- Speedup: **~500x** on decode, ~19x on full request including prompt
+
+**Verified on VDI** (Llamaste2):
+- `system.info` → `Intel Core Ultra 9 275HX` ✓
+- `v1/chat/completions` short response: 12.9s, 7 tokens
+- `v1/chat/completions` count-to-20: 3.7s, 51 decode tokens (KV cache warm) = ~14 tok/s
+- Inference is now genuinely interactive and fast enough for normal use
 
 ---
 
