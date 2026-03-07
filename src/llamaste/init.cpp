@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <linux/fs.h>
 #include <linux/blkpg.h>
+#include <linux/loop.h>
 
 // EXT4 online resize ioctl — grows a mounted ext4 filesystem
 #ifndef EXT4_IOC_RESIZE_FS
@@ -664,5 +665,151 @@ void init_apply_network_config() {
     }
 
     fprintf(stderr, "[init] Static network config applied\n");
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// do_live_pivot — mount squashfs overlay and re-exec into the full system
+//
+// When booting from the live ISO, /install/rootfs.squashfs is the complete
+// installed rootfs.  This function:
+//   1. Creates /live/{tmpfs,squashfs,root}
+//   2. Attaches rootfs.squashfs to a free loop device and mounts it (ro)
+//   3. Mounts overlayfs at /live/root  (squashfs lower + tmpfs upper)
+//   4. Binds /proc /sys /dev /run into the new root
+//   5. Binds /install so the installer finds images at the expected path
+//   6. Pivots via the classic switch_root pattern:
+//        chdir /live/root → MS_MOVE "." to "/" → chroot "." → execv
+//
+// Guard (double):
+//   • /boot/bzImage  exists on the ISO root but NOT in rootfs.squashfs
+//     (the kernel is a separate build artefact, never placed inside rootfs)
+//   • /install/rootfs.squashfs must also be present
+//   If either check fails, returns false and boot continues normally.
+//   After pivot the squashfs root has no /boot/bzImage so the guard always
+//   fails on the second exec — no infinite loop even with /install bind-mounted.
+// ─────────────────────────────────────────────────────────────────────────────
+bool do_live_pivot(char** argv) {
+#ifdef _WIN32
+    (void)argv;
+    return false;
+#else
+    // Guard 1: bzImage only lives on the ISO root, not inside rootfs.squashfs
+    if (access("/boot/bzImage", R_OK) != 0)
+        return false;
+    // Guard 2: squashfs must actually be present
+    if (access("/install/rootfs.squashfs", R_OK) != 0)
+        return false;
+
+    fprintf(stderr, "[init] Live pivot: pivoting to full squashfs system\n");
+
+    // --- Working dirs (on the current ISO / tmpfs root) ---
+    mkdir("/live",           0755);
+    mkdir("/live/squashfs", 0755);
+    mkdir("/live/tmpfs",    0755);
+    mkdir("/live/root",     0755);
+
+    // tmpfs provides the overlay upper + work layers (persists for the session)
+    if (mount("tmpfs", "/live/tmpfs", "tmpfs", 0, "size=512M") < 0) {
+        fprintf(stderr, "[init] Live pivot: tmpfs: %m\n");
+        return false;
+    }
+    mkdir("/live/tmpfs/upper", 0755);
+    mkdir("/live/tmpfs/work",  0755);
+
+    // --- Attach rootfs.squashfs to a free loop device ---
+    int ctrl = open("/dev/loop-control", O_RDWR | O_CLOEXEC);
+    if (ctrl < 0) {
+        fprintf(stderr, "[init] Live pivot: open loop-control: %m\n");
+        return false;
+    }
+    int loop_num = ioctl(ctrl, LOOP_CTL_GET_FREE);
+    close(ctrl);
+    if (loop_num < 0) {
+        fprintf(stderr, "[init] Live pivot: LOOP_CTL_GET_FREE: %m\n");
+        return false;
+    }
+
+    char loop_dev[64];
+    snprintf(loop_dev, sizeof(loop_dev), "/dev/loop%d", loop_num);
+
+    int sq_fd = open("/install/rootfs.squashfs", O_RDONLY | O_CLOEXEC);
+    if (sq_fd < 0) {
+        fprintf(stderr, "[init] Live pivot: open squashfs: %m\n");
+        return false;
+    }
+    int lp_fd = open(loop_dev, O_RDWR | O_CLOEXEC);
+    if (lp_fd < 0) {
+        fprintf(stderr, "[init] Live pivot: open %s: %m\n", loop_dev);
+        close(sq_fd);
+        return false;
+    }
+    if (ioctl(lp_fd, LOOP_SET_FD, sq_fd) < 0) {
+        fprintf(stderr, "[init] Live pivot: LOOP_SET_FD: %m\n");
+        close(lp_fd); close(sq_fd);
+        return false;
+    }
+    close(lp_fd);
+    close(sq_fd);
+    fprintf(stderr, "[init] Live pivot: squashfs attached to %s\n", loop_dev);
+
+    // --- Mount squashfs read-only ---
+    if (mount(loop_dev, "/live/squashfs", "squashfs", MS_RDONLY, nullptr) < 0) {
+        fprintf(stderr, "[init] Live pivot: mount squashfs: %m\n");
+        return false;
+    }
+
+    // --- Mount overlayfs at /live/root ---
+    char ovl[256];
+    snprintf(ovl, sizeof(ovl),
+             "lowerdir=/live/squashfs,upperdir=/live/tmpfs/upper,workdir=/live/tmpfs/work");
+    if (mount("overlay", "/live/root", "overlay", 0, ovl) < 0) {
+        fprintf(stderr, "[init] Live pivot: mount overlay: %m\n");
+        return false;
+    }
+    fprintf(stderr, "[init] Live pivot: overlay mounted at /live/root\n");
+
+    // --- Bind essential pseudo-filesystems into new root ---
+    // (mkdir is a no-op if the dir already exists in the squashfs lower layer)
+    const char* pseudo[] = { "proc", "sys", "dev", "run", nullptr };
+    for (int i = 0; pseudo[i]; i++) {
+        char src[64], dst[128];
+        snprintf(src, sizeof(src), "/%s",           pseudo[i]);
+        snprintf(dst, sizeof(dst), "/live/root/%s", pseudo[i]);
+        mkdir(dst, 0755);
+        if (mount(src, dst, nullptr, MS_BIND, nullptr) < 0)
+            fprintf(stderr, "[init] Live pivot: bind %s: %m\n", src);
+    }
+
+    // Bind /install so the installer finds disk images at /install/llamaste.img*
+    mkdir("/live/root/install", 0755);
+    if (mount("/install", "/live/root/install", nullptr, MS_BIND, nullptr) < 0)
+        fprintf(stderr, "[init] Live pivot: bind /install: %m\n");
+
+    // Bind the full ISO root as /cdrom (for reference / future use)
+    mkdir("/live/root/cdrom", 0755);
+    if (mount("/", "/live/root/cdrom", nullptr, MS_BIND, nullptr) < 0)
+        fprintf(stderr, "[init] Live pivot: bind /cdrom: %m\n");
+
+    // --- switch_root pivot ---
+    // Make all mounts private so MS_MOVE succeeds (kernel rejects on shared mounts)
+    mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr);
+
+    if (chdir("/live/root") < 0) {
+        fprintf(stderr, "[init] Live pivot: chdir /live/root: %m\n");
+        return false;
+    }
+    // Move the overlay mount from /live/root to / atomically
+    if (mount(".", "/", nullptr, MS_MOVE, nullptr) < 0) {
+        fprintf(stderr, "[init] Live pivot: MS_MOVE: %m\n");
+        return false;
+    }
+    chroot(".");
+    chdir("/");
+
+    fprintf(stderr, "[init] Live pivot: complete — re-executing from squashfs\n");
+    execv("/opt/llamaste/llamaste", argv);
+    fprintf(stderr, "[init] Live pivot: execv: %m\n");
+    return false;   // execv only returns on error
 #endif
 }

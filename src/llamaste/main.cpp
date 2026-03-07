@@ -75,6 +75,11 @@ int main(int argc, char** argv) {
 
     if (pid1) {
         init_mount_filesystems();
+        // Live ISO: pivot to the full squashfs system and re-exec.
+        // No-op on installed system (guard checks /boot/bzImage which only
+        // exists on the ISO root, not inside rootfs.squashfs).
+        // If pivot succeeds, execv() is called and we never reach the next line.
+        do_live_pivot(argv);
     }
 
     std::string mode = init_parse_boot_mode();
