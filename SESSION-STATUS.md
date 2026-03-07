@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-09 (WiFi UI polish, cluster model auto-download, v1.0.0 ISO built)
+**Last updated**: 2026-03-09 (ISO smoke test PASS, TTS locale field, cluster auto-download bugfixes E2E verified)
 
 ---
 
@@ -89,7 +89,48 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-09) -- WiFi UI Polish, Cluster Auto-Download, ISO
+## Latest Session (2026-03-09 cont.) -- ISO Smoke Test, TTS Cleanup, Auto-Download E2E
+
+### ISO Smoke Test — COMPLETE (365d7e5)
+- **Bug fixed**: espeak-ng `exit(1)` crash in ISO/live mode — espeak-ng data dir not present in ISO root
+- **Fix**: Wrapped voice init in `if (g_boot_mode != "live")` — installer doesn't need TTS
+- **QEMU ISO test**: PASS — GRUB → live boot → health (65 tools) → detect disks → install → 100% → PMBR verified
+- **DATA partition**: Resized 1.2 GB → 3.5 GB on 4 GB target disk ✓
+
+### TTS Voice Table Cleanup — COMPLETE (365d7e5)
+- Added `locale` field (`const char* locale`) to `TtsVoiceInfo` struct
+- All 12 voices tagged with `en_US` or `en_GB`
+- `voice.list_tts` JSON now includes `locale` field
+- Fixed `voice.download_tts` description: corrected size (63 MB), points to all 12 voices via voice.list_tts
+
+### Cluster Auto-Download E2E — COMPLETE (372fb79)
+Three bugs found and fixed:
+
+**Bug 1** (`recommend_model` vs `cap.recommended_gguf`): `select_model()` only scans on-disk
+files; fresh installs have no models → `recommended_gguf = ""` always. Fix: use
+`recommend_model(usable_ram_mb)` (RAM-based) as download target.
+
+**Bug 2** (topology callback early return): The `else { return; }` for "no model available"
+exited before the auto-upgrade check. Fix: removed `return;`, guard llama-server spawn with
+`if (!model_path.empty())`.
+
+**Bug 3** (stable standalone never triggers callback): `run_election()` only fires callback on
+state *transitions*. STANDALONE → STANDALONE never changes → callback never fires. Fix:
+- Extracted `do_auto_upgrade_check()` helper function (self-contained, atomic-guarded)
+- Added call to it from 30s heartbeat thread (fires regardless of topology state)
+- Added `ClusterManager::fire_topology_callback()` — fires callback unconditionally
+- Download thread calls `fire_topology_callback()` after completion (not `run_election()`)
+
+**E2E verified on VDI**:
+- Fresh install (no models on disk)
+- 30s heartbeat fires → `do_auto_upgrade_check()` → downloads `qwen2.5-1.5b-instruct-q4_k_m.gguf` (1.04 GB)
+- `fire_topology_callback()` after download → llama-server spawns
+- Next boot: `inference_ready=true` at 31s uptime ✓
+- SSE notification: "Cluster model upgrade" + "Model upgrade ready" ✓
+
+---
+
+## Previous Session (2026-03-09) -- WiFi UI Polish, Cluster Auto-Download, ISO
 
 ### Phase D: WiFi UI Polish — COMPLETE (b390407)
 - `wifi.h`: Added `freq_mhz` field to `WiFiNetwork`
