@@ -89,7 +89,53 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-10 cont.) -- Live ISO Squashfs Pivot + Desktop Mode
+## Latest Session (2026-03-08) -- WiFi Hardware Fix on Real Hardware
+
+### Phase: WiFi on RTL8821CE (Intel Core Ultra 9 275HX) — IN PROGRESS
+
+**Big win this session**: WiFi driver now loads and hardware is detected. LLM answers questions. Keyboard works in desktop mode. Three major issues resolved, one remaining.
+
+| Component | Status |
+|-----------|--------|
+| Keyboard silently dropping keys (udevadm CHANGE vs ADD) | DONE (36bebab) |
+| Console WiFi setup on /dev/tty1 (server mode) | DONE (36bebab) |
+| WiFi hardware detection logging + dangling ref fix | DONE (f7dfc99) |
+| RTL8821CE firmware (rtw8821c_fw.bin) in overlay | DONE (61c38ad) |
+| CONFIG_RTW88_PCI=y added to linux.config | DONE (153bc6a) |
+| Comprehensive WiFi diagnostics dump | DONE (6cc559c) |
+| Better diagnostics (rtw* driver list, driver symlink, kernel version) | DONE (2a614ae) |
+| Clean kernel rebuild (linux-dirclean + make) — rtw8821ce.o actually compiled | DONE (c8909a4) |
+| CONFIG_EXTRA_FIRMWARE embeds rtw8821c_fw.bin in kernel image | DONE (67df4c5) |
+| **Console WiFi setup overwritten by supervisor display thread** | **TODO** |
+
+**Root causes found and fixed**:
+1. `make linux-rebuild` was incremental — rtw88 object files never compiled. Fixed by `make linux-dirclean && make`.
+2. `CONFIG_MODULES=n` means firmware can't be loaded from filesystem at probe time. Fixed by `CONFIG_EXTRA_FIRMWARE`.
+3. `udevadm trigger` without `--action=add` fires CHANGE events; libinput needs ADD. Fixed.
+
+**Remaining issue — console WiFi setup overwritten**:
+- `console_wifi_setup()` runs in the child process (child_main.cpp line ~740)
+- Supervisor's display thread starts BEFORE child is spawned (supervisor.cpp line 953)
+- Display thread reads child's stderr and writes to tty0, overwriting the WiFi prompt
+- **Fix**: Move WiFi check to supervisor.cpp BEFORE `std::thread display_thread(...)` at line 952
+  - At that point: no display thread, no input thread, no competing output
+  - Check for wlan* in /sys/class/net AND no `network={` in wpa.conf
+  - If both: call console_wifi_setup() directly (or inline the logic)
+  - Remove the duplicate check from child_main.cpp
+
+**Current ISO**: 67df4c5, 1433.9MB at `D:\Llamaste\llamaste.iso`
+
+**Confirmed working on real hardware (Intel Core Ultra 9 275HX)**:
+- ✅ Pivot loop fixed (marker file `/llamaste-live-iso`)
+- ✅ Keyboard input works in desktop mode
+- ✅ LLM answers questions (desktop mode)
+- ✅ WiFi hardware detected (RTL8821CE binds after CONFIG_EXTRA_FIRMWARE fix)
+- ✅ wpa_supplicant starts, dhcpcd waits for network
+- ❌ WiFi setup prompt overwritten — user can't type SSID/password
+
+---
+
+## Previous Session (2026-03-10 cont.) -- Live ISO Squashfs Pivot + Desktop Mode
 
 ### Phase: Live ISO / Hardware Boot — COMPLETE (6b3ca50..789fb34)
 
@@ -104,23 +150,6 @@ All work targeted making the ISO actually boot correctly on real hardware with l
 | grub-live.cfg: `/dev/sdb` default, `/dev/sdc` fallback | DONE (4455132) |
 | grub-live.cfg: `default=1` (desktop), `timeout=30`, numbered labels | DONE (789fb34) |
 | Full ISO rebuild: 1396.4MB | DONE |
-| ISO copied to `D:\Llamaste\llamaste.iso` and flashed | In progress (user flashing) |
-
-**Key technical details**:
-- `do_live_pivot()` guard: `/boot/bzImage` exists on ISO root, NOT in rootfs.squashfs → no infinite re-exec
-- Loop device: `LOOP_CTL_GET_FREE` ioctl on `/dev/loop-control`; `LOOP_SET_FD` to attach squashfs
-- `MS_PRIVATE | MS_REC` required before `MS_MOVE` (kernel rejects MS_MOVE on shared mounts)
-- `WLR_NO_HARDWARE_CURSORS=1`: simpledrm (EFI framebuffer DRM) has no HW cursor planes → wlroots abort without this
-- `WLR_RENDERER=pixman`: software renderer when no GPU driver active; overridable from autostart
-- Hardware: Intel Core Ultra 9 275HX — SD card reader = `/dev/sda`, USB flash = `/dev/sdb`
-- Build-iso.sh reads grub-live.cfg from BOARD_DIR in VM's git checkout → must `git pull` before rebuild
-- WiFi (wpa_supplicant) requires squashfs pivot — binary not in ISO root skeleton
-
-**Hardware test pending**: User flashing new ISO. At start of next session, verify:
-1. New numbered GRUB menu (30s desktop-mode default)
-2. Serial: `[init] Live pivot: pivoting to full squashfs system` + `[init] Live pivot: complete — re-executing`
-3. Desktop: labwc compositor starts, cog browser opens to http://localhost
-4. WiFi: `[child] wpa_supplicant spawned` in serial output
 
 ---
 
