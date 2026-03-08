@@ -392,7 +392,7 @@ static std::string console_read_password(int read_fd, int write_fd, const char* 
     char ch;
     while (true) {
         struct pollfd pfd = { read_fd, POLLIN, 0 };
-        if (poll(&pfd, 1, 5000) <= 0) continue; // 5s timeout per char
+        if (poll(&pfd, 1, 100) <= 0) continue; // 100ms timeout — stays responsive
         if (read(read_fd, &ch, 1) != 1) continue;
 
         if (ch == '\n' || ch == '\r') {
@@ -415,28 +415,30 @@ static std::string console_read_password(int read_fd, int write_fd, const char* 
 }
 
 // Handle 'P' key: console-based password setup, bypasses Wayland input
-static void do_console_passwd_setup(int console_fd) {
+// read_fd: O_RDONLY fd for keyboard input (from console_input_thread's fd)
+// write_fd: O_WRONLY fd for text output to screen
+static void do_console_passwd_setup(int read_fd, int write_fd) {
 #ifndef _WIN32
     g_passwd_entry_active = true;
 
     // Clear line and show header
     const char* hdr = "\r\n\033[1m=== Llamaste Password Setup ===\033[0m\r\n"
                       "(Keyboard not working in browser? Set password here)\r\n\r\n";
-    write(console_fd, hdr, strlen(hdr));
+    write(write_fd, hdr, strlen(hdr));
 
-    std::string pw  = console_read_password(console_fd, console_fd, "New password (min 4 chars): ");
+    std::string pw  = console_read_password(read_fd, write_fd, "New password (min 4 chars): ");
     if (pw.empty()) { g_passwd_entry_active = false; return; }
     if (pw.size() < 4) {
         const char* err = "Password too short (min 4).\r\n";
-        write(console_fd, err, strlen(err));
+        write(write_fd, err, strlen(err));
         g_passwd_entry_active = false;
         return;
     }
 
-    std::string pw2 = console_read_password(console_fd, console_fd, "Confirm password:           ");
+    std::string pw2 = console_read_password(read_fd, write_fd, "Confirm password:           ");
     if (pw != pw2) {
         const char* err = "Passwords don't match. Try again (press P).\r\n";
-        write(console_fd, err, strlen(err));
+        write(write_fd, err, strlen(err));
         g_passwd_entry_active = false;
         return;
     }
@@ -444,18 +446,18 @@ static void do_console_passwd_setup(int console_fd) {
     // Build JSON and POST to the HTTP server
     std::string json_body = "{\"password\":\"" + pw + "\"}";
     const char* sending = "Setting password... ";
-    write(console_fd, sending, strlen(sending));
+    write(write_fd, sending, strlen(sending));
 
     std::string resp = http_post_localhost("/llamaste/auth/setup", json_body);
 
     if (resp.find("\"success\"") != std::string::npos ||
         resp.find("true") != std::string::npos) {
         const char* ok = "OK!\r\nPassword set. Refresh the browser or press Enter in the web UI.\r\n";
-        write(console_fd, ok, strlen(ok));
+        write(write_fd, ok, strlen(ok));
     } else {
         // Show truncated response for diagnosis
         std::string msg = "Response: " + resp.substr(0, 120) + "\r\n";
-        write(console_fd, msg.c_str(), msg.size());
+        write(write_fd, msg.c_str(), msg.size());
     }
 
     g_passwd_entry_active = false;
@@ -505,11 +507,12 @@ static void console_input_thread() {
             } else if (ch == 'D' || ch == 'd') {
                 g_console_prompt = PROMPT_DEBUG;
             } else if (ch == 'P' || ch == 'p') {
-                // Open a write fd to the same console for password prompts
+                // fd is O_RDONLY (keyboard input); open a separate O_WRONLY fd for output.
+                // Passing fd as read_fd and wfd as write_fd keeps them distinct.
                 int wfd = open("/dev/tty0", O_WRONLY | O_NOCTTY);
                 if (wfd < 0) wfd = open("/dev/console", O_WRONLY | O_NOCTTY);
                 g_console_prompt = PROMPT_PASSWD;
-                do_console_passwd_setup(wfd >= 0 ? wfd : fd);
+                do_console_passwd_setup(fd, wfd >= 0 ? wfd : fd);
                 if (wfd >= 0) close(wfd);
                 // do_console_passwd_setup resets g_console_prompt itself
             }
