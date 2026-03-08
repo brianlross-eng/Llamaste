@@ -1972,6 +1972,26 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] Auth: setup_complete=%s\n",
             g_auth.is_setup_complete() ? "yes" : "no (first-boot mode)");
 
+    // PCI rescan: WiFi firmware can't load at kernel boot time because the
+    // filesystem isn't mounted yet. The driver gives up silently and no WiFi
+    // interface appears. After our squashfs pivot the full rootfs (with
+    // /lib/firmware/) is available, so we rescan the PCI bus here to give
+    // the driver a second chance. Unbound devices get re-probed; this time
+    // firmware loads successfully and wlan0 appears.
+#ifndef _WIN32
+    {
+        int fd = open("/sys/bus/pci/rescan", O_WRONLY);
+        if (fd >= 0) {
+            write(fd, "1", 1);
+            close(fd);
+            fprintf(stderr, "[wifi] PCI rescan triggered — waiting for driver re-probe\n");
+            sleep(2);
+        } else {
+            fprintf(stderr, "[wifi] PCI rescan: cannot open sysfs (%m)\n");
+        }
+    }
+#endif
+
     // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found
 #ifndef _WIN32
     {
