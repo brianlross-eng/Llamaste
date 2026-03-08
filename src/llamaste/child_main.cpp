@@ -58,6 +58,7 @@
 #else
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -1885,9 +1886,11 @@ int child_main(const SupervisorConfig& config) {
         mkdir("/run/user/0", 0700);
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
 
-        // NOTE: do NOT set WLR_LIBINPUT_NO_DEVICES=1 here — that suppresses ALL
-        // keyboard and mouse input on real hardware. wlroots handles missing
-        // devices gracefully on its own (just logs a warning).
+        // WLR_LIBINPUT_NO_DEVICES=1: let cage start even if libinput finds 0 devices.
+        // Without this, wlroots aborts with "No input devices found" when udev hasn't
+        // enumerated devices yet. The flag does NOT prevent real devices from working —
+        // it only suppresses the hard-abort-on-zero-devices check.
+        setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
 
         // simpledrm (EFI framebuffer DRM) does not support hardware cursors.
         // Without this flag wlroots aborts during cursor plane setup on real hardware
@@ -1921,6 +1924,62 @@ int child_main(const SupervisorConfig& config) {
         // Force Wayland backend for GTK/Qt apps launched from autostart
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
+
+        // Start udevd so it can process /dev/input/ device nodes and set udev
+        // properties (ID_SEAT etc.) that libinput uses for device enumeration.
+        // Without udevd, libinput may find 0 input devices even though devtmpfs
+        // has created the event nodes.
+        {
+            pid_t upid = fork();
+            if (upid == 0) {
+                // Redirect udevd stdout/stderr to avoid console spam
+                int null_fd = open("/dev/null", O_WRONLY);
+                if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+                execl("/sbin/udevd", "udevd", "--daemon", nullptr);
+                execl("/usr/sbin/udevd", "udevd", "--daemon", nullptr);
+                _exit(1); // udevd not found — that's OK, devtmpfs nodes still exist
+            } else if (upid > 0) {
+                fprintf(stderr, "[child] Started udevd pid=%d\n", upid);
+                // Give udevd 1s to process existing devices before compositor starts
+                sleep(1);
+                // Trigger udev to process all existing kernel devices
+                pid_t tpid = fork();
+                if (tpid == 0) {
+                    int null_fd = open("/dev/null", O_WRONLY);
+                    if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+                    execl("/sbin/udevadm", "udevadm", "trigger", nullptr);
+                    execl("/usr/bin/udevadm", "udevadm", "trigger", nullptr);
+                    _exit(1);
+                } else if (tpid > 0) {
+                    waitpid(tpid, nullptr, 0);
+                    fprintf(stderr, "[child] udevadm trigger done\n");
+                }
+            } else {
+                fprintf(stderr, "[child] fork for udevd failed: %m\n");
+            }
+        }
+
+        // Diagnostic: log /dev/input/ contents so D debug view shows what
+        // libinput has to work with (helps diagnose keyboard issues)
+        {
+            DIR* dir = opendir("/dev/input");
+            if (dir) {
+                fprintf(stderr, "[child] /dev/input/ contents:\n");
+                struct dirent* ent;
+                while ((ent = readdir(dir)) != nullptr) {
+                    if (ent->d_name[0] == '.') continue;
+                    char path[64];
+                    snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+                    int fd = open(path, O_RDONLY | O_NONBLOCK);
+                    fprintf(stderr, "[child]   %s  open=%s\n",
+                            path, fd >= 0 ? "OK" : strerror(errno));
+                    if (fd >= 0) close(fd);
+                }
+                closedir(dir);
+            } else {
+                fprintf(stderr, "[child] /dev/input/ does not exist: %m\n");
+            }
+        }
 
         // Compositor spawn with crash fallback chain.
         // Each compositor is run in its own fork. If it exits with a crash signal,
