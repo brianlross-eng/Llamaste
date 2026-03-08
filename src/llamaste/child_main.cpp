@@ -1972,23 +1972,70 @@ int child_main(const SupervisorConfig& config) {
     fprintf(stderr, "[child] Auth: setup_complete=%s\n",
             g_auth.is_setup_complete() ? "yes" : "no (first-boot mode)");
 
-    // PCI rescan: WiFi firmware can't load at kernel boot time because the
-    // filesystem isn't mounted yet. The driver gives up silently and no WiFi
-    // interface appears. After our squashfs pivot the full rootfs (with
-    // /lib/firmware/) is available, so we rescan the PCI bus here to give
-    // the driver a second chance. Unbound devices get re-probed; this time
-    // firmware loads successfully and wlan0 appears.
+    // --- WiFi diagnostics: dump everything visible before attempting init ---
 #ifndef _WIN32
     {
-        int fd = open("/sys/bus/pci/rescan", O_WRONLY);
-        if (fd >= 0) {
-            write(fd, "1", 1);
-            close(fd);
-            fprintf(stderr, "[wifi] PCI rescan triggered — waiting for driver re-probe\n");
-            sleep(2);
+        // 1. All network interfaces and whether they look like WiFi
+        fprintf(stderr, "[wifi-diag] /sys/class/net interfaces:\n");
+        DIR* nd = opendir("/sys/class/net");
+        if (nd) {
+            struct dirent* ne;
+            while ((ne = readdir(nd))) {
+                if (ne->d_name[0] == '.') continue;
+                char wpath[256], ppath[256];
+                snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/wireless", ne->d_name);
+                snprintf(ppath, sizeof(ppath), "/sys/class/net/%s/phy80211", ne->d_name);
+                bool has_w = access(wpath, F_OK) == 0;
+                bool has_p = access(ppath, F_OK) == 0;
+                fprintf(stderr, "[wifi-diag]   %s%s%s\n", ne->d_name,
+                        has_w ? " [wireless]" : "",
+                        has_p ? " [phy80211]" : "");
+            }
+            closedir(nd);
         } else {
-            fprintf(stderr, "[wifi] PCI rescan: cannot open sysfs (%m)\n");
+            fprintf(stderr, "[wifi-diag]   cannot open /sys/class/net: %m\n");
         }
+
+        // 2. PCI devices — look for Realtek [10ec] or Intel [8086] WiFi
+        fprintf(stderr, "[wifi-diag] /sys/bus/pci/devices (network class 0280):\n");
+        DIR* pd = opendir("/sys/bus/pci/devices");
+        if (pd) {
+            struct dirent* pe;
+            while ((pe = readdir(pd))) {
+                if (pe->d_name[0] == '.') continue;
+                char cpath[256], vpath[256];
+                snprintf(cpath, sizeof(cpath), "/sys/bus/pci/devices/%s/class", pe->d_name);
+                FILE* cf = fopen(cpath, "r");
+                if (!cf) continue;
+                unsigned cls = 0;
+                fscanf(cf, "%x", &cls);
+                fclose(cf);
+                if ((cls >> 16) != 0x02) continue; // network class only
+                snprintf(vpath, sizeof(vpath), "/sys/bus/pci/devices/%s/vendor", pe->d_name);
+                FILE* vf = fopen(vpath, "r"); unsigned vid = 0;
+                if (vf) { fscanf(vf, "%x", &vid); fclose(vf); }
+                snprintf(vpath, sizeof(vpath), "/sys/bus/pci/devices/%s/device", pe->d_name);
+                FILE* df = fopen(vpath, "r"); unsigned did = 0;
+                if (df) { fscanf(df, "%x", &did); fclose(df); }
+                // Check if driver bound
+                char drv[256]; drv[0] = 0;
+                snprintf(vpath, sizeof(vpath), "/sys/bus/pci/devices/%s/driver", pe->d_name);
+                char lnk[256];
+                ssize_t lr = readlink(vpath, lnk, sizeof(lnk)-1);
+                if (lr > 0) { lnk[lr] = 0; snprintf(drv, sizeof(drv), " driver=%s", strrchr(lnk,'/')+1); }
+                fprintf(stderr, "[wifi-diag]   %s vendor=%04x device=%04x class=%06x%s\n",
+                        pe->d_name, vid, did, cls, drv);
+            }
+            closedir(pd);
+        }
+
+        // 3. rtw88 driver directory (exists if driver is loaded)
+        fprintf(stderr, "[wifi-diag] rtw88_8821ce driver bound: %s\n",
+                access("/sys/bus/pci/drivers/rtw88_8821ce", F_OK) == 0 ? "yes" : "no");
+
+        // 4. Firmware file accessible?
+        fprintf(stderr, "[wifi-diag] rtw8821c_fw.bin: %s\n",
+                access("/lib/firmware/rtw88/rtw8821c_fw.bin", F_OK) == 0 ? "found" : "MISSING");
     }
 #endif
 
