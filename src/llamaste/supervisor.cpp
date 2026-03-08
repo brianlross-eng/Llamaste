@@ -17,7 +17,9 @@
 #include <sys/reboot.h>
 #include <sys/statvfs.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <time.h>
@@ -84,8 +86,12 @@ static volatile int g_last_exit_code = -1;   // -1 = not yet exited
 static volatile int g_last_exit_signal = 0;  // non-zero = killed by signal
 
 // Console interaction state visible to display thread
-enum ConsolePrompt { PROMPT_NONE, PROMPT_SHUTDOWN, PROMPT_REBOOT, PROMPT_DEBUG };
+enum ConsolePrompt { PROMPT_NONE, PROMPT_SHUTDOWN, PROMPT_REBOOT, PROMPT_DEBUG, PROMPT_PASSWD };
 static volatile ConsolePrompt g_console_prompt = PROMPT_NONE;
+
+// Password entry state (PROMPT_PASSWD mode)
+// Display thread skips redraws while this is set so input isn't clobbered
+static std::atomic<bool> g_passwd_entry_active{false};
 
 // Log buffer — stderr tee'd here, displayed on 'D' keypress
 static std::mutex g_log_mutex;
@@ -332,6 +338,131 @@ static SystemMetrics gather_metrics() {
 
 // ---------- Console input thread (keyboard controls) ----------
 
+// Send a raw HTTP POST to 127.0.0.1:80 and return the response body
+static std::string http_post_localhost(const char* path, const std::string& body) {
+#ifndef _WIN32
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return "socket error";
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    addr.sin_addr.s_addr = htonl(0x7f000001); // 127.0.0.1
+
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return "connect error";
+    }
+
+    char req[2048];
+    int reqlen = snprintf(req, sizeof(req),
+        "POST %s HTTP/1.0\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        path, body.size(), body.c_str());
+
+    if (write(sock, req, reqlen) < 0) { close(sock); return "write error"; }
+
+    std::string resp;
+    char buf[256];
+    ssize_t n;
+    while ((n = read(sock, buf, sizeof(buf))) > 0)
+        resp.append(buf, n);
+    close(sock);
+
+    // Extract body after \r\n\r\n
+    auto pos = resp.find("\r\n\r\n");
+    if (pos != std::string::npos) return resp.substr(pos + 4);
+    return resp;
+#else
+    return "unsupported";
+#endif
+}
+
+// Read a password string from the console fd (raw mode, echo as *)
+// Writes prompt to write_fd. Returns the entered string.
+static std::string console_read_password(int read_fd, int write_fd, const char* prompt) {
+    std::string pw;
+    // Write prompt
+    write(write_fd, prompt, strlen(prompt));
+
+    char ch;
+    while (true) {
+        struct pollfd pfd = { read_fd, POLLIN, 0 };
+        if (poll(&pfd, 1, 5000) <= 0) continue; // 5s timeout per char
+        if (read(read_fd, &ch, 1) != 1) continue;
+
+        if (ch == '\n' || ch == '\r') {
+            write(write_fd, "\r\n", 2);
+            break;
+        } else if (ch == 127 || ch == '\b') { // Backspace / DEL
+            if (!pw.empty()) {
+                pw.pop_back();
+                write(write_fd, "\b \b", 3); // erase last *
+            }
+        } else if (ch == 27) { // Escape — cancel
+            write(write_fd, " [cancelled]\r\n", 14);
+            return "";
+        } else if (ch >= 32 && ch < 127) { // Printable
+            pw += ch;
+            write(write_fd, "*", 1);
+        }
+    }
+    return pw;
+}
+
+// Handle 'P' key: console-based password setup, bypasses Wayland input
+static void do_console_passwd_setup(int console_fd) {
+#ifndef _WIN32
+    g_passwd_entry_active = true;
+
+    // Clear line and show header
+    const char* hdr = "\r\n\033[1m=== Llamaste Password Setup ===\033[0m\r\n"
+                      "(Keyboard not working in browser? Set password here)\r\n\r\n";
+    write(console_fd, hdr, strlen(hdr));
+
+    std::string pw  = console_read_password(console_fd, console_fd, "New password (min 4 chars): ");
+    if (pw.empty()) { g_passwd_entry_active = false; return; }
+    if (pw.size() < 4) {
+        const char* err = "Password too short (min 4).\r\n";
+        write(console_fd, err, strlen(err));
+        g_passwd_entry_active = false;
+        return;
+    }
+
+    std::string pw2 = console_read_password(console_fd, console_fd, "Confirm password:           ");
+    if (pw != pw2) {
+        const char* err = "Passwords don't match. Try again (press P).\r\n";
+        write(console_fd, err, strlen(err));
+        g_passwd_entry_active = false;
+        return;
+    }
+
+    // Build JSON and POST to the HTTP server
+    std::string json_body = "{\"password\":\"" + pw + "\"}";
+    const char* sending = "Setting password... ";
+    write(console_fd, sending, strlen(sending));
+
+    std::string resp = http_post_localhost("/llamaste/auth/setup", json_body);
+
+    if (resp.find("\"success\"") != std::string::npos ||
+        resp.find("true") != std::string::npos) {
+        const char* ok = "OK!\r\nPassword set. Refresh the browser or press Enter in the web UI.\r\n";
+        write(console_fd, ok, strlen(ok));
+    } else {
+        // Show truncated response for diagnosis
+        std::string msg = "Response: " + resp.substr(0, 120) + "\r\n";
+        write(console_fd, msg.c_str(), msg.size());
+    }
+
+    g_passwd_entry_active = false;
+    g_console_prompt = PROMPT_NONE;
+#endif
+}
+
 static void console_input_thread() {
     fprintf(stderr, "[supervisor] Console input thread started\n");
 
@@ -366,13 +497,21 @@ static void console_input_thread() {
         if (read(fd, &ch, 1) != 1) continue;
 
         if (g_console_prompt == PROMPT_NONE) {
-            // Normal mode: S=shutdown, R=reboot, D=debug log
+            // Normal mode: S=shutdown, R=reboot, D=debug log, P=set password
             if (ch == 'S' || ch == 's') {
                 g_console_prompt = PROMPT_SHUTDOWN;
             } else if (ch == 'R' || ch == 'r') {
                 g_console_prompt = PROMPT_REBOOT;
             } else if (ch == 'D' || ch == 'd') {
                 g_console_prompt = PROMPT_DEBUG;
+            } else if (ch == 'P' || ch == 'p') {
+                // Open a write fd to the same console for password prompts
+                int wfd = open("/dev/tty0", O_WRONLY | O_NOCTTY);
+                if (wfd < 0) wfd = open("/dev/console", O_WRONLY | O_NOCTTY);
+                g_console_prompt = PROMPT_PASSWD;
+                do_console_passwd_setup(wfd >= 0 ? wfd : fd);
+                if (wfd >= 0) close(wfd);
+                // do_console_passwd_setup resets g_console_prompt itself
             }
         } else if (g_console_prompt == PROMPT_DEBUG) {
             // Any key exits debug view
@@ -432,6 +571,12 @@ static void console_display_thread(const SupervisorConfig& config) {
     }
 
     while (!g_shutdown_requested) {
+        // Pause display while password is being entered on the console
+        if (g_passwd_entry_active) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
         SystemMetrics m = gather_metrics();
 
         int ram_pct = (m.ram_total_kb > 0) ? (int)(100 * m.ram_used_kb / m.ram_total_kb) : 0;
@@ -662,7 +807,7 @@ static void console_display_thread(const SupervisorConfig& config) {
             hline(BL, BR, W);
         } else {
             // Normal: show available controls
-            snprintf(line_buf, sizeof(line_buf), "[S] Shutdown  [R] Reboot  [D] Debug");
+            snprintf(line_buf, sizeof(line_buf), "[S] Shutdown  [R] Reboot  [D] Debug  [P] Set Password");
             int len = (int)strlen(line_buf);
             int pad_left = (W - len) / 2;
             int pad_right = W - len - pad_left;
