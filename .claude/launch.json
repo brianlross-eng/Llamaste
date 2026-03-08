@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "virtualbox-vm",
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/c", "D:\\Llamaste\\scripts\\ensure-vm.bat"],
+      "port": 8080
+    },
+    {
+      "name": "host-tests",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["scripts/host-test.sh"],
+      "port": 0
+    }
+  ]
+}

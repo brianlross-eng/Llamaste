@@ -31,7 +31,9 @@
       "WebFetch(domain:lookup.icann.org)",
       "WebFetch(domain:www.whatsmydns.net)",
       "WebFetch(domain:instantdomainsearch.com)",
-      "WebFetch(domain:www.lazarus.org)"
+      "WebFetch(domain:www.lazarus.org)",
+      "Skill(claude-md-management:revise-claude-md)",
+      "Skill(claude-md-management:revise-claude-md:*)"
     ]
   }
 }

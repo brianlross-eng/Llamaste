@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" fill="white"/>
+
+  <!-- Main vertical line (ends at V, doesn't go through it) -->
+  <line x1="128" y1="70" x2="128" y2="230" stroke="black" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Triangle on lower-left side (hollow) -->
+  <polygon points="128,170 80,210 128,210" fill="none" stroke="black" stroke-width="4" stroke-linejoin="round"/>
+
+  <!-- Short horizontal line across middle -->
+  <line x1="100" y1="128" x2="156" y2="128" stroke="black" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Small V at top -->
+  <polyline points="114,55 128,70 142,55" fill="none" stroke="black" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
