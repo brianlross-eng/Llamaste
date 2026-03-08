@@ -6,6 +6,9 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <deque>
+#include <atomic>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -76,9 +79,62 @@ static volatile sig_atomic_t g_shutdown_requested = 0;
 static volatile pid_t g_child_pid = 0;
 static volatile sig_atomic_t g_reboot_requested = 0;  // 1 = reboot instead of poweroff
 
+// Last child exit info — shown in console display to help diagnose crashes
+static volatile int g_last_exit_code = -1;   // -1 = not yet exited
+static volatile int g_last_exit_signal = 0;  // non-zero = killed by signal
+
 // Console interaction state visible to display thread
-enum ConsolePrompt { PROMPT_NONE, PROMPT_SHUTDOWN, PROMPT_REBOOT };
+enum ConsolePrompt { PROMPT_NONE, PROMPT_SHUTDOWN, PROMPT_REBOOT, PROMPT_DEBUG };
 static volatile ConsolePrompt g_console_prompt = PROMPT_NONE;
+
+// Log buffer — stderr tee'd here, displayed on 'D' keypress
+static std::mutex g_log_mutex;
+static std::deque<std::string> g_log_lines;
+static constexpr int LOG_KEEP = 60;
+
+// Append a line to the in-memory log buffer (safe to call from any thread)
+static void log_append(const std::string& line) {
+    std::lock_guard<std::mutex> lk(g_log_mutex);
+    g_log_lines.push_back(line);
+    if ((int)g_log_lines.size() > LOG_KEEP)
+        g_log_lines.pop_front();
+}
+
+// Start a thread that reads from a pipe fd and tees to both stderr and g_log_lines.
+// Used to capture supervisor's own fprintf(stderr,...) output for the 'D' debug view.
+static void start_stderr_tee() {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return;
+
+    // Redirect stderr to write-end
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+
+    // Open the original stderr for pass-through (fd 2 was /dev/console)
+    int original_console = open("/dev/console", O_WRONLY | O_NOCTTY);
+
+    int read_fd = pipefd[0];
+    std::thread([read_fd, original_console]() {
+        char buf[512];
+        std::string partial;
+        while (true) {
+            ssize_t n = read(read_fd, buf, sizeof(buf) - 1);
+            if (n <= 0) break;
+            buf[n] = '\0';
+            // Pass through to original console
+            if (original_console >= 0)
+                write(original_console, buf, n);
+            // Split into lines and add to buffer
+            partial += buf;
+            size_t pos;
+            while ((pos = partial.find('\n')) != std::string::npos) {
+                log_append(partial.substr(0, pos));
+                partial = partial.substr(pos + 1);
+            }
+        }
+        if (original_console >= 0) close(original_console);
+    }).detach();
+}
 
 static void supervisor_sigchld(int) {
     g_child_exited = 1;
@@ -310,12 +366,17 @@ static void console_input_thread() {
         if (read(fd, &ch, 1) != 1) continue;
 
         if (g_console_prompt == PROMPT_NONE) {
-            // Normal mode: S=shutdown, R=reboot
+            // Normal mode: S=shutdown, R=reboot, D=debug log
             if (ch == 'S' || ch == 's') {
                 g_console_prompt = PROMPT_SHUTDOWN;
             } else if (ch == 'R' || ch == 'r') {
                 g_console_prompt = PROMPT_REBOOT;
+            } else if (ch == 'D' || ch == 'd') {
+                g_console_prompt = PROMPT_DEBUG;
             }
+        } else if (g_console_prompt == PROMPT_DEBUG) {
+            // Any key exits debug view
+            g_console_prompt = PROMPT_NONE;
         } else {
             // Confirmation mode: Y=confirm, N/anything else=cancel
             if (ch == 'Y' || ch == 'y') {
@@ -456,6 +517,10 @@ static void console_display_thread(const SupervisorConfig& config) {
         }
         hline(ML, MR, W);
 
+        // Pivot status (is squashfs overlay mounted? labwc only exists in squashfs)
+        bool pivot_done = (access("/usr/bin/labwc", F_OK) == 0 ||
+                           access("/usr/sbin/wpa_supplicant", F_OK) == 0);
+
         // Status
         {
             char buf[128];
@@ -468,6 +533,21 @@ static void console_display_thread(const SupervisorConfig& config) {
             for (int i = visible_len + 2; i < W; i++) out += " ";
             out += V;
             out += "\n";
+        }
+
+        // Pivot + last exit info
+        {
+            char buf[80];
+            if (g_last_exit_signal > 0) {
+                snprintf(buf, sizeof(buf), "Exit:     signal %d  Pivot: %s",
+                         g_last_exit_signal, pivot_done ? "YES" : "NO");
+            } else if (g_last_exit_code >= 0) {
+                snprintf(buf, sizeof(buf), "Exit:     code %d  Pivot: %s",
+                         g_last_exit_code, pivot_done ? "YES" : "NO");
+            } else {
+                snprintf(buf, sizeof(buf), "Pivot:    %s", pivot_done ? "YES" : "NO");
+            }
+            padded(buf, W);
         }
 
         // Metrics
@@ -510,9 +590,57 @@ static void console_display_thread(const SupervisorConfig& config) {
 
         hline(ML, MR, W);
 
-        // Bottom info — key hints or confirmation prompt
+        // Bottom info — key hints, confirmation prompt, or debug log
         ConsolePrompt prompt = g_console_prompt;
-        if (prompt == PROMPT_SHUTDOWN) {
+        if (prompt == PROMPT_DEBUG) {
+            // Debug view: show last log lines, any key to exit
+            hline(BL, BR, W);
+            // Switch to full-screen debug output
+            out += "\033[2J\033[H";
+            out += "\033[1m=== LLAMASTE DEBUG LOG (any key to exit) ===\033[0m\n";
+            // Last 15 lines of supervisor log
+            {
+                std::lock_guard<std::mutex> lk(g_log_mutex);
+                int start = (int)g_log_lines.size() > 15
+                            ? (int)g_log_lines.size() - 15 : 0;
+                for (int i = start; i < (int)g_log_lines.size(); i++) {
+                    const std::string& l = g_log_lines[i];
+                    out += (l.size() > 78 ? l.substr(0, 78) : l) + "\n";
+                }
+            }
+            // Last 15 lines of child log
+            out += "\033[1m--- child ---\033[0m\n";
+            {
+                FILE* cf = fopen("/tmp/child.log", "r");
+                if (cf) {
+                    // Seek to last ~1200 bytes
+                    fseek(cf, 0, SEEK_END);
+                    long sz = ftell(cf);
+                    if (sz > 1200) fseek(cf, sz - 1200, SEEK_SET);
+                    else rewind(cf);
+                    char cbuf[1300];
+                    size_t nr = fread(cbuf, 1, sizeof(cbuf) - 1, cf);
+                    fclose(cf);
+                    cbuf[nr] = '\0';
+                    // Find first newline (may be mid-line after seek)
+                    char* start_ptr = (char*)memchr(cbuf, '\n', nr);
+                    const char* p = start_ptr ? start_ptr + 1 : cbuf;
+                    // Output, truncating long lines
+                    const char* line_start = p;
+                    for (const char* c = p; *c; c++) {
+                        if (*c == '\n' || *(c + 1) == '\0') {
+                            int len = (int)(c - line_start + (*c == '\n' ? 0 : 1));
+                            if (len > 78) len = 78;
+                            out.append(line_start, len);
+                            out += "\n";
+                            line_start = c + 1;
+                        }
+                    }
+                } else {
+                    out += "(no child log yet)\n";
+                }
+            }
+        } else if (prompt == PROMPT_SHUTDOWN) {
             // Shutdown confirmation
             const char* confirm_text = "\033[33m  Shutdown?  Press [Y] to confirm, any key to cancel\033[0m";
             int visible_len = 53;  // visible chars without ANSI
@@ -521,6 +649,7 @@ static void console_display_thread(const SupervisorConfig& config) {
             for (int i = visible_len; i < W; i++) out += " ";
             out += V;
             out += "\n";
+            hline(BL, BR, W);
         } else if (prompt == PROMPT_REBOOT) {
             // Reboot confirmation
             const char* confirm_text = "\033[33m  Reboot?    Press [Y] to confirm, any key to cancel\033[0m";
@@ -530,9 +659,10 @@ static void console_display_thread(const SupervisorConfig& config) {
             for (int i = visible_len; i < W; i++) out += " ";
             out += V;
             out += "\n";
+            hline(BL, BR, W);
         } else {
             // Normal: show available controls
-            snprintf(line_buf, sizeof(line_buf), "[S] Shutdown       [R] Reboot");
+            snprintf(line_buf, sizeof(line_buf), "[S] Shutdown  [R] Reboot  [D] Debug");
             int len = (int)strlen(line_buf);
             int pad_left = (W - len) / 2;
             int pad_right = W - len - pad_left;
@@ -544,9 +674,8 @@ static void console_display_thread(const SupervisorConfig& config) {
             for (int i = 0; i < pad_right; i++) out += " ";
             out += V;
             out += "\n";
+            hline(BL, BR, W);
         }
-
-        hline(BL, BR, W);
 
         // Write to console
         ssize_t wr = write(console_fd, out.c_str(), out.size());
@@ -669,6 +798,9 @@ static void watchdog_kicker_thread() {
     std::thread kicker_thread(watchdog_kicker_thread);
     kicker_thread.detach();
 
+    // Tee supervisor stderr to in-memory log buffer (for 'D' debug view on console)
+    start_stderr_tee();
+
     // Start console display + input threads (all boot modes)
     std::thread display_thread(console_display_thread, config);
     display_thread.detach();
@@ -697,15 +829,20 @@ static void watchdog_kicker_thread() {
 
         fprintf(stderr, "[supervisor] Child exited (status=%d)\n", status);
 
-        if (g_shutdown_requested) break;
-
+        // Record exit reason for console display
         if (WIFEXITED(status)) {
+            g_last_exit_code = WEXITSTATUS(status);
+            g_last_exit_signal = 0;
             fprintf(stderr, "[supervisor] Child exited with code %d\n",
                     WEXITSTATUS(status));
         } else if (WIFSIGNALED(status)) {
+            g_last_exit_code = -1;
+            g_last_exit_signal = WTERMSIG(status);
             fprintf(stderr, "[supervisor] Child killed by signal %d\n",
                     WTERMSIG(status));
         }
+
+        if (g_shutdown_requested) break;
 
         time_t now = time(nullptr);
         if (now - last_crash < 60) {

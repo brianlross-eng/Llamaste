@@ -57,6 +57,7 @@
 #include <io.h>
 #else
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -1384,6 +1385,38 @@ int child_main(const SupervisorConfig& config) {
     signal(SIGTERM, child_signal);
     signal(SIGINT, child_signal);
     signal(SIGPIPE, SIG_IGN);  // ignore broken pipe — client disconnect mid-response must not crash child
+
+    // Tee stderr to /tmp/child.log so the supervisor's 'D' debug view can show it.
+    // Keep writing to /dev/console too (for serial debugging).
+#ifndef _WIN32
+    {
+        int log_fd = open("/tmp/child.log",
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (log_fd >= 0) {
+            int pipefd[2];
+            if (pipe2(pipefd, O_CLOEXEC) == 0) {
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
+                int read_end = pipefd[0];
+                int orig_console = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+                std::thread([read_end, log_fd, orig_console]() {
+                    char buf[512];
+                    while (true) {
+                        ssize_t n = read(read_end, buf, sizeof(buf));
+                        if (n <= 0) break;
+                        write(log_fd, buf, n);
+                        if (orig_console >= 0) write(orig_console, buf, n);
+                    }
+                    close(read_end);
+                    close(log_fd);
+                    if (orig_console >= 0) close(orig_console);
+                }).detach();
+            } else {
+                close(log_fd);
+            }
+        }
+    }
+#endif
 
     g_start_time = time(nullptr);
     g_boot_mode = config.boot_mode;
