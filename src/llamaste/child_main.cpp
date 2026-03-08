@@ -1974,9 +1974,17 @@ int child_main(const SupervisorConfig& config) {
 
     // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found
 #ifndef _WIN32
-    if (g_wifi.init()) {
-        const std::string& wifi_iface = g_wifi.has_wifi() ?
-            g_wifi.status().iface : "";
+    {
+        bool wifi_init_ok = g_wifi.init();
+        std::string wifi_iface;
+        if (wifi_init_ok && g_wifi.has_wifi())
+            wifi_iface = g_wifi.status().iface;
+        fprintf(stderr, "[wifi] init=%s has_wifi=%s iface='%s' mode='%s'\n",
+                wifi_init_ok ? "ok" : "fail",
+                g_wifi.has_wifi() ? "yes" : "no",
+                wifi_iface.c_str(),
+                g_boot_mode.c_str());
+    if (wifi_init_ok) {
         if (!wifi_iface.empty()) {
             spawn_wpa_supplicant(wifi_iface);
             // Give wpa_supplicant a moment to create its control socket
@@ -2010,6 +2018,7 @@ int child_main(const SupervisorConfig& config) {
             spawn_dhcpcd(wifi_iface);
         }
     }
+    } // end outer wifi block
 #endif
 
     // Start session expiry thread (runs every 60 seconds)
