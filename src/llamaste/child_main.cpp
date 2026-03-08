@@ -1913,6 +1913,11 @@ int child_main(const SupervisorConfig& config) {
         // without seatd or logind — when running as PID 1 there is no seat manager.
         setenv("LIBSEAT_BACKEND", "noop", 1);
 
+        // Disable atomic KMS — simpledrm (EFI framebuffer DRM) on bare metal
+        // often doesn't support atomic modesetting. Without this flag wlroots
+        // probes atomic ioctls, gets unexpected results, and segfaults (signal 11).
+        setenv("WLR_DRM_NO_ATOMIC", "1", 1);
+
         // PATH for autostart script and child processes
         setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
 
@@ -1920,32 +1925,52 @@ int child_main(const SupervisorConfig& config) {
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
 
+        // Compositor spawn with crash fallback chain.
+        // Each compositor is run in its own fork. If it exits with a crash signal,
+        // we try the next one. Normal exit (e.g. user closed) stops the chain.
         std::thread([]() {
-            pid_t pid = fork();
-            if (pid == 0) {
-                // Child: exec labwc — it reads /etc/labwc/rc.xml and runs
-                // /etc/labwc/autostart which waits for HTTP then opens cog.
-                execl("/usr/bin/labwc", "labwc", nullptr);
-                // Fallback: cage kiosk if labwc not found
-                if (access("/usr/bin/cog", X_OK) == 0) {
-                    execl("/usr/bin/cage", "cage", "-s", "--",
-                          "/usr/bin/cog", "http://localhost", nullptr);
+            // Helper: try one compositor, return its wait status
+            auto try_compositor = [](const char* path,
+                                     std::function<void()> exec_fn) -> int {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    exec_fn();
+                    _exit(127);
                 }
-                execl("/usr/bin/weston", "weston", "--shell=kiosk",
-                      "--continue-without-input", nullptr);
-                fprintf(stderr, "[child] No compositor available (errno=%d: %s)\n",
-                        errno, strerror(errno));
-                _exit(1);
-            } else if (pid > 0) {
+                if (pid < 0) return -1;
                 g_cage_pid.store(pid);
-                fprintf(stderr, "[child] labwc compositor launched (pid %d)\n", pid);
                 int status = 0;
                 waitpid(pid, &status, 0);
                 g_cage_pid.store(0);
-                fprintf(stderr, "[child] labwc compositor exited (status %d)\n", status);
-            } else {
-                fprintf(stderr, "[child] Failed to fork labwc: %s\n", strerror(errno));
-            }
+                fprintf(stderr, "[child] %s exited (raw status %d)\n", path, status);
+                return status;
+            };
+
+            // 1. labwc (stacking WM, reads /etc/labwc/ config)
+            int st = try_compositor("labwc", []() {
+                execl("/usr/bin/labwc", "labwc", nullptr);
+            });
+            // WIFSIGNALED: crashed — try next. Normal exit: stop.
+            if (st >= 0 && !WIFSIGNALED(st)) return;
+
+            fprintf(stderr, "[child] labwc crashed (signal %d), trying cage\n",
+                    WTERMSIG(st));
+
+            // 2. cage + cog (minimal kiosk compositor)
+            st = try_compositor("cage", []() {
+                execl("/usr/bin/cage", "cage", "-s", "--",
+                      "/usr/bin/cog", "http://localhost", nullptr);
+            });
+            if (st >= 0 && !WIFSIGNALED(st)) return;
+
+            fprintf(stderr, "[child] cage crashed (signal %d), trying weston\n",
+                    WTERMSIG(st));
+
+            // 3. weston (most robust, has its own DRM backend)
+            try_compositor("weston", []() {
+                execl("/usr/bin/weston", "weston", "--shell=kiosk",
+                      "--continue-without-input", nullptr);
+            });
         }).detach();
     }
 #endif
