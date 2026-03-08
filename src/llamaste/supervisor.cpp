@@ -21,10 +21,12 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
 #include <termios.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <linux/watchdog.h>
 #endif
 
@@ -913,6 +915,138 @@ static void watchdog_kicker_thread() {
     kick_watchdog(g_watchdog_fd);
 }
 
+// ---------------------------------------------------------------------------
+// Console WiFi pre-flight
+// ---------------------------------------------------------------------------
+// Called BEFORE the display thread starts so the terminal is uncontested.
+// Detects WiFi hardware, checks for saved networks, and shows SSID/PSK
+// prompts if this is the first boot in server mode.
+// wpa_supplicant is NOT running yet — child_main starts it with the saved
+// config, so we skip the wpa_cli reconfigure step here.
+// ---------------------------------------------------------------------------
+#ifndef _WIN32
+static std::string supervisor_detect_wifi_iface() {
+    DIR* d = opendir("/sys/class/net");
+    if (!d) return "";
+    struct dirent* de;
+    while ((de = readdir(d)) != nullptr) {
+        if (de->d_name[0] == '.') continue;
+        char phy[256];
+        snprintf(phy, sizeof(phy), "/sys/class/net/%s/phy80211", de->d_name);
+        struct stat st;
+        if (stat(phy, &st) == 0) {
+            std::string iface = de->d_name;
+            closedir(d);
+            return iface;
+        }
+    }
+    closedir(d);
+    return "";
+}
+
+static bool supervisor_wifi_has_saved_networks() {
+    FILE* f = fopen("/data/llamaste/wifi/wpa.conf", "r");
+    if (!f) return false;
+    char line[256];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "network={")) { found = true; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+static void supervisor_console_wifi_setup(const std::string& iface) {
+    int tty = open("/dev/tty1", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (tty < 0)
+        tty = open("/dev/console", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (tty < 0) {
+        fprintf(stderr, "[wifi] console_wifi_setup: cannot open tty: %m\n");
+        return;
+    }
+
+    struct termios old_tio, raw_tio;
+    tcgetattr(tty, &old_tio);
+    raw_tio = old_tio;
+    cfmakeraw(&raw_tio);
+    raw_tio.c_oflag |= OPOST | ONLCR;
+    tcsetattr(tty, TCSAFLUSH, &raw_tio);
+
+    auto wstr = [&](const char* s) { write(tty, s, strlen(s)); };
+
+    wstr("\033[2J\033[H\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("  |           Llamaste  -  WiFi Setup                |\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("\r\n");
+    wstr("  WiFi hardware detected: ");
+    wstr(iface.c_str());
+    wstr("\r\n");
+    wstr("  No saved networks found.  Enter credentials below,\r\n");
+    wstr("  or press Enter to skip and use the web UI later.\r\n");
+    wstr("\r\n");
+
+    auto read_line = [&](bool echo_chars, size_t max_len) -> std::string {
+        std::string s;
+        char c;
+        while (read(tty, &c, 1) == 1) {
+            if (c == '\r' || c == '\n') { wstr("\r\n"); break; }
+            if (c == 3 || c == 4)      { s.clear(); wstr("\r\n"); break; }
+            if ((c == 127 || c == '\b') && !s.empty()) {
+                s.pop_back(); wstr("\b \b"); continue;
+            }
+            if (c >= 0x20 && c < 0x7f && s.size() < max_len) {
+                s += c;
+                if (echo_chars) write(tty, &c, 1); else wstr("*");
+            }
+        }
+        return s;
+    };
+
+    wstr("  SSID     : ");
+    std::string ssid = read_line(true, 63);
+
+    if (ssid.empty()) {
+        wstr("  Skipping WiFi setup.\r\n\r\n");
+        tcsetattr(tty, TCSAFLUSH, &old_tio);
+        close(tty);
+        return;
+    }
+
+    wstr("  Password : ");
+    std::string psk = read_line(false, 63);
+    wstr("\r\n");
+
+    tcsetattr(tty, TCSAFLUSH, &old_tio);
+    close(tty);
+
+    const char* conf = "/data/llamaste/wifi/wpa.conf";
+    FILE* f = fopen(conf, "a");
+    if (!f) {
+        fprintf(stderr, "[wifi] console_wifi_setup: cannot write wpa.conf: %m\n");
+        return;
+    }
+    fprintf(f, "\nnetwork={\n");
+    fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());
+    fprintf(f, "    psk=\"%s\"\n",  psk.c_str());
+    fprintf(f, "    key_mgmt=WPA-PSK\n");
+    fprintf(f, "}\n");
+    fclose(f);
+    fprintf(stderr, "[wifi] console_wifi_setup: saved SSID '%s'\n", ssid.c_str());
+    // wpa_supplicant not yet running — child_main will start it with the saved config.
+}
+
+static void supervisor_preflight_wifi(const SupervisorConfig& config) {
+    if (config.boot_mode == "desktop") return;
+    std::string iface = supervisor_detect_wifi_iface();
+    if (iface.empty()) return;
+    if (supervisor_wifi_has_saved_networks()) return;
+    fprintf(stderr, "[wifi] No saved networks — showing console setup (iface=%s)\n",
+            iface.c_str());
+    supervisor_console_wifi_setup(iface);
+}
+#endif
+
 // ---------- Main supervisor loop ----------
 
 [[noreturn]] void supervisor_run(const SupervisorConfig& config) {
@@ -948,6 +1082,12 @@ static void watchdog_kicker_thread() {
 
     // Tee supervisor stderr to in-memory log buffer (for 'D' debug view on console)
     start_stderr_tee();
+
+    // First-boot WiFi setup: run before display thread so the terminal is clean.
+    // Shows SSID/PSK prompts if server mode + WiFi hardware + no saved networks.
+#ifndef _WIN32
+    supervisor_preflight_wifi(config);
+#endif
 
     // Start console display + input threads (all boot modes)
     std::thread display_thread(console_display_thread, config);
