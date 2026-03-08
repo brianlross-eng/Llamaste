@@ -525,6 +525,38 @@ std::string init_parse_boot_mode() {
     return "server";
 }
 
+void init_bring_up_loopback() {
+#ifndef _WIN32
+    // Bring up lo (127.0.0.1) — no init system does this for us.
+    // Without it, http://localhost is "Network unreachable".
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return;
+
+    struct ifreq ifr = {};
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ - 1);
+
+    // Set address 127.0.0.1
+    struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = htonl(0x7f000001); // 127.0.0.1
+    ioctl(sock, SIOCSIFADDR, &ifr);
+
+    // Set netmask 255.0.0.0
+    struct sockaddr_in* mask = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_netmask);
+    mask->sin_family = AF_INET;
+    mask->sin_addr.s_addr = htonl(0xff000000);
+    ioctl(sock, SIOCSIFNETMASK, &ifr);
+
+    // Bring up
+    ioctl(sock, SIOCGIFFLAGS, &ifr);
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
+    ioctl(sock, SIOCSIFFLAGS, &ifr);
+
+    close(sock);
+    fprintf(stderr, "[init] Loopback interface lo brought up (127.0.0.1)\n");
+#endif
+}
+
 void init_apply_network_config() {
 #ifndef _WIN32
     // Read /data/config/network.json — if mode=static, apply settings.
