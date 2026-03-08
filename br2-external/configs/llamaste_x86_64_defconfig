@@ -120,6 +120,10 @@ BR2_PACKAGE_LIBINPUT=y
 BR2_PACKAGE_EUDEV=y
 BR2_PACKAGE_SEATD=y
 BR2_PACKAGE_LIBXKBCOMMON=y
+# xkeyboard-config: XKB keymap data files (/usr/share/X11/xkb/).
+# REQUIRED for keyboard input — without this xkb_keymap_new_from_names()
+# returns NULL and wlroots/cage crashes (SIGSEGV) on first key press.
+BR2_PACKAGE_XKEYBOARD_CONFIG=y
 BR2_PACKAGE_PIXMAN=y
 # labwc deps (pulled in via select, listed explicitly for clarity)
 BR2_PACKAGE_CAIRO=y

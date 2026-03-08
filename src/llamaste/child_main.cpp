@@ -1913,6 +1913,14 @@ int child_main(const SupervisorConfig& config) {
         // without seatd or logind — when running as PID 1 there is no seat manager.
         setenv("LIBSEAT_BACKEND", "noop", 1);
 
+        // XKB keymap data root — libxkbcommon looks here for rules/symbols/etc.
+        // xkeyboard-config installs to /usr/share/X11/xkb. Without this explicit
+        // path, libxkbcommon may use a compile-time default that doesn't exist on
+        // this rootfs. If the keymap can't be compiled, wlroots stores a NULL
+        // keyboard pointer and segfaults (SIGSEGV) on the first key press.
+        if (!getenv("XKB_CONFIG_ROOT"))
+            setenv("XKB_CONFIG_ROOT", "/usr/share/X11/xkb", 1);
+
         // Disable atomic KMS — simpledrm (EFI framebuffer DRM) on bare metal
         // often doesn't support atomic modesetting. Without this flag wlroots
         // probes atomic ioctls, gets unexpected results, and segfaults (signal 11).
@@ -1982,53 +1990,93 @@ int child_main(const SupervisorConfig& config) {
         }
 
         // Compositor spawn with crash fallback chain.
-        // Each compositor is run in its own fork. If it exits with a crash signal,
-        // we try the next one. Normal exit (e.g. user closed) stops the chain.
+        //
+        // Strategy: cage is primary (wlroots, supports zwp_text_input_v3).
+        //   - cage+cog are restarted up to 5 times if cage crashes or cog crashes.
+        //   - If cage exits cleanly (user action, exit 0) → stop.
+        //   - If exec fails (exit 127, binary not found) → fall through to next.
+        // Fallback 1: labwc (stacking WM). Autostart launches cog.
+        // Fallback 2: weston (most protocol-complete, own DRM backend).
+        //
+        // KEY REQUIREMENT: xkeyboard-config must be installed (BR2_PACKAGE_XKEYBOARD_CONFIG=y).
+        // Without XKB data files, xkb_keymap_new_from_names() returns NULL and wlroots
+        // segfaults (SIGSEGV) on the first key press. XKB_CONFIG_ROOT env is also set above.
         std::thread([]() {
-            // Helper: try one compositor, return its wait status
-            auto try_compositor = [](const char* path,
+            // Helper: try one compositor, return its waitpid raw status.
+            // Returns -1 if fork failed.
+            auto try_compositor = [](const char* label,
                                      std::function<void()> exec_fn) -> int {
                 pid_t pid = fork();
                 if (pid == 0) {
                     exec_fn();
-                    _exit(127);
+                    _exit(127);  // exec failed (binary not found)
                 }
-                if (pid < 0) return -1;
+                if (pid < 0) {
+                    fprintf(stderr, "[child] fork for %s failed: %m\n", label);
+                    return -1;
+                }
                 g_cage_pid.store(pid);
                 int status = 0;
                 waitpid(pid, &status, 0);
                 g_cage_pid.store(0);
-                fprintf(stderr, "[child] %s exited (raw status %d)\n", path, status);
+                if (WIFSIGNALED(status))
+                    fprintf(stderr, "[child] %s crashed signal=%d\n", label, WTERMSIG(status));
+                else
+                    fprintf(stderr, "[child] %s exited code=%d\n", label, WEXITSTATUS(status));
                 return status;
             };
 
-            // 1. cage + cog (kiosk compositor — wlroots text-input-v3, full keyboard)
-            // labwc 0.6.6 lacks zwp_text_input_v3 so typing in cog/WebKit forms
-            // doesn't work. cage uses wlroots directly which does support it.
-            int st = try_compositor("cage", []() {
-                execl("/usr/bin/cage", "cage", "-s", "--",
-                      "/usr/bin/cog", "http://localhost", nullptr);
-            });
-            // WIFSIGNALED: crashed — try next. Normal exit: stop.
-            if (st >= 0 && !WIFSIGNALED(st)) return;
+            // Helper: "was this a clean intentional exit (exit 0)?"
+            // exit 0   → clean user-initiated stop, stop the chain.
+            // signal   → crashed, try next compositor.
+            // exit 127 → exec failed (binary not installed), try next.
+            // other    → abnormal, try next.
+            auto is_clean_exit = [](int st) -> bool {
+                return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+            };
 
-            fprintf(stderr, "[child] cage crashed (signal %d), trying labwc\n",
-                    WTERMSIG(st));
+            // 1. cage + cog (kiosk compositor — wlroots-based, lightweight).
+            //    cage 0.1.5 supports zwp_text_input_v3 via wlroots.
+            //    Restart up to 5 times so a transient cog crash doesn't kill the UI.
+            {
+                bool cage_ran_cleanly = false;
+                for (int attempt = 0; attempt < 5; attempt++) {
+                    if (attempt > 0) {
+                        fprintf(stderr, "[child] cage+cog restart %d/5\n", attempt + 1);
+                        sleep(1);
+                    }
+                    int st = try_compositor("cage+cog", []() {
+                        execl("/usr/bin/cage", "cage", "-s", "--",
+                              "/usr/bin/cog", "http://localhost", nullptr);
+                    });
+                    if (st < 0) break;  // fork failed — give up on cage
+                    if (is_clean_exit(st)) { cage_ran_cleanly = true; break; }
+                    // If exec failed (not installed), bail immediately — don't loop
+                    if (WIFEXITED(st) && WEXITSTATUS(st) == 127) break;
+                    // Crashed (signal) or non-zero exit — retry
+                }
+                if (cage_ran_cleanly) return;  // clean exit → stop chain
+            }
 
-            // 2. labwc (stacking WM — fallback if cage fails)
-            st = try_compositor("labwc", []() {
-                execl("/usr/bin/labwc", "labwc", nullptr);
-            });
-            if (st >= 0 && !WIFSIGNALED(st)) return;
+            fprintf(stderr, "[child] cage unavailable/crashed, trying labwc\n");
 
-            fprintf(stderr, "[child] labwc crashed (signal %d), trying weston\n",
-                    WTERMSIG(st));
+            // 2. labwc (stacking WM — reads /etc/labwc/autostart which launches cog)
+            {
+                int st = try_compositor("labwc", []() {
+                    execl("/usr/bin/labwc", "labwc", nullptr);
+                });
+                if (st >= 0 && is_clean_exit(st)) return;
+            }
 
-            // 3. weston (most robust, has its own DRM backend)
-            try_compositor("weston", []() {
-                execl("/usr/bin/weston", "weston", "--shell=kiosk",
-                      "--continue-without-input", nullptr);
-            });
+            fprintf(stderr, "[child] labwc unavailable/crashed, trying weston\n");
+
+            // 3. weston (most robust fallback — own DRM backend, broad protocol support)
+            {
+                try_compositor("weston", []() {
+                    execl("/usr/bin/weston", "weston", "--shell=kiosk",
+                          "--continue-without-input", nullptr);
+                });
+            }
         }).detach();
     }
 #endif
