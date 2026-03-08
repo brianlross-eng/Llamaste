@@ -2029,13 +2029,40 @@ int child_main(const SupervisorConfig& config) {
             closedir(pd);
         }
 
-        // 3. rtw88 driver directory (exists if driver is loaded)
-        fprintf(stderr, "[wifi-diag] rtw88_8821ce driver bound: %s\n",
-                access("/sys/bus/pci/drivers/rtw88_8821ce", F_OK) == 0 ? "yes" : "no");
+        // 3. All rtw* PCI driver directories (tells us what's compiled into kernel)
+        fprintf(stderr, "[wifi-diag] /sys/bus/pci/drivers/ rtw* entries:\n");
+        DIR* drv_d = opendir("/sys/bus/pci/drivers");
+        if (drv_d) {
+            struct dirent* de;
+            bool found_any = false;
+            while ((de = readdir(drv_d))) {
+                if (de->d_name[0] == '.') continue;
+                if (strncmp(de->d_name, "rtw", 3) == 0 || strncmp(de->d_name, "8821", 4) == 0) {
+                    fprintf(stderr, "[wifi-diag]   %s\n", de->d_name);
+                    found_any = true;
+                }
+            }
+            if (!found_any) fprintf(stderr, "[wifi-diag]   (none)\n");
+            closedir(drv_d);
+        }
 
-        // 4. Firmware file accessible?
+        // 4. Driver symlink for the RTL8821CE device specifically
+        {
+            char lnk[512]; lnk[0] = 0;
+            ssize_t lr = readlink("/sys/bus/pci/devices/0000:01:00.0/driver", lnk, sizeof(lnk)-1);
+            if (lr > 0) { lnk[lr] = 0; fprintf(stderr, "[wifi-diag] 0000:01:00.0 driver: %s\n", lnk); }
+            else fprintf(stderr, "[wifi-diag] 0000:01:00.0 driver: NONE (no driver bound)\n");
+        }
+
+        // 5. Firmware file accessible?
         fprintf(stderr, "[wifi-diag] rtw8821c_fw.bin: %s\n",
                 access("/lib/firmware/rtw88/rtw8821c_fw.bin", F_OK) == 0 ? "found" : "MISSING");
+
+        // 6. Kernel version (confirms which kernel is running)
+        {
+            FILE* kv = fopen("/proc/version", "r");
+            if (kv) { char buf[256]; if (fgets(buf, sizeof(buf), kv)) fprintf(stderr, "[wifi-diag] kernel: %s", buf); fclose(kv); }
+        }
     }
 #endif
 
