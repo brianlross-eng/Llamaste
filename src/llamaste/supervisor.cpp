@@ -323,6 +323,8 @@ static void console_input_thread() {
                     g_reboot_requested = 1;
                 }
                 g_shutdown_requested = 1;
+                // Wake up the supervisor's waitpid() so it can reach reboot()
+                if (g_child_pid > 0) kill(g_child_pid, SIGTERM);
             } else {
                 // Cancel — any key other than Y cancels
                 g_console_prompt = PROMPT_NONE;

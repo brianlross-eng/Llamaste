@@ -1876,6 +1876,10 @@ int child_main(const SupervisorConfig& config) {
         setenv("XDG_CONFIG_DIRS", "/etc", 1);
         setenv("XDG_CONFIG_HOME", "/etc", 1);
 
+        // Required for wlroots-based compositors (labwc, cage, weston) to run
+        // without seatd or logind — when running as PID 1 there is no seat manager.
+        setenv("LIBSEAT_BACKEND", "noop", 1);
+
         // PATH for autostart script and child processes
         setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
 
