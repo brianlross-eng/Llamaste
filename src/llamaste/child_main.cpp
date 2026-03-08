@@ -59,6 +59,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <termios.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -727,6 +728,136 @@ static bool spawn_rpc_server() {
             pid, g_rpc_port);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Console WiFi Setup
+// ---------------------------------------------------------------------------
+// Shows a simple text UI on /dev/tty1 so the user can type SSID + password
+// using a physical keyboard, without needing the web UI.  Called in server
+// mode only when WiFi hardware is present but no networks are configured yet.
+// Returns true if a network was saved and wpa_supplicant was told to reload.
+#ifndef _WIN32
+static bool console_wifi_setup(const std::string& iface) {
+    // Try VGA console first (/dev/tty1), fall back to /dev/console.
+    int tty = open("/dev/tty1", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (tty < 0)
+        tty = open("/dev/console", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (tty < 0) {
+        fprintf(stderr, "[wifi] console_wifi_setup: cannot open tty: %m\n");
+        return false;
+    }
+
+    // Switch to raw mode (character-by-character) but keep output CR/LF.
+    struct termios old_tio, raw_tio;
+    tcgetattr(tty, &old_tio);
+    raw_tio = old_tio;
+    cfmakeraw(&raw_tio);
+    raw_tio.c_oflag |= OPOST | ONLCR;   // restore CR/LF mapping for output
+    tcsetattr(tty, TCSAFLUSH, &raw_tio);
+
+    auto wstr = [&](const char* s) { write(tty, s, strlen(s)); };
+
+    // Clear screen and show banner
+    wstr("\033[2J\033[H\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("  |           Llamaste  -  WiFi Setup                |\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("\r\n");
+    wstr("  WiFi hardware detected: ");
+    wstr(iface.c_str());
+    wstr("\r\n");
+    wstr("  No saved networks found.  Enter credentials below,\r\n");
+    wstr("  or press Enter to skip and use the web UI later.\r\n");
+    wstr("\r\n");
+
+    // Line reader: echo=true shows characters, echo=false shows '*'.
+    auto read_line = [&](bool echo_chars, size_t max_len) -> std::string {
+        std::string s;
+        char c;
+        while (read(tty, &c, 1) == 1) {
+            if (c == '\r' || c == '\n') {
+                wstr("\r\n");
+                break;
+            }
+            // Ctrl-C or Ctrl-D: cancel entirely
+            if (c == 3 || c == 4) {
+                s.clear();
+                wstr("\r\n");
+                break;
+            }
+            // Backspace / DEL
+            if ((c == 127 || c == '\b') && !s.empty()) {
+                s.pop_back();
+                wstr("\b \b");
+                continue;
+            }
+            // Printable ASCII only, enforce max length
+            if (c >= 0x20 && c < 0x7f && s.size() < max_len) {
+                s += c;
+                if (echo_chars)
+                    write(tty, &c, 1);
+                else
+                    wstr("*");
+            }
+        }
+        return s;
+    };
+
+    // Prompt for SSID
+    wstr("  SSID     : ");
+    std::string ssid = read_line(/*echo=*/true, /*max=*/63);
+
+    if (ssid.empty()) {
+        wstr("  Skipping WiFi setup.\r\n\r\n");
+        tcsetattr(tty, TCSAFLUSH, &old_tio);
+        close(tty);
+        return false;
+    }
+
+    // Prompt for password (masked)
+    wstr("  Password : ");
+    std::string psk = read_line(/*echo=*/false, /*max=*/63);
+    wstr("\r\n");
+
+    // Restore terminal before any further output
+    tcsetattr(tty, TCSAFLUSH, &old_tio);
+    close(tty);
+
+    // --- Persist to wpa_supplicant config ---
+    const char* conf = "/data/llamaste/wifi/wpa.conf";
+    FILE* f = fopen(conf, "a");
+    if (!f) {
+        fprintf(stderr, "[wifi] console_wifi_setup: cannot write wpa.conf: %m\n");
+        return false;
+    }
+    fprintf(f, "\nnetwork={\n");
+    fprintf(f, "    ssid=\"%s\"\n",     ssid.c_str());
+    fprintf(f, "    psk=\"%s\"\n",      psk.c_str());
+    fprintf(f, "    key_mgmt=WPA-PSK\n");
+    fprintf(f, "}\n");
+    fclose(f);
+    fprintf(stderr, "[wifi] console_wifi_setup: saved SSID '%s'\n", ssid.c_str());
+
+    // Tell wpa_supplicant to reload config
+    {
+        pid_t p = fork();
+        if (p == 0) {
+            int null_fd = open("/dev/null", O_WRONLY);
+            if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+            execl("/usr/sbin/wpa_cli", "wpa_cli",
+                  "-p", "/run/wpa_supplicant",
+                  "-i", iface.c_str(),
+                  "reconfigure", nullptr);
+            _exit(1);
+        }
+        if (p > 0) {
+            waitpid(p, nullptr, 0);
+            fprintf(stderr, "[wifi] wpa_cli reconfigure done\n");
+        }
+    }
+    return true;
+}
+#endif
 
 // Spawn wpa_supplicant for WiFi management on the given interface.
 // Config is created at /data/llamaste/wifi/wpa.conf if absent.
@@ -1852,6 +1983,30 @@ int child_main(const SupervisorConfig& config) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             // Re-open control socket now that daemon is running
             g_wifi.init();
+
+            // In server mode: if no networks are saved yet, show a console
+            // WiFi setup prompt on /dev/tty1 so the user can type SSID/PSK
+            // using a physical keyboard — without needing the web UI.
+            // Skipped in desktop mode (web UI is on-screen via cog).
+            if (g_boot_mode != "desktop") {
+                bool has_networks = false;
+                FILE* wf = fopen("/data/llamaste/wifi/wpa.conf", "r");
+                if (wf) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), wf)) {
+                        if (strstr(line, "network={")) { has_networks = true; break; }
+                    }
+                    fclose(wf);
+                }
+                if (!has_networks) {
+                    fprintf(stderr, "[wifi] No saved networks — showing console setup\n");
+                    if (console_wifi_setup(wifi_iface)) {
+                        // Give wpa_supplicant time to associate before dhcpcd
+                        std::this_thread::sleep_for(std::chrono::seconds(4));
+                    }
+                }
+            }
+
             spawn_dhcpcd(wifi_iface);
         }
     }
@@ -1971,21 +2126,56 @@ int child_main(const SupervisorConfig& config) {
         // Without XKB data files, xkb_keymap_new_from_names() returns NULL and wlroots
         // segfaults (SIGSEGV) on the first key press. XKB_CONFIG_ROOT env is also set above.
         std::thread([]() {
-            // Helper: run udevadm trigger (enumerates all kernel devices).
-            // Safe to call multiple times. Silences output.
+            // Helper: run udevadm settle then trigger --action=add for input devices.
+            // IMPORTANT: must use --action=add (not the default "change") because
+            // libinput only reacts to ADD events to register new input devices.
+            // Without --action=add, libinput never sees the keyboard/touchpad and
+            // key events are silently dropped even though cage doesn't crash.
+            // --subsystem-match=input limits scope to only input devices (faster).
             auto run_udevadm_trigger = []() {
-                pid_t tpid = fork();
-                if (tpid == 0) {
-                    int null_fd = open("/dev/null", O_WRONLY);
-                    if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
-                    execl("/sbin/udevadm",     "udevadm", "trigger", nullptr);
-                    execl("/usr/sbin/udevadm", "udevadm", "trigger", nullptr);
-                    execl("/usr/bin/udevadm",  "udevadm", "trigger", nullptr);
-                    _exit(1);
+                // First: settle — wait for udevd to process all pending events
+                {
+                    pid_t tpid = fork();
+                    if (tpid == 0) {
+                        int null_fd = open("/dev/null", O_WRONLY);
+                        if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+                        execl("/sbin/udevadm",     "udevadm", "settle", "--timeout=3", nullptr);
+                        execl("/usr/sbin/udevadm", "udevadm", "settle", "--timeout=3", nullptr);
+                        execl("/usr/bin/udevadm",  "udevadm", "settle", "--timeout=3", nullptr);
+                        _exit(1);
+                    }
+                    if (tpid > 0) waitpid(tpid, nullptr, 0);
                 }
-                if (tpid > 0) {
-                    waitpid(tpid, nullptr, 0);
-                    fprintf(stderr, "[child] udevadm trigger done\n");
+                // Then: trigger ADD events for input subsystem → libinput picks up devices
+                {
+                    pid_t tpid = fork();
+                    if (tpid == 0) {
+                        int null_fd = open("/dev/null", O_WRONLY);
+                        if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+                        execl("/sbin/udevadm",     "udevadm", "trigger", "--action=add", "--subsystem-match=input", nullptr);
+                        execl("/usr/sbin/udevadm", "udevadm", "trigger", "--action=add", "--subsystem-match=input", nullptr);
+                        execl("/usr/bin/udevadm",  "udevadm", "trigger", "--action=add", "--subsystem-match=input", nullptr);
+                        _exit(1);
+                    }
+                    if (tpid > 0) {
+                        waitpid(tpid, nullptr, 0);
+                        fprintf(stderr, "[child] udevadm trigger --action=add done\n");
+                    }
+                }
+                // Log what input devices are now visible so we can diagnose missing devices
+                {
+                    DIR* dir = opendir("/dev/input");
+                    if (dir) {
+                        fprintf(stderr, "[child] /dev/input devices after trigger:");
+                        struct dirent* ent;
+                        while ((ent = readdir(dir))) {
+                            if (ent->d_name[0] != '.') fprintf(stderr, " %s", ent->d_name);
+                        }
+                        fprintf(stderr, "\n");
+                        closedir(dir);
+                    } else {
+                        fprintf(stderr, "[child] /dev/input not accessible: %m\n");
+                    }
                 }
             };
 
@@ -2025,6 +2215,11 @@ int child_main(const SupervisorConfig& config) {
                 // so hot-plug events fire if devices were missed.
                 if (wait_for_socket(5000)) {
                     if (!udev_triggered) {
+                        // Small delay: socket exists but wlroots is still completing
+                        // startup internally (especially libinput udev monitor setup).
+                        // Without this, trigger fires while libinput isn't ready to
+                        // handle ADD events → keyboard still silently dropped.
+                        usleep(500000);  // 500ms
                         fprintf(stderr, "[child] %s socket ready, triggering udev\n", label);
                         run_udevadm_trigger();
                         udev_triggered = true;
