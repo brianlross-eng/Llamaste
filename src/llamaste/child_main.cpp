@@ -1867,22 +1867,18 @@ int child_main(const SupervisorConfig& config) {
     });
     session_expiry_thread.detach();
 
-    // --- Desktop mode: launch labwc stacking Wayland compositor ---
+    // --- Desktop mode: launch Wayland compositor ---
     //
-    // labwc is a wlroots-based stacking WM (like Openbox for Wayland).
-    // Config in /etc/labwc/: rc.xml (keybindings/theme), menu.xml (right-click),
-    // autostart (opens cog browser after HTTP server is ready).
+    // Primary: cage + cog (kiosk compositor via wlroots).
+    //   cage is purpose-built for single-app fullscreen kiosk mode.
+    //   wlroots implements zwp_text_input_v3 so typing in cog/WebKit forms works.
+    //   labwc 0.6.6 (Buildroot 2024.02.9) lacks text-input-v3 — typing is broken.
     //
-    // Desktop keybindings (see /etc/labwc/rc.xml):
-    //   Super+B        — open Llamaste web UI (cog http://localhost)
-    //   Super+Q/Alt+F4 — close focused window
-    //   Super+F        — toggle fullscreen
-    //   Super+D        — toggle maximize
-    //   Alt+Tab        — cycle windows
-    //   Right-click    — root menu (open browser, exit desktop)
+    // Fallback 1: labwc (full WM, reads /etc/labwc/ config)
+    // Fallback 2: weston (most compatible DRM backend)
 #ifndef _WIN32
     if (g_boot_mode == "desktop") {
-        fprintf(stderr, "[child] Desktop mode: launching labwc compositor\n");
+        fprintf(stderr, "[child] Desktop mode: launching cage+cog compositor\n");
 
         // Wayland runtime dir (required by wlroots)
         mkdir("/run/user", 0755);
@@ -1946,24 +1942,26 @@ int child_main(const SupervisorConfig& config) {
                 return status;
             };
 
-            // 1. labwc (stacking WM, reads /etc/labwc/ config)
-            int st = try_compositor("labwc", []() {
-                execl("/usr/bin/labwc", "labwc", nullptr);
+            // 1. cage + cog (kiosk compositor — wlroots text-input-v3, full keyboard)
+            // labwc 0.6.6 lacks zwp_text_input_v3 so typing in cog/WebKit forms
+            // doesn't work. cage uses wlroots directly which does support it.
+            int st = try_compositor("cage", []() {
+                execl("/usr/bin/cage", "cage", "-s", "--",
+                      "/usr/bin/cog", "http://localhost", nullptr);
             });
             // WIFSIGNALED: crashed — try next. Normal exit: stop.
             if (st >= 0 && !WIFSIGNALED(st)) return;
 
-            fprintf(stderr, "[child] labwc crashed (signal %d), trying cage\n",
+            fprintf(stderr, "[child] cage crashed (signal %d), trying labwc\n",
                     WTERMSIG(st));
 
-            // 2. cage + cog (minimal kiosk compositor)
-            st = try_compositor("cage", []() {
-                execl("/usr/bin/cage", "cage", "-s", "--",
-                      "/usr/bin/cog", "http://localhost", nullptr);
+            // 2. labwc (stacking WM — fallback if cage fails)
+            st = try_compositor("labwc", []() {
+                execl("/usr/bin/labwc", "labwc", nullptr);
             });
             if (st >= 0 && !WIFSIGNALED(st)) return;
 
-            fprintf(stderr, "[child] cage crashed (signal %d), trying weston\n",
+            fprintf(stderr, "[child] labwc crashed (signal %d), trying weston\n",
                     WTERMSIG(st));
 
             // 3. weston (most robust, has its own DRM backend)
