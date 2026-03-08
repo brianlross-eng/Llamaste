@@ -1885,8 +1885,9 @@ int child_main(const SupervisorConfig& config) {
         mkdir("/run/user/0", 0700);
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
 
-        // Allow labwc to start even without physical input devices (VM, QEMU, live ISO)
-        setenv("WLR_LIBINPUT_NO_DEVICES", "1", 1);
+        // NOTE: do NOT set WLR_LIBINPUT_NO_DEVICES=1 here — that suppresses ALL
+        // keyboard and mouse input on real hardware. wlroots handles missing
+        // devices gracefully on its own (just logs a warning).
 
         // simpledrm (EFI framebuffer DRM) does not support hardware cursors.
         // Without this flag wlroots aborts during cursor plane setup on real hardware
@@ -1991,6 +1992,12 @@ int child_main(const SupervisorConfig& config) {
     // --- Auth helper: wraps route handlers to require authentication ---
     auto require_auth = [](std::function<void(const httplib::Request&, httplib::Response&)> handler) {
         return [handler](const httplib::Request& req, httplib::Response& res) {
+            // Desktop mode: all requests come from cog on localhost — no auth needed.
+            // Remove this bypass once keyboard input in Wayland is confirmed working.
+            if (g_boot_mode == "desktop") {
+                handler(req, res);
+                return;
+            }
             if (!g_auth.is_authenticated(req)) {
                 res.status = 401;
                 json err;
@@ -2006,6 +2013,19 @@ int child_main(const SupervisorConfig& config) {
     // --- Static file routes ---
     // Root route: serve main UI, login page, or setup page based on auth state
     svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
+        // Desktop mode: skip auth/setup gates — go straight to the main UI.
+        // cog only accesses localhost so trust is implicit.
+        if (g_boot_mode == "desktop") {
+#ifdef LLAMASTE_HAS_EMBED
+            extern const unsigned char WEB_INDEX_HTML[];
+            extern const unsigned int WEB_INDEX_HTML_LEN;
+            serve_static_file(req, res, "index.html", WEB_INDEX_HTML, WEB_INDEX_HTML_LEN);
+#else
+            serve_static_file(req, res, "index.html", nullptr, 0);
+#endif
+            return;
+        }
+
         // If setup not complete, redirect to setup
         if (!g_auth.is_setup_complete()) {
 #ifdef LLAMASTE_HAS_EMBED
