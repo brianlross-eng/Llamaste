@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. 1396MB ISO built and flashed. 62 tools, 13 suites.
+- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. 1434MB ISO built. WiFi driver + firmware embedded (a0c645e). Console WiFi setup prompt fixed. 62 tools, 13 suites.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -118,7 +118,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **/dev/shm must be mounted as tmpfs**: wlroots' `os_create_anonymous_file()` falls back to `/dev/shm/` if `memfd_create()` fails. Without this mount, fallback fails → "Failed to allocate shm file for XKB keymap" → SIGSEGV on first key press. Fixed in init.cpp.
 - **udevadm trigger AFTER cage Wayland socket**: Running `udevadm trigger` before cage creates `/run/user/0/wayland-0` is a race — keyboard enumerated while wlroots initialises → XKB shm fails → SIGSEGV. Fixed: trigger fires inside compositor thread after `access("/run/user/0/wayland-0")` succeeds. Also add 500ms sleep after socket before trigger to let libinput's udev monitor fully start.
 - **udevadm trigger must use `--action=add --subsystem-match=input`**: Default `udevadm trigger` fires CHANGE events, but libinput only registers new devices on ADD events. Without `--action=add`, libinput never sees keyboard/touchpad → cage doesn't crash but keys are silently dropped (no visible response). Also run `udevadm settle` first to ensure udevd is ready.
-- **Console WiFi setup on /dev/tty1**: In server mode, if WiFi hardware is found but wpa.conf has no `network={}` blocks, PID 1 opens `/dev/tty1` in raw termios mode and shows SSID/PSK prompts. Uses cfmakeraw() + OPOST|ONLCR for output. Appends network block to wpa.conf then calls `wpa_cli reconfigure`. Skipped in desktop mode (web UI handles WiFi there). **BUG**: Must run this BEFORE supervisor's display thread starts (supervisor.cpp line 953), not inside child_main.cpp — display thread overwrites the prompt.
+- **Console WiFi setup on /dev/tty1**: In server mode, if WiFi hardware is found but wpa.conf has no `network={}` blocks, supervisor opens `/dev/tty1` in raw termios mode and shows SSID/PSK prompts. Uses cfmakeraw() + OPOST|ONLCR for output. Appends network block to wpa.conf. Skipped in desktop mode (web UI handles WiFi there). Runs via `supervisor_preflight_wifi()` in supervisor.cpp BEFORE display/input threads start — this is critical, running inside child_main caused the prompt to be overwritten by the display thread.
 - **WLR_DRM_NO_ATOMIC=1**: simpledrm (EFI framebuffer DRM) on bare metal doesn't support atomic modesetting. Without this flag, wlroots probes atomic ioctls and segfaults (signal 11).
 - **Desktop mode cog auth bypass**: In desktop mode, cog only accesses localhost — `require_auth` short-circuits to serve `index.html` directly. Remove bypass once keyboard input confirmed working.
 - **RTL8821CE WiFi chip**: Actual hardware is Realtek RTL8821CE [10ec:c821] at PCI 0000:01:00.0. Requires `CONFIG_RTW88=y`, `CONFIG_RTW88_PCI=y`, `CONFIG_RTW88_8821C=y`, `CONFIG_RTW88_8821CE=y`. iwlwifi-ty-* (AX210) and iwlwifi-gl-* (BE200) are for different chips entirely.
@@ -140,7 +140,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Verify new ISO on real hardware** — Boot 1396MB USB, check serial for `[init] Live pivot:`, verify WiFi, labwc desktop
+1. **Flash + test new ISO** — WiFi prompt fix in a0c645e. Boot 1434MB USB, enter SSID on console, verify network connects
 2. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
 3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
