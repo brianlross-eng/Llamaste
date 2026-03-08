@@ -404,6 +404,13 @@ void init_mount_filesystems() {
     try_mount("tmpfs",    "/run",     "tmpfs",    0, "size=16M");
     mkdir("/dev/pts", 0755);
     try_mount("devpts",   "/dev/pts", "devpts",   0, nullptr);
+    // /dev/shm: required by wlroots' os_create_anonymous_file() fallback path.
+    // When memfd_create() fails for any reason, wlroots falls back to creating
+    // a file in /dev/shm. Without this mount, the fallback also fails → wlroots
+    // crashes (SIGSEGV) on first keyboard input ("Failed to allocate shm file
+    // for XKB keymap"). memfd_create is the primary path but /dev/shm must exist.
+    mkdir("/dev/shm", 0755);
+    try_mount("tmpfs",    "/dev/shm", "tmpfs",    0, "size=32M");
 }
 
 bool init_mount_data() {

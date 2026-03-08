@@ -1933,61 +1933,30 @@ int child_main(const SupervisorConfig& config) {
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
 
-        // Start udevd so it can process /dev/input/ device nodes and set udev
-        // properties (ID_SEAT etc.) that libinput uses for device enumeration.
-        // Without udevd, libinput may find 0 input devices even though devtmpfs
-        // has created the event nodes.
+        // Start udevd so it can assign udev properties (ID_SEAT etc.) that
+        // libinput uses for device enumeration. We do NOT run udevadm trigger
+        // here — it runs later, AFTER cage creates its Wayland socket. Running
+        // trigger too early causes a race: keyboard device is enumerated while
+        // cage is still initializing → wlroots fails to allocate the shm file
+        // for the XKB keymap ("Failed to allocate shm file for XKB keymap:
+        // [errno]") → SIGSEGV on first key press. Delaying until the socket
+        // exists ensures wlroots is fully ready before handling any devices.
         {
             pid_t upid = fork();
             if (upid == 0) {
-                // Redirect udevd stdout/stderr to avoid console spam
                 int null_fd = open("/dev/null", O_WRONLY);
                 if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
                 execl("/sbin/udevd", "udevd", "--daemon", nullptr);
                 execl("/usr/sbin/udevd", "udevd", "--daemon", nullptr);
-                _exit(1); // udevd not found — that's OK, devtmpfs nodes still exist
+                _exit(1);
             } else if (upid > 0) {
                 fprintf(stderr, "[child] Started udevd pid=%d\n", upid);
-                // Give udevd 1s to process existing devices before compositor starts
-                sleep(1);
-                // Trigger udev to process all existing kernel devices
-                pid_t tpid = fork();
-                if (tpid == 0) {
-                    int null_fd = open("/dev/null", O_WRONLY);
-                    if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
-                    execl("/sbin/udevadm", "udevadm", "trigger", nullptr);
-                    execl("/usr/bin/udevadm", "udevadm", "trigger", nullptr);
-                    _exit(1);
-                } else if (tpid > 0) {
-                    waitpid(tpid, nullptr, 0);
-                    fprintf(stderr, "[child] udevadm trigger done\n");
-                }
+                sleep(1);  // give udevd time to initialise before compositor starts
             } else {
                 fprintf(stderr, "[child] fork for udevd failed: %m\n");
             }
         }
 
-        // Diagnostic: log /dev/input/ contents so D debug view shows what
-        // libinput has to work with (helps diagnose keyboard issues)
-        {
-            DIR* dir = opendir("/dev/input");
-            if (dir) {
-                fprintf(stderr, "[child] /dev/input/ contents:\n");
-                struct dirent* ent;
-                while ((ent = readdir(dir)) != nullptr) {
-                    if (ent->d_name[0] == '.') continue;
-                    char path[64];
-                    snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
-                    int fd = open(path, O_RDONLY | O_NONBLOCK);
-                    fprintf(stderr, "[child]   %s  open=%s\n",
-                            path, fd >= 0 ? "OK" : strerror(errno));
-                    if (fd >= 0) close(fd);
-                }
-                closedir(dir);
-            } else {
-                fprintf(stderr, "[child] /dev/input/ does not exist: %m\n");
-            }
-        }
 
         // Compositor spawn with crash fallback chain.
         //
@@ -2002,37 +1971,91 @@ int child_main(const SupervisorConfig& config) {
         // Without XKB data files, xkb_keymap_new_from_names() returns NULL and wlroots
         // segfaults (SIGSEGV) on the first key press. XKB_CONFIG_ROOT env is also set above.
         std::thread([]() {
+            // Helper: run udevadm trigger (enumerates all kernel devices).
+            // Safe to call multiple times. Silences output.
+            auto run_udevadm_trigger = []() {
+                pid_t tpid = fork();
+                if (tpid == 0) {
+                    int null_fd = open("/dev/null", O_WRONLY);
+                    if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+                    execl("/sbin/udevadm",     "udevadm", "trigger", nullptr);
+                    execl("/usr/sbin/udevadm", "udevadm", "trigger", nullptr);
+                    execl("/usr/bin/udevadm",  "udevadm", "trigger", nullptr);
+                    _exit(1);
+                }
+                if (tpid > 0) {
+                    waitpid(tpid, nullptr, 0);
+                    fprintf(stderr, "[child] udevadm trigger done\n");
+                }
+            };
+
+            // Helper: wait for the compositor's Wayland socket to appear.
+            // Returns true if socket appeared within timeout_ms, false otherwise.
+            auto wait_for_socket = [](int timeout_ms) -> bool {
+                const char* path = "/run/user/0/wayland-0";
+                for (int i = 0; i < timeout_ms / 100; i++) {
+                    if (access(path, F_OK) == 0) return true;
+                    usleep(100000);
+                }
+                return false;
+            };
+
             // Helper: try one compositor, return its waitpid raw status.
+            // After the compositor socket appears, runs udevadm trigger so
+            // input devices are enumerated AFTER wlroots is fully initialised.
+            // This prevents the shm-for-XKB race: keyboard enumerated while
+            // cage is still starting → os_create_anonymous_file() fails → SIGSEGV.
             // Returns -1 if fork failed.
-            auto try_compositor = [](const char* label,
-                                     std::function<void()> exec_fn) -> int {
+            static bool udev_triggered = false;
+            auto try_compositor = [&](const char* label,
+                                      std::function<void()> exec_fn) -> int {
                 pid_t pid = fork();
                 if (pid == 0) {
                     exec_fn();
-                    _exit(127);  // exec failed (binary not found)
+                    _exit(127);
                 }
                 if (pid < 0) {
                     fprintf(stderr, "[child] fork for %s failed: %m\n", label);
                     return -1;
                 }
                 g_cage_pid.store(pid);
+
+                // First compositor start: wait for socket then trigger udev.
+                // Subsequent restarts: socket may take a moment; trigger again
+                // so hot-plug events fire if devices were missed.
+                if (wait_for_socket(5000)) {
+                    if (!udev_triggered) {
+                        fprintf(stderr, "[child] %s socket ready, triggering udev\n", label);
+                        run_udevadm_trigger();
+                        udev_triggered = true;
+                    }
+                } else {
+                    fprintf(stderr, "[child] %s socket not ready after 5s\n", label);
+                }
+
+                auto start_time = std::chrono::steady_clock::now();
                 int status = 0;
                 waitpid(pid, &status, 0);
                 g_cage_pid.store(0);
+
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start_time).count();
                 if (WIFSIGNALED(status))
-                    fprintf(stderr, "[child] %s crashed signal=%d\n", label, WTERMSIG(status));
+                    fprintf(stderr, "[child] %s crashed signal=%d (ran %lds)\n",
+                            label, WTERMSIG(status), (long)elapsed);
                 else
-                    fprintf(stderr, "[child] %s exited code=%d\n", label, WEXITSTATUS(status));
+                    fprintf(stderr, "[child] %s exited code=%d (ran %lds)\n",
+                            label, WEXITSTATUS(status), (long)elapsed);
                 return status;
             };
 
-            // Helper: "was this a clean intentional exit (exit 0)?"
-            // exit 0   → clean user-initiated stop, stop the chain.
-            // signal   → crashed, try next compositor.
-            // exit 127 → exec failed (binary not installed), try next.
-            // other    → abnormal, try next.
-            auto is_clean_exit = [](int st) -> bool {
-                return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+            // Helper: "was this a clean intentional exit (exit 0, ran > 5s)?"
+            // exit 0 after >5s → user-initiated close, stop chain.
+            // exit 0 within 5s → probably startup failure, try next/retry.
+            // signal            → crashed, retry/try next.
+            // exit 127          → exec failed (not installed), try next.
+            auto is_clean_exit = [](int st, long elapsed_secs) -> bool {
+                return WIFEXITED(st) && WEXITSTATUS(st) == 0 && elapsed_secs > 5;
             };
 
             // 1. cage + cog (kiosk compositor — wlroots-based, lightweight).
@@ -2044,28 +2067,35 @@ int child_main(const SupervisorConfig& config) {
                     if (attempt > 0) {
                         fprintf(stderr, "[child] cage+cog restart %d/5\n", attempt + 1);
                         sleep(1);
+                        // Remove stale wayland socket from crashed cage instance
+                        unlink("/run/user/0/wayland-0");
                     }
+                    auto t0 = std::chrono::steady_clock::now();
                     int st = try_compositor("cage+cog", []() {
                         execl("/usr/bin/cage", "cage", "-s", "--",
                               "/usr/bin/cog", "http://localhost", nullptr);
                     });
-                    if (st < 0) break;  // fork failed — give up on cage
-                    if (is_clean_exit(st)) { cage_ran_cleanly = true; break; }
-                    // If exec failed (not installed), bail immediately — don't loop
-                    if (WIFEXITED(st) && WEXITSTATUS(st) == 127) break;
-                    // Crashed (signal) or non-zero exit — retry
+                    long elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    if (st < 0) break;  // fork failed
+                    if (is_clean_exit(st, elapsed)) { cage_ran_cleanly = true; break; }
+                    if (WIFEXITED(st) && WEXITSTATUS(st) == 127) break;  // not installed
+                    // Crashed, quick exit, or non-zero → retry
                 }
-                if (cage_ran_cleanly) return;  // clean exit → stop chain
+                if (cage_ran_cleanly) return;
             }
 
             fprintf(stderr, "[child] cage unavailable/crashed, trying labwc\n");
 
             // 2. labwc (stacking WM — reads /etc/labwc/autostart which launches cog)
             {
+                auto t0 = std::chrono::steady_clock::now();
                 int st = try_compositor("labwc", []() {
                     execl("/usr/bin/labwc", "labwc", nullptr);
                 });
-                if (st >= 0 && is_clean_exit(st)) return;
+                long elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (st >= 0 && is_clean_exit(st, elapsed)) return;
             }
 
             fprintf(stderr, "[child] labwc unavailable/crashed, trying weston\n");
