@@ -57,3 +57,13 @@ nul
 con
 prn
 aux
+
+# VirtualBox VM runtime files (large binary, machine-specific)
+# VDI disk images, snapshots, and NVRAM are binary and huge — don't track
+vm/Llamaste*/
+vm/*.vdi
+*.vdi
+*.sav
+
+# Miscellaneous generated / downloaded media
+Meshy_AI_*.png
