@@ -44,3 +44,16 @@ tools/keygen
 tools/sign-helper
 tools/keygen.exe
 tools/sign-helper.exe
+
+# Host/dev build directories (generated, not source)
+src/llamaste/build-host/
+tests/build/
+
+# Model files (large, distributed separately)
+*.gguf
+
+# Accidental Windows reserved-name files
+nul
+con
+prn
+aux

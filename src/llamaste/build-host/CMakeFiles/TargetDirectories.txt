@@ -1,7 +1,0 @@
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/llamaste.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/edit_cache.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/rebuild_cache.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/list_install_components.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/install.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/install/local.dir
-/mnt/d/Llamaste/src/llamaste/build-host/CMakeFiles/install/strip.dir

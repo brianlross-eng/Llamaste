@@ -1,1 +1,0 @@
-/usr/bin/c++ -g CMakeFiles/llamaste.dir/main.cpp.o CMakeFiles/llamaste.dir/supervisor.cpp.o CMakeFiles/llamaste.dir/init.cpp.o CMakeFiles/llamaste.dir/hwdetect.cpp.o CMakeFiles/llamaste.dir/child_main.cpp.o -o llamaste 

@@ -232,13 +232,33 @@ static void serve_static_file(
         return;
     }
 #endif
-    // Development mode: read from filesystem
-    // Try several paths relative to where the binary might be running
-    std::vector<std::string> search_paths = {
-        "src/llamaste/web/" + filename,
-        "../src/llamaste/web/" + filename,
-        "web/" + filename,
-    };
+    // Development mode: read from filesystem.
+    // Build a search list starting with paths relative to the executable,
+    // then fall back to CWD-relative paths for legacy compatibility.
+    std::vector<std::string> search_paths;
+
+#ifndef _WIN32
+    // Resolve the directory containing the running binary via /proc/self/exe.
+    // This makes the lookup CWD-independent (fixes tests/build/ context).
+    char exe_buf[4096] = {};
+    ssize_t exe_len = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+    if (exe_len > 0) {
+        std::string exe_dir(exe_buf, exe_len);
+        auto slash = exe_dir.rfind('/');
+        if (slash != std::string::npos) exe_dir.resize(slash + 1);
+        // Typical dev layouts relative to the binary location:
+        //   bin is at src/llamaste/build-host/llamaste → web at ../../web/
+        //   bin is at tests/build/test_*              → web at ../../src/llamaste/web/
+        search_paths.push_back(exe_dir + "../../src/llamaste/web/" + filename);
+        search_paths.push_back(exe_dir + "../src/llamaste/web/"   + filename);
+        search_paths.push_back(exe_dir + "web/"                   + filename);
+    }
+#endif
+
+    // CWD-relative fallbacks (original behaviour)
+    search_paths.push_back("src/llamaste/web/" + filename);
+    search_paths.push_back("../src/llamaste/web/" + filename);
+    search_paths.push_back("web/" + filename);
 
     for (const auto& path : search_paths) {
         std::string content;
