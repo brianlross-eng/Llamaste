@@ -1020,6 +1020,12 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     tcsetattr(tty, TCSAFLUSH, &old_tio);
     close(tty);
 
+    // Ensure data directory exists (child_main normally creates it, but we
+    // run before the child starts).
+    mkdir("/data", 0755);
+    mkdir("/data/llamaste", 0755);
+    mkdir("/data/llamaste/wifi", 0755);
+
     const char* conf = "/data/llamaste/wifi/wpa.conf";
     FILE* f = fopen(conf, "a");
     if (!f) {
