@@ -82,6 +82,17 @@ private:
 // Returns empty vector if the response has no tool calls (just text content).
 std::vector<ToolCall> parse_tool_calls(const std::string& response_json);
 
+// Parse Qwen2.5 native <tool_call>...</tool_call> XML blocks from model output.
+// Qwen2.5-Instruct emits tool calls as:
+//   <tool_call>
+//   {"name": "tool.name", "arguments": {"key": "value"}}
+//   </tool_call>
+// Returns an OpenAI-compatible tool_calls JSON array so the agent loop can
+// dispatch them identically to standard tool_calls responses.
+// Used by llama_inference() to convert /completion plain-text responses that
+// contain tool calls into the OpenAI tool_calls format.
+nlohmann::json parse_qwen_tool_calls(const std::string& text);
+
 // Extract the assistant's text content from a chat completion response JSON string.
 // Returns empty string if the response is a tool_calls response with no text.
 std::string parse_content(const std::string& response_json);

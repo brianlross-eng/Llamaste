@@ -7,9 +7,85 @@
 
 #include "agent.h"
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 
 using json = nlohmann::json;
+
+// ---------------------------------------------------------------------------
+// parse_qwen_tool_calls — extract <tool_call> XML blocks from Qwen2.5 output
+// ---------------------------------------------------------------------------
+
+nlohmann::json parse_qwen_tool_calls(const std::string& text) {
+    json calls = json::array();
+    static std::atomic<int> call_counter{0};
+
+    const std::string START = "<tool_call>";
+    const std::string END   = "</tool_call>";
+
+    size_t pos = 0;
+    while (true) {
+        size_t start_pos = text.find(START, pos);
+        if (start_pos == std::string::npos) break;
+
+        size_t json_start = start_pos + START.size();
+        size_t end_pos    = text.find(END, json_start);
+        if (end_pos == std::string::npos) break;
+
+        // Trim whitespace from the JSON block
+        std::string raw = text.substr(json_start, end_pos - json_start);
+        size_t first = raw.find_first_not_of(" \t\n\r");
+        size_t last  = raw.find_last_not_of(" \t\n\r");
+        if (first == std::string::npos) {
+            pos = end_pos + END.size();
+            continue;
+        }
+        raw = raw.substr(first, last - first + 1);
+
+        // Parse the JSON object inside the tags
+        auto obj = json::parse(raw, nullptr, false);
+        if (obj.is_discarded() || !obj.is_object()) {
+            fprintf(stderr, "[tool_call] Failed to parse tool call JSON: %.200s\n", raw.c_str());
+            pos = end_pos + END.size();
+            continue;
+        }
+
+        std::string name = obj.value("name", "");
+        if (name.empty()) {
+            pos = end_pos + END.size();
+            continue;
+        }
+
+        // Arguments can be a JSON object (ideal) or a pre-serialized string
+        json arguments = json::object();
+        if (obj.contains("arguments")) {
+            if (obj["arguments"].is_object()) {
+                arguments = obj["arguments"];
+            } else if (obj["arguments"].is_string()) {
+                auto parsed = json::parse(obj["arguments"].get<std::string>(), nullptr, false);
+                if (!parsed.is_discarded()) arguments = parsed;
+            }
+        }
+
+        // Build OpenAI-format tool_call entry
+        int id = ++call_counter;
+        json tc;
+        tc["id"]   = "call_" + std::to_string(id);
+        tc["type"] = "function";
+        json func;
+        func["name"]      = name;
+        func["arguments"] = arguments.dump();  // must be serialized string per OpenAI spec
+        tc["function"] = func;
+        calls.push_back(tc);
+
+        fprintf(stderr, "[tool_call] Parsed: name=%s args=%s\n",
+                name.c_str(), arguments.dump().c_str());
+
+        pos = end_pos + END.size();
+    }
+
+    return calls;
+}
 
 // ---------------------------------------------------------------------------
 // ConversationState

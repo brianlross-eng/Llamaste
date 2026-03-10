@@ -36,7 +36,9 @@ static int tests_failed = 0;
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); tests_failed++; } while(0)
 
 // --- Thread Count Tests ---
-// Formula: max(1, cores * 3/4)
+// Policy: use ALL available CPU cores for maximum inference throughput.
+// The softdog watchdog is kept alive by a dedicated kicker thread in the
+// supervisor, so slow inference on many threads won't trigger a reboot.
 
 static void test_thread_count_1_core() {
     TEST("compute_thread_count(1) == 1");
@@ -45,27 +47,27 @@ static void test_thread_count_1_core() {
 }
 
 static void test_thread_count_2_cores() {
-    TEST("compute_thread_count(2) == 1");
+    TEST("compute_thread_count(2) == 2");
     int t = compute_thread_count(2);
-    if (t == 1) PASS(); else FAIL("expected 1");
+    if (t == 2) PASS(); else FAIL("expected 2");
 }
 
 static void test_thread_count_4_cores() {
-    TEST("compute_thread_count(4) == 3");
+    TEST("compute_thread_count(4) == 4");
     int t = compute_thread_count(4);
-    if (t == 3) PASS(); else FAIL("expected 3");
+    if (t == 4) PASS(); else FAIL("expected 4");
 }
 
 static void test_thread_count_8_cores() {
-    TEST("compute_thread_count(8) == 6");
+    TEST("compute_thread_count(8) == 8");
     int t = compute_thread_count(8);
-    if (t == 6) PASS(); else FAIL("expected 6");
+    if (t == 8) PASS(); else FAIL("expected 8");
 }
 
 static void test_thread_count_16_cores() {
-    TEST("compute_thread_count(16) == 12");
+    TEST("compute_thread_count(16) == 16");
     int t = compute_thread_count(16);
-    if (t == 12) PASS(); else FAIL("expected 12");
+    if (t == 16) PASS(); else FAIL("expected 16");
 }
 
 // --- Batch Thread Count Tests ---

@@ -172,13 +172,14 @@ int compute_batch_thread_count(int cpu_cores) {
 }
 
 // Context window size based on free RAM after model loading.
-// 4096 is used for diagnostic purposes: halves KV cache memory vs 8192.
-// The 62-tool system prompt is ~700 tokens when in /completion chatml format
-// (tools are NOT passed to llama-server, only the system prompt + messages),
-// so 4096 is sufficient for the actual inference workload.
+// With tool calling enabled, the system prompt now includes compact parameter
+// signatures for all 62 tools (~400-600 extra tokens vs the plain name list).
+// Total system prompt is now ~1200-1400 tokens, leaving ~6800 for conversation
+// at 8192 context. Qwen2.5 1.5B KV cache for 8192 ctx ≈ 75MB — very manageable.
+// Use 8192 for machines with ≥2GB free RAM (1.5B model is ~950MB loaded).
 int compute_context_size(int free_ram_mb) {
-    if (free_ram_mb >= 2048) return 4096;
-    if (free_ram_mb >= 1024) return 2048;
+    if (free_ram_mb >= 2048) return 8192;
+    if (free_ram_mb >= 1024) return 4096;
     if (free_ram_mb >= 512)  return 2048;
     return 2048;
 }
@@ -488,6 +489,10 @@ static std::string make_inference_error(const std::string& message) {
     return response.dump();
 }
 
+// parse_qwen_tool_calls is defined in agent.cpp / declared in agent.h.
+// It parses <tool_call>...</tool_call> XML blocks from Qwen2.5 model output
+// and returns an OpenAI-compatible tool_calls JSON array.
+
 // Build a chatml-formatted prompt string from OpenAI-format messages.
 // Used by llama_inference to bypass the broken chat template in llama-server.
 static std::string build_chatml_prompt(const json& messages) {
@@ -613,31 +618,52 @@ static std::string llama_inference(const std::string& request_json) {
         content = comp_resp["content"].get<std::string>();
     }
 
+    // --- Parse Qwen2.5 native <tool_call> tags from the generated text ---
+    // The model emits tool calls in this XML format when it needs to call a tool.
+    // Convert to OpenAI tool_calls array format so the agent loop can dispatch them.
+    json tool_calls_arr = parse_qwen_tool_calls(content);
+    bool has_tool_calls = !tool_calls_arr.empty();
+
     json response;
-    response["id"]      = "chatcmpl-" + std::to_string(std::time(nullptr));
-    response["object"]  = "chat.completion";
-    response["model"]   = "llamaste";
-    json msg_obj;
-    msg_obj["role"]    = "assistant";
-    msg_obj["content"] = content;
-    json choice;
-    choice["index"]        = 0;
-    choice["message"]      = msg_obj;
-    choice["finish_reason"] = "stop";
-    response["choices"] = json::array({choice});
+    response["id"]     = "chatcmpl-" + std::to_string(std::time(nullptr));
+    response["object"] = "chat.completion";
+    response["model"]  = "llamaste";
     json usage;
     usage["prompt_tokens"]     = comp_resp.is_discarded() ? 0 : comp_resp.value("tokens_evaluated", 0);
     usage["completion_tokens"] = comp_resp.is_discarded() ? 0 : comp_resp.value("tokens_predicted", 0);
     usage["total_tokens"]      = usage["prompt_tokens"].get<int>() + usage["completion_tokens"].get<int>();
     response["usage"] = usage;
 
-    fprintf(stderr, "[inference] generated %d tokens: %.100s\n",
-            usage["completion_tokens"].get<int>(), content.c_str());
+    json choice;
+    choice["index"] = 0;
+    if (has_tool_calls) {
+        // Tool call response: assistant message with tool_calls array, content = null
+        json msg_obj;
+        msg_obj["role"]       = "assistant";
+        msg_obj["content"]    = nullptr;
+        msg_obj["tool_calls"] = tool_calls_arr;
+        choice["message"]      = msg_obj;
+        choice["finish_reason"] = "tool_calls";
+        fprintf(stderr, "[inference] tool_calls: %d call(s) dispatched\n",
+                (int)tool_calls_arr.size());
+    } else {
+        // Plain text response
+        json msg_obj;
+        msg_obj["role"]    = "assistant";
+        msg_obj["content"] = content;
+        choice["message"]      = msg_obj;
+        choice["finish_reason"] = "stop";
+        fprintf(stderr, "[inference] generated %d tokens: %.100s\n",
+                usage["completion_tokens"].get<int>(), content.c_str());
+    }
+    response["choices"] = json::array({choice});
 
     std::string response_str = response.dump();
 
-    // --- Semantic cache store ---
-    semantic_cache_store(request_json, response_str);
+    // --- Semantic cache store (text-only responses; tool calls depend on system state) ---
+    if (!has_tool_calls) {
+        semantic_cache_store(request_json, response_str);
+    }
 
     return response_str;
 }
