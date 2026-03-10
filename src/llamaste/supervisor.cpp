@@ -999,6 +999,10 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     }
 
     // Write minimal scan-only config
+    // country=US: sets regulatory domain via nl80211 so 5GHz channels are allowed.
+    // Without this, cfg80211 stays in world regulatory domain after the ISO9660
+    // boot phase (regulatory.db load fails before squashfs pivot) and many
+    // channels remain blocked, preventing scans from seeing anything.
     const char* scan_conf = "/tmp/wpa_scan.conf";
     {
         FILE* f = fopen(scan_conf, "w");
@@ -1006,6 +1010,7 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
         fprintf(f, "ctrl_interface_group=0\n");
         fprintf(f, "update_config=0\n");
+        fprintf(f, "country=US\n");
         fclose(f);
     }
     mkdir("/run/wpa_supplicant", 0755);
@@ -1294,6 +1299,12 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
     fprintf(f, "ctrl_interface_group=0\n");
     fprintf(f, "update_config=1\n");
+    // country=US: set regulatory domain so 5GHz channels are enabled.
+    // cfg80211 fails to load regulatory.db from the filesystem at early boot
+    // (before the squashfs pivot mounts the full OS), so wpa_supplicant setting
+    // the country code via nl80211 is the reliable way to get a proper
+    // regulatory domain at runtime.
+    fprintf(f, "country=US\n");
     fprintf(f, "\n");
     fprintf(f, "network={\n");
     fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());

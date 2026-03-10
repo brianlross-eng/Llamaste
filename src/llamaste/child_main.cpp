@@ -760,13 +760,50 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     const char* conf = "/data/llamaste/wifi/wpa.conf";
     struct stat st;
     if (stat(conf, &st) != 0) {
-        // Write minimal wpa_supplicant.conf skeleton
+        // Write minimal wpa_supplicant.conf skeleton.
+        // country=US: set regulatory domain so 5GHz channels are enabled at runtime.
+        // cfg80211 fails to load regulatory.db from the filesystem before the
+        // squashfs pivot completes, so wpa_supplicant setting country via nl80211
+        // is the reliable path to get proper channel access.
         FILE* f = fopen(conf, "w");
         if (f) {
             fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
             fprintf(f, "ctrl_interface_group=0\n");
             fprintf(f, "update_config=1\n");
+            fprintf(f, "country=US\n");
             fclose(f);
+        }
+    } else {
+        // Config exists — patch in country=US if it's missing (configs from older
+        // builds lack this line and stay in world regulatory domain).
+        FILE* fr = fopen(conf, "r");
+        if (fr) {
+            bool has_country = false;
+            char line[512];
+            while (fgets(line, sizeof(line), fr)) {
+                if (strncmp(line, "country=", 8) == 0) { has_country = true; break; }
+            }
+            fclose(fr);
+            if (!has_country) {
+                fr = fopen(conf, "r");
+                FILE* fw = fopen("/tmp/wpa_patch.conf", "w");
+                if (fr && fw) {
+                    bool inserted = false;
+                    while (fgets(line, sizeof(line), fr)) {
+                        fputs(line, fw);
+                        // Insert country= right after update_config= line
+                        if (!inserted && strncmp(line, "update_config=", 14) == 0) {
+                            fputs("country=US\n", fw);
+                            inserted = true;
+                        }
+                    }
+                    if (!inserted) fputs("country=US\n", fw);
+                }
+                if (fr) fclose(fr);
+                if (fw) fclose(fw);
+                rename("/tmp/wpa_patch.conf", conf);
+                fprintf(stderr, "[child] Patched wpa.conf with country=US\n");
+            }
         }
     }
 
