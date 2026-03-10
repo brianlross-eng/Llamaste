@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-10 (Live ISO squashfs pivot + desktop mode + hardware fixes; new 1396MB ISO built and flashed)
+**Last updated**: 2026-03-10 (WiFi scan retry fix — a5e60ac)
 
 ---
 
@@ -89,58 +89,44 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-10) -- WiFi Root Cause Fix
+## Latest Session (2026-03-10) -- WiFi Scan Retry Fix
 
-### Phase: WiFi Connection on RTL8821CE — SHOULD BE FIXED (aed4327)
+### Phase: WiFi Connection on RTL8821CE — SCAN TIMING FIX (a5e60ac)
 
-Three root causes definitively identified and fixed. New ISO built.
+Hardware test of ISO 5b27a0d showed scan still returning 0 networks. wpa_cli and
+regulatory.db ARE in the image (confirmed by logs), but the scan fires too fast.
+
+**New bug found**: `supervisor_scan_wifi()` timing insufficient for RTL8821CE:
+- 500ms post-IFF_UP wait too short (RTL8821CE needs ~2s for firmware init)
+- No retry loop — single attempt, empty = give up
+- No check of `wpa_cli scan` return value (OK vs FAIL-BUSY)
+- regulatory domain (country=US) not settled before scan fires
 
 | Component | Status |
 |-----------|--------|
-| Ubuntu-style WiFi scan UI (numbered list, single keypress selection) | DONE (c8acf91) |
-| wpa_cli scan output parsing fix (skip "Selected interface" preamble) | DONE (79ea169) |
-| Repo hygiene: nul, build-host/ tracked in git, serve_static_file paths | DONE (27f0285) |
-| Wireless regdb defconfig entry (was only in defconfig, not .config) | DONE (a562b3b) |
-| wpa_cli + wireless-regdb actually applied to .config (make defconfig) | DONE (aed4327) |
-| country=US in all wpa.conf templates (scan + saved + skeleton) | DONE (aed4327) |
-| Patch existing saved wpa.conf if country= missing (child_main.cpp) | DONE (aed4327) |
-| Force rebuild wpa_supplicant + wireless-regdb packages | DONE (aed4327) |
+| Increased driver init wait 500ms → 2s | DONE (a5e60ac) |
+| Added 1s regulatory domain settle wait | DONE (a5e60ac) |
+| 3-attempt scan retry loop with FAIL detection | DONE (a5e60ac) |
+| 3s scan window per attempt (was 2.5s single) | DONE (a5e60ac) |
+| Diagnostic logging for each attempt | DONE (a5e60ac) |
 
-**Root causes found and fixed**:
-1. **wpa_cli binary missing from image** — `BR2_PACKAGE_WPA_SUPPLICANT_CLI=y` was in
-   defconfig but never applied to `.config` (defconfig doesn't auto-update .config).
-   Without wpa_cli, supervisor_scan_wifi() always returned 0 networks. FIXED: ran
-   `make llamaste_x86_64_defconfig` + `make wpa_supplicant-dirclean && make wpa_supplicant`.
-2. **wireless-regdb not in .config** — Same defconfig-vs-.config issue. Removed the
-   duplicate entry in defconfig, applied to .config, force rebuilt.
-3. **No regulatory domain — world reg domain blocks most channels** — cfg80211 tries
-   to load regulatory.db from filesystem at early boot (before squashfs pivot), fails
-   silently. World regulatory domain stays active, blocking 5GHz channels. FIXED: added
-   `country=US` to all wpa.conf templates; wpa_supplicant sets country via nl80211 at
-   runtime, bypassing the filesystem-based load.
+**NEEDS**: Buildroot rebuild + new ISO flash + hardware test.
 
-**Verified in squashfs**:
-- ✅ `/usr/sbin/wpa_cli` (142KB) present in squashfs
-- ✅ `/lib/firmware/regulatory.db` + `.p7s` present in squashfs
-- ✅ `CONFIG_CTRL_IFACE=y` in wpa_supplicant build config
-- ✅ `country=US` in scan-only config, saved config template, and skeleton fallback
-
-**Current ISO**: aed4327, 1434.4MB at `D:\Llamaste\llamaste.iso`
+**Previous fixes still in place**:
+- wpa_cli + wireless-regdb in image (aed4327)
+- country=US in all wpa.conf templates (aed4327)
+- Console WiFi prompt in supervisor_preflight_wifi (a0c645e)
+- Ubuntu-style scan UI with numbered network list (c8acf91)
 
 **Status on real hardware (Intel Core Ultra 9 275HX)**:
 - ✅ Pivot loop fixed (marker file `/llamaste-live-iso`)
 - ✅ Keyboard input works in desktop mode
 - ✅ LLM answers questions (desktop mode)
-- ✅ WiFi hardware detected (RTL8821CE binds)
-- ✅ Console WiFi prompt (moved to supervisor_preflight_wifi before display thread)
-- ✅ Ubuntu-style scan UI with numbered network list
-- ⬜ **NEEDS HARDWARE TEST** — first time wpa_cli + wireless-regdb are actually in image
-  and country=US is set. This should be the fix. Flash and verify.
-
-**Previous session fixes that contributed**:
-- Keyboard silently dropping keys (udevadm CHANGE vs ADD) — DONE (36bebab)
-- WiFi hardware detection (RTL8821CE, firmware, driver) — DONE (67df4c5)
-- Console WiFi setup moved to supervisor before display thread — DONE (a0c645e)
+- ✅ WiFi hardware detected (RTL8821CE binds, wpa_supplicant spawns)
+- ✅ Console WiFi prompt works (shows SSID entry)
+- ✅ wpa_cli + regulatory.db + country=US confirmed in image
+- ❌ Scan returns 0 networks (timing — 500ms too short for RTL8821CE)
+- ⬜ **NEEDS NEW ISO** with scan retry fix (a5e60ac)
 
 ---
 
