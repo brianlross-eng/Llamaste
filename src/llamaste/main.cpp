@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <cstring>
+#include <dirent.h>
 #include <unistd.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -66,6 +68,77 @@ static std::string select_model(int available_mb) {
     return "";
 }
 
+// ---------------------------------------------------------------------------
+// USB model scan (live mode only)
+// ---------------------------------------------------------------------------
+// In live mode /data is a tmpfs — models can't be at /data/models/ unless
+// we copy them from somewhere.  This function checks a second USB drive
+// (typically /dev/sdc or /dev/sdb partitions) for .gguf files and mounts
+// it at /mnt/model-usb so select_model() can find them at /data/models/.
+// The GGUF file is symlinked rather than copied to avoid filling RAM.
+// ---------------------------------------------------------------------------
+static void scan_usb_for_model() {
+    // Candidate block devices to probe (skip sda=HDD, sdb=boot USB usually)
+    const char* candidates[] = {
+        "/dev/sdc", "/dev/sdc1",
+        "/dev/sdb", "/dev/sdb1",   // fallback: might be boot or model USB
+        "/dev/sdd", "/dev/sdd1",
+        nullptr
+    };
+
+    mkdir("/mnt", 0755);
+    mkdir("/mnt/model-usb", 0755);
+
+    for (int i = 0; candidates[i]; i++) {
+        if (access(candidates[i], R_OK) != 0) continue;
+
+        // Try vfat first (FAT32 USB sticks), then ext4
+        const char* fstypes[] = {"vfat", "ext4", "exfat", nullptr};
+        bool mounted = false;
+        for (int f = 0; fstypes[f]; f++) {
+            if (mount(candidates[i], "/mnt/model-usb", fstypes[f],
+                      MS_RDONLY, nullptr) == 0) {
+                mounted = true;
+                fprintf(stderr, "[main] Mounted %s (%s) as model USB\n",
+                        candidates[i], fstypes[f]);
+                break;
+            }
+        }
+        if (!mounted) continue;
+
+        // Look for .gguf files at root or in a models/ subdirectory
+        const char* search_dirs[] = {"/mnt/model-usb", "/mnt/model-usb/models", nullptr};
+        bool found = false;
+        for (int d = 0; search_dirs[d] && !found; d++) {
+            DIR* dir = opendir(search_dirs[d]);
+            if (!dir) continue;
+            struct dirent* de;
+            while ((de = readdir(dir)) != nullptr && !found) {
+                size_t len = strlen(de->d_name);
+                if (len < 5 || strcmp(de->d_name + len - 5, ".gguf") != 0) continue;
+                // Symlink into /data/models/ so select_model() finds it
+                mkdir("/data/models", 0755);
+                std::string src  = std::string(search_dirs[d]) + "/" + de->d_name;
+                std::string dest = std::string("/data/models/") + de->d_name;
+                if (symlink(src.c_str(), dest.c_str()) == 0) {
+                    fprintf(stderr, "[main] USB model linked: %s\n", de->d_name);
+                } else {
+                    fprintf(stderr, "[main] USB model already linked: %s\n", de->d_name);
+                }
+                found = true;
+            }
+            closedir(dir);
+        }
+
+        if (!found) {
+            umount("/mnt/model-usb");
+            fprintf(stderr, "[main] No .gguf on %s, skipping\n", candidates[i]);
+        } else {
+            break;  // Keep mounted — model symlink points into it
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     fprintf(stderr, "\n");
     fprintf(stderr, "  Llamaste v%s — LLM IS the OS\n", VERSION);
@@ -90,7 +163,9 @@ int main(int argc, char** argv) {
             // Live ISO mode: use tmpfs for /data, no disk probe
             fprintf(stderr, "[main] Live mode: using tmpfs for /data\n");
             mkdir("/data", 0755);
-            mount("tmpfs", "/data", "tmpfs", 0, "size=1G");
+            mount("tmpfs", "/data", "tmpfs", 0, "size=512M");
+            // Check for a second USB drive with a .gguf model file
+            scan_usb_for_model();
         } else {
             init_mount_data();
         }

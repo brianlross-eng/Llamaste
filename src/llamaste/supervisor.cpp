@@ -110,6 +110,9 @@ static void log_append(const std::string& line) {
 
 // Start a thread that reads from a pipe fd and tees to both stderr and g_log_lines.
 // Used to capture supervisor's own fprintf(stderr,...) output for the 'D' debug view.
+// Path of the persistent debug log file.  Readable via HTTP once WiFi is up.
+static constexpr const char* DEBUG_LOG_PATH = "/tmp/llamaste-debug.log";
+
 static void start_stderr_tee() {
     int pipefd[2];
     if (pipe(pipefd) != 0) return;
@@ -121,8 +124,12 @@ static void start_stderr_tee() {
     // Open the original stderr for pass-through (fd 2 was /dev/console)
     int original_console = open("/dev/console", O_WRONLY | O_NOCTTY);
 
+    // Open persistent log file — full boot log, readable via HTTP once WiFi up
+    int log_file = open(DEBUG_LOG_PATH,
+                        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
     int read_fd = pipefd[0];
-    std::thread([read_fd, original_console]() {
+    std::thread([read_fd, original_console, log_file]() {
         char buf[512];
         std::string partial;
         while (true) {
@@ -132,7 +139,10 @@ static void start_stderr_tee() {
             // Pass through to original console
             if (original_console >= 0)
                 write(original_console, buf, n);
-            // Split into lines and add to buffer
+            // Write to persistent log file
+            if (log_file >= 0)
+                write(log_file, buf, n);
+            // Split into lines and add to in-memory ring buffer
             partial += buf;
             size_t pos;
             while ((pos = partial.find('\n')) != std::string::npos) {
@@ -141,6 +151,7 @@ static void start_stderr_tee() {
             }
         }
         if (original_console >= 0) close(original_console);
+        if (log_file >= 0) close(log_file);
     }).detach();
 }
 
