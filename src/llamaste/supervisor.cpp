@@ -9,6 +9,8 @@
 #include <mutex>
 #include <deque>
 #include <atomic>
+#include <vector>
+#include <algorithm>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -936,6 +938,168 @@ static void watchdog_kicker_thread() {
 // config, so we skip the wpa_cli reconfigure step here.
 // ---------------------------------------------------------------------------
 #ifndef _WIN32
+
+// Fork a command and capture its stdout into a string.
+// argv[0] is the executable path; array must be null-terminated.
+// Returns empty string on error or timeout.
+static std::string capture_cmd(const char* exe, const char* const* argv, int timeout_ms) {
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) < 0) return "";
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
+    if (pid == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) { dup2(null_fd, STDERR_FILENO); close(null_fd); }
+        execv(exe, (char* const*)argv);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string out;
+    char buf[512];
+    struct pollfd pfd = { pipefd[0], POLLIN, 0 };
+    for (;;) {
+        int r = poll(&pfd, 1, timeout_ms);
+        if (r <= 0) break;
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) break;
+        out.append(buf, (size_t)n);
+        timeout_ms = 300; // shorter subsequent reads
+    }
+    close(pipefd[0]);
+    kill(pid, SIGTERM);
+    waitpid(pid, nullptr, 0);
+    return out;
+}
+
+struct WifiEntry {
+    std::string ssid;
+    std::string flags;   // raw wpa_cli flags e.g. "[WPA2-PSK-CCMP][ESS]"
+    int signal_db;       // negative dBm
+};
+
+// Bring iface up, start a temporary wpa_supplicant, scan, return visible networks.
+// Kills wpa_supplicant before returning — child_main will start the real one.
+static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
+    std::vector<WifiEntry> nets;
+
+    // Bring interface up (required before scanning)
+    {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            struct ifreq ifr;
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+            if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0) {
+                ifr.ifr_flags |= IFF_UP;
+                ioctl(s, SIOCSIFFLAGS, &ifr);
+            }
+            close(s);
+        }
+    }
+
+    // Write minimal scan-only config
+    const char* scan_conf = "/tmp/wpa_scan.conf";
+    {
+        FILE* f = fopen(scan_conf, "w");
+        if (!f) return nets;
+        fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
+        fprintf(f, "ctrl_interface_group=0\n");
+        fprintf(f, "update_config=0\n");
+        fclose(f);
+    }
+    mkdir("/run/wpa_supplicant", 0755);
+
+    // Start wpa_supplicant in foreground so we own its pid
+    pid_t wpa_pid = fork();
+    if (wpa_pid < 0) { unlink(scan_conf); return nets; }
+    if (wpa_pid == 0) {
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+        execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+              "-i", iface.c_str(),
+              "-c", scan_conf,
+              "-D", "nl80211,wext",
+              (char*)nullptr);
+        _exit(127);
+    }
+
+    // Wait for control socket (up to 4s)
+    std::string sock_path = "/run/wpa_supplicant/" + iface;
+    for (int i = 0; i < 40; i++) {
+        struct stat st;
+        if (stat(sock_path.c_str(), &st) == 0) break;
+        usleep(100000);
+    }
+
+    // Trigger scan
+    {
+        const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
+        capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+    }
+
+    // Wait for scan to complete (~2.5s typical)
+    usleep(2500000);
+
+    // Retrieve results
+    std::string results;
+    {
+        const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan_results", nullptr };
+        results = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+    }
+
+    // Kill temp wpa_supplicant cleanly
+    kill(wpa_pid, SIGTERM);
+    waitpid(wpa_pid, nullptr, 0);
+    unlink(sock_path.c_str());
+    unlink(scan_conf);
+
+    // Parse scan_results output:
+    //   bssid / frequency / signal level / flags / ssid   (header line)
+    //   aa:bb:cc:dd:ee:ff\t2412\t-65\t[WPA2-PSK-CCMP][ESS]\tMyNetwork
+    const char* p = results.c_str();
+    while (*p && *p != '\n') p++; // skip header
+    if (*p == '\n') p++;
+
+    while (*p) {
+        // Copy line
+        char line[512];
+        size_t len = 0;
+        while (*p && *p != '\n' && len < sizeof(line) - 1) line[len++] = *p++;
+        line[len] = '\0';
+        if (*p == '\n') p++;
+        if (len == 0) continue;
+
+        // Split on tabs: bssid, freq, signal, flags, ssid
+        char* tok = strtok(line, "\t");
+        char* fields[5] = {};
+        for (int fi = 0; fi < 5 && tok; fi++, tok = strtok(nullptr, "\t"))
+            fields[fi] = tok;
+        if (!fields[4]) continue;
+
+        std::string ssid  = fields[4];
+        std::string flags = fields[3] ? fields[3] : "";
+        int sig = fields[2] ? atoi(fields[2]) : -100;
+
+        if (ssid.empty()) continue; // skip hidden networks
+
+        // Deduplicate by SSID — keep strongest signal
+        bool dup = false;
+        for (auto& e : nets) {
+            if (e.ssid == ssid) {
+                if (sig > e.signal_db) { e.signal_db = sig; e.flags = flags; }
+                dup = true; break;
+            }
+        }
+        if (!dup) nets.push_back({ssid, flags, sig});
+    }
+
+    // Sort strongest signal first
+    std::sort(nets.begin(), nets.end(),
+              [](const WifiEntry& a, const WifiEntry& b){ return a.signal_db > b.signal_db; });
+    return nets;
+}
+
 static std::string supervisor_detect_wifi_iface() {
     DIR* d = opendir("/sys/class/net");
     if (!d) return "";
@@ -985,18 +1149,6 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
     auto wstr = [&](const char* s) { write(tty, s, strlen(s)); };
 
-    wstr("\033[2J\033[H\r\n");
-    wstr("  +--------------------------------------------------+\r\n");
-    wstr("  |           Llamaste  -  WiFi Setup                |\r\n");
-    wstr("  +--------------------------------------------------+\r\n");
-    wstr("\r\n");
-    wstr("  WiFi hardware detected: ");
-    wstr(iface.c_str());
-    wstr("\r\n");
-    wstr("  No saved networks found.  Enter credentials below,\r\n");
-    wstr("  or press Enter to skip and use the web UI later.\r\n");
-    wstr("\r\n");
-
     auto read_line = [&](bool echo_chars, size_t max_len) -> std::string {
         std::string s;
         char c;
@@ -1014,8 +1166,73 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
         return s;
     };
 
-    wstr("  SSID     : ");
-    std::string ssid = read_line(true, 63);
+    // --- Phase 1: Scan ---
+    wstr("\033[2J\033[H\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("  |           Llamaste  -  WiFi Setup                |\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("\r\n");
+    wstr("  Adapter : "); wstr(iface.c_str()); wstr("\r\n");
+    wstr("  Scanning for networks...\r\n");
+
+    auto nets = supervisor_scan_wifi(iface);
+
+    // --- Phase 2: Show results / pick network ---
+    wstr("\033[2J\033[H\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("  |           Llamaste  -  WiFi Setup                |\r\n");
+    wstr("  +--------------------------------------------------+\r\n");
+    wstr("\r\n");
+
+    std::string ssid;
+    bool is_open = false;
+
+    if (!nets.empty()) {
+        int n_show = (int)nets.size() > 9 ? 9 : (int)nets.size();
+        wstr("  Visible networks:\r\n\r\n");
+        for (int i = 0; i < n_show; i++) {
+            const auto& e = nets[i];
+            bool open = e.flags.find("PSK") == std::string::npos &&
+                        e.flags.find("WPA") == std::string::npos &&
+                        e.flags.find("WEP") == std::string::npos;
+            char line[80];
+            snprintf(line, sizeof(line), "   %d  %-32s  %s  %4d dBm\r\n",
+                     i + 1, e.ssid.substr(0, 32).c_str(),
+                     open ? "[Open]   " : "[WPA-PSK]",
+                     e.signal_db);
+            wstr(line);
+        }
+        wstr("\r\n");
+        char prompt[48];
+        snprintf(prompt, sizeof(prompt),
+                 "  Enter number (1-%d), or Enter to type manually: ", n_show);
+        wstr(prompt);
+
+        // Single keypress — no Enter needed
+        char c = 0;
+        read(tty, &c, 1);
+        write(tty, &c, 1);
+        wstr("\r\n");
+
+        if (c >= '1' && c <= ('0' + n_show)) {
+            int idx = c - '1';
+            const auto& chosen = nets[idx];
+            ssid    = chosen.ssid;
+            is_open = chosen.flags.find("PSK") == std::string::npos &&
+                      chosen.flags.find("WPA") == std::string::npos &&
+                      chosen.flags.find("WEP") == std::string::npos;
+            wstr("  Selected: "); wstr(ssid.c_str()); wstr("\r\n");
+        }
+        // else: fall through to manual entry below
+    } else {
+        wstr("  No networks found.\r\n\r\n");
+    }
+
+    // --- Phase 3: Manual SSID entry if not picked from list ---
+    if (ssid.empty()) {
+        wstr("  SSID     : ");
+        ssid = read_line(true, 63);
+    }
 
     if (ssid.empty()) {
         wstr("  Skipping WiFi setup.\r\n\r\n");
@@ -1024,15 +1241,25 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
         return;
     }
 
-    wstr("  Password : ");
-    std::string psk = read_line(false, 63);
-    wstr("\r\n");
+    // --- Phase 4: Password ---
+    std::string psk;
+    if (!is_open) {
+        wstr("  Password : ");
+        psk = read_line(false, 63);
+        wstr("\r\n");
+        if (psk.empty()) {
+            // Treat as open if user skips password for a manually entered SSID
+            is_open = true;
+        }
+    } else {
+        wstr("  (Open network — no password needed)\r\n");
+    }
 
     tcsetattr(tty, TCSAFLUSH, &old_tio);
     close(tty);
 
-    // Ensure data directory exists (child_main normally creates it, but we
-    // run before the child starts).
+    // --- Phase 5: Write wpa.conf ---
+    // Ensure data directories exist (we run before child_main creates them).
     mkdir("/data", 0755);
     mkdir("/data/llamaste", 0755);
     mkdir("/data/llamaste/wifi", 0755);
@@ -1052,11 +1279,16 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     fprintf(f, "\n");
     fprintf(f, "network={\n");
     fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());
-    fprintf(f, "    psk=\"%s\"\n",  psk.c_str());
-    fprintf(f, "    key_mgmt=WPA-PSK\n");
+    if (is_open || psk.empty()) {
+        fprintf(f, "    key_mgmt=NONE\n");
+    } else {
+        fprintf(f, "    psk=\"%s\"\n", psk.c_str());
+        fprintf(f, "    key_mgmt=WPA-PSK\n");
+    }
     fprintf(f, "}\n");
     fclose(f);
-    fprintf(stderr, "[wifi] console_wifi_setup: saved SSID '%s'\n", ssid.c_str());
+    fprintf(stderr, "[wifi] console_wifi_setup: saved SSID '%s' (%s)\n",
+            ssid.c_str(), is_open ? "open" : "WPA-PSK");
     // wpa_supplicant not yet running — child_main will start it with the saved config.
 }
 
