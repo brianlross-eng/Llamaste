@@ -784,8 +784,9 @@ static void spawn_dhcpcd(const std::string& iface) {
         return;
     }
     if (pid == 0) {
-        execl("/usr/sbin/dhcpcd", "dhcpcd",
-              "-b",            // background
+        // Buildroot installs dhcpcd to /sbin/dhcpcd (not /usr/sbin/)
+        execl("/sbin/dhcpcd", "dhcpcd",
+              "-b",            // background — retries until it gets a lease
               iface.c_str(),
               (char*)nullptr);
         fprintf(stderr, "[child] execl dhcpcd failed: %s\n", strerror(errno));
@@ -793,7 +794,11 @@ static void spawn_dhcpcd(const std::string& iface) {
     }
     int wstatus;
     waitpid(pid, &wstatus, 0);
-    fprintf(stderr, "[child] dhcpcd spawned on %s\n", iface.c_str());
+    if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 127) {
+        fprintf(stderr, "[child] dhcpcd failed to exec — binary missing?\n");
+    } else {
+        fprintf(stderr, "[child] dhcpcd spawned on %s\n", iface.c_str());
+    }
 }
 #endif // _WIN32
 

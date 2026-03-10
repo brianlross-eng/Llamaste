@@ -1038,12 +1038,19 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     mkdir("/data/llamaste/wifi", 0755);
 
     const char* conf = "/data/llamaste/wifi/wpa.conf";
-    FILE* f = fopen(conf, "a");
+    // Write the full config — header + network block.  spawn_wpa_supplicant()
+    // skips the skeleton if the file already exists, so we include
+    // ctrl_interface here or wpa_supplicant won't create its control socket.
+    FILE* f = fopen(conf, "w");
     if (!f) {
         fprintf(stderr, "[wifi] console_wifi_setup: cannot write wpa.conf: %m\n");
         return;
     }
-    fprintf(f, "\nnetwork={\n");
+    fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
+    fprintf(f, "ctrl_interface_group=0\n");
+    fprintf(f, "update_config=1\n");
+    fprintf(f, "\n");
+    fprintf(f, "network={\n");
     fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());
     fprintf(f, "    psk=\"%s\"\n",  psk.c_str());
     fprintf(f, "    key_mgmt=WPA-PSK\n");
