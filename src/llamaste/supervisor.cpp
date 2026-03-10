@@ -1024,28 +1024,38 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         _exit(127);
     }
 
-    // Wait for control socket (up to 4s)
+    // Give the driver a moment to fully initialize after IFF_UP
+    usleep(500000);
+
+    // Wait for control socket (up to 5s)
     std::string sock_path = "/run/wpa_supplicant/" + iface;
-    for (int i = 0; i < 40; i++) {
+    bool sock_ok = false;
+    for (int i = 0; i < 50; i++) {
         struct stat st;
-        if (stat(sock_path.c_str(), &st) == 0) break;
+        if (stat(sock_path.c_str(), &st) == 0) { sock_ok = true; break; }
         usleep(100000);
     }
+    fprintf(stderr, "[scan] wpa_supplicant ctrl socket %s\n",
+            sock_ok ? "ready" : "TIMED OUT — wpa_supplicant may have failed");
 
-    // Trigger scan
+    // Trigger scan and log result
     {
         const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
-        capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+        std::string r = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+        fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
+                r.empty() ? "(empty — wpa_cli missing or socket gone?)" : r.c_str());
     }
 
     // Wait for scan to complete (~2.5s typical)
     usleep(2500000);
 
-    // Retrieve results
+    // Retrieve results and log raw output
     std::string results;
     {
         const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan_results", nullptr };
         results = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+        fprintf(stderr, "[scan] scan_results (%zu bytes):\n%s\n",
+                results.size(), results.c_str());
     }
 
     // Kill temp wpa_supplicant cleanly
@@ -1054,11 +1064,19 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     unlink(sock_path.c_str());
     unlink(scan_conf);
 
-    // Parse scan_results output:
-    //   bssid / frequency / signal level / flags / ssid   (header line)
+    // Parse scan_results output.  wpa_cli prepends "Selected interface 'X'\n"
+    // before the real header "bssid / frequency / signal level / flags / ssid".
+    // Find that header by string search so we skip any preamble lines, then
+    // parse tab-delimited data lines after it.
     //   aa:bb:cc:dd:ee:ff\t2412\t-65\t[WPA2-PSK-CCMP][ESS]\tMyNetwork
-    const char* p = results.c_str();
-    while (*p && *p != '\n') p++; // skip header
+    const char* header_marker = strstr(results.c_str(), "bssid / frequency");
+    if (!header_marker) {
+        fprintf(stderr, "[scan] no bssid header in output — returning 0 networks\n");
+        return nets;
+    }
+    // Skip to end of the header line
+    const char* p = header_marker;
+    while (*p && *p != '\n') p++;
     if (*p == '\n') p++;
 
     while (*p) {
