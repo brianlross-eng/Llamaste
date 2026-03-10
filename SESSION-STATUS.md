@@ -89,49 +89,58 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-08) -- WiFi Hardware Fix on Real Hardware
+## Latest Session (2026-03-10) -- WiFi Root Cause Fix
 
-### Phase: WiFi on RTL8821CE (Intel Core Ultra 9 275HX) — IN PROGRESS
+### Phase: WiFi Connection on RTL8821CE — SHOULD BE FIXED (aed4327)
 
-**Big win this session**: WiFi driver now loads and hardware is detected. LLM answers questions. Keyboard works in desktop mode. Three major issues resolved, one remaining.
+Three root causes definitively identified and fixed. New ISO built.
 
 | Component | Status |
 |-----------|--------|
-| Keyboard silently dropping keys (udevadm CHANGE vs ADD) | DONE (36bebab) |
-| Console WiFi setup on /dev/tty1 (server mode) | DONE (36bebab) |
-| WiFi hardware detection logging + dangling ref fix | DONE (f7dfc99) |
-| RTL8821CE firmware (rtw8821c_fw.bin) in overlay | DONE (61c38ad) |
-| CONFIG_RTW88_PCI=y added to linux.config | DONE (153bc6a) |
-| Comprehensive WiFi diagnostics dump | DONE (6cc559c) |
-| Better diagnostics (rtw* driver list, driver symlink, kernel version) | DONE (2a614ae) |
-| Clean kernel rebuild (linux-dirclean + make) — rtw8821ce.o actually compiled | DONE (c8909a4) |
-| CONFIG_EXTRA_FIRMWARE embeds rtw8821c_fw.bin in kernel image | DONE (67df4c5) |
-| **Console WiFi setup overwritten by supervisor display thread** | **TODO** |
+| Ubuntu-style WiFi scan UI (numbered list, single keypress selection) | DONE (c8acf91) |
+| wpa_cli scan output parsing fix (skip "Selected interface" preamble) | DONE (79ea169) |
+| Repo hygiene: nul, build-host/ tracked in git, serve_static_file paths | DONE (27f0285) |
+| Wireless regdb defconfig entry (was only in defconfig, not .config) | DONE (a562b3b) |
+| wpa_cli + wireless-regdb actually applied to .config (make defconfig) | DONE (aed4327) |
+| country=US in all wpa.conf templates (scan + saved + skeleton) | DONE (aed4327) |
+| Patch existing saved wpa.conf if country= missing (child_main.cpp) | DONE (aed4327) |
+| Force rebuild wpa_supplicant + wireless-regdb packages | DONE (aed4327) |
 
 **Root causes found and fixed**:
-1. `make linux-rebuild` was incremental — rtw88 object files never compiled. Fixed by `make linux-dirclean && make`.
-2. `CONFIG_MODULES=n` means firmware can't be loaded from filesystem at probe time. Fixed by `CONFIG_EXTRA_FIRMWARE`.
-3. `udevadm trigger` without `--action=add` fires CHANGE events; libinput needs ADD. Fixed.
+1. **wpa_cli binary missing from image** — `BR2_PACKAGE_WPA_SUPPLICANT_CLI=y` was in
+   defconfig but never applied to `.config` (defconfig doesn't auto-update .config).
+   Without wpa_cli, supervisor_scan_wifi() always returned 0 networks. FIXED: ran
+   `make llamaste_x86_64_defconfig` + `make wpa_supplicant-dirclean && make wpa_supplicant`.
+2. **wireless-regdb not in .config** — Same defconfig-vs-.config issue. Removed the
+   duplicate entry in defconfig, applied to .config, force rebuilt.
+3. **No regulatory domain — world reg domain blocks most channels** — cfg80211 tries
+   to load regulatory.db from filesystem at early boot (before squashfs pivot), fails
+   silently. World regulatory domain stays active, blocking 5GHz channels. FIXED: added
+   `country=US` to all wpa.conf templates; wpa_supplicant sets country via nl80211 at
+   runtime, bypassing the filesystem-based load.
 
-**Remaining issue — console WiFi setup overwritten**:
-- `console_wifi_setup()` runs in the child process (child_main.cpp line ~740)
-- Supervisor's display thread starts BEFORE child is spawned (supervisor.cpp line 953)
-- Display thread reads child's stderr and writes to tty0, overwriting the WiFi prompt
-- **Fix**: Move WiFi check to supervisor.cpp BEFORE `std::thread display_thread(...)` at line 952
-  - At that point: no display thread, no input thread, no competing output
-  - Check for wlan* in /sys/class/net AND no `network={` in wpa.conf
-  - If both: call console_wifi_setup() directly (or inline the logic)
-  - Remove the duplicate check from child_main.cpp
+**Verified in squashfs**:
+- ✅ `/usr/sbin/wpa_cli` (142KB) present in squashfs
+- ✅ `/lib/firmware/regulatory.db` + `.p7s` present in squashfs
+- ✅ `CONFIG_CTRL_IFACE=y` in wpa_supplicant build config
+- ✅ `country=US` in scan-only config, saved config template, and skeleton fallback
 
-**Current ISO**: 67df4c5, 1433.9MB at `D:\Llamaste\llamaste.iso`
+**Current ISO**: aed4327, 1434.4MB at `D:\Llamaste\llamaste.iso`
 
-**Confirmed working on real hardware (Intel Core Ultra 9 275HX)**:
+**Status on real hardware (Intel Core Ultra 9 275HX)**:
 - ✅ Pivot loop fixed (marker file `/llamaste-live-iso`)
 - ✅ Keyboard input works in desktop mode
 - ✅ LLM answers questions (desktop mode)
-- ✅ WiFi hardware detected (RTL8821CE binds after CONFIG_EXTRA_FIRMWARE fix)
-- ✅ wpa_supplicant starts, dhcpcd waits for network
-- ❌ WiFi setup prompt overwritten — user can't type SSID/password
+- ✅ WiFi hardware detected (RTL8821CE binds)
+- ✅ Console WiFi prompt (moved to supervisor_preflight_wifi before display thread)
+- ✅ Ubuntu-style scan UI with numbered network list
+- ⬜ **NEEDS HARDWARE TEST** — first time wpa_cli + wireless-regdb are actually in image
+  and country=US is set. This should be the fix. Flash and verify.
+
+**Previous session fixes that contributed**:
+- Keyboard silently dropping keys (udevadm CHANGE vs ADD) — DONE (36bebab)
+- WiFi hardware detection (RTL8821CE, firmware, driver) — DONE (67df4c5)
+- Console WiFi setup moved to supervisor before display thread — DONE (a0c645e)
 
 ---
 
