@@ -1029,8 +1029,10 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         _exit(127);
     }
 
-    // Give the driver a moment to fully initialize after IFF_UP
-    usleep(500000);
+    // Give the driver time to fully initialize after IFF_UP.
+    // RTL8821CE needs ~2s for firmware load + radio init.
+    fprintf(stderr, "[scan] waiting for driver init after IFF_UP...\n");
+    usleep(2000000);
 
     // Wait for control socket (up to 5s)
     std::string sock_path = "/run/wpa_supplicant/" + iface;
@@ -1043,24 +1045,57 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     fprintf(stderr, "[scan] wpa_supplicant ctrl socket %s\n",
             sock_ok ? "ready" : "TIMED OUT — wpa_supplicant may have failed");
 
-    // Trigger scan and log result
-    {
-        const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
-        std::string r = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
-        fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
-                r.empty() ? "(empty — wpa_cli missing or socket gone?)" : r.c_str());
-    }
+    // Wait for regulatory domain to settle after wpa_supplicant applies country=US.
+    // Without this, cfg80211 may still be in world domain when scan fires.
+    usleep(1000000);
 
-    // Wait for scan to complete (~2.5s typical)
-    usleep(2500000);
-
-    // Retrieve results and log raw output
+    // Scan with retry — driver may need multiple attempts to return results.
+    // RTL8821CE in particular needs time after IFF_UP + wpa_supplicant start
+    // before radio scanning actually works.
     std::string results;
-    {
-        const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan_results", nullptr };
-        results = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
-        fprintf(stderr, "[scan] scan_results (%zu bytes):\n%s\n",
-                results.size(), results.c_str());
+    const int max_scan_attempts = 3;
+    for (int attempt = 1; attempt <= max_scan_attempts; attempt++) {
+        fprintf(stderr, "[scan] attempt %d/%d: triggering scan...\n", attempt, max_scan_attempts);
+
+        // Trigger scan and check return
+        {
+            const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
+            std::string r = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+            // Trim trailing whitespace for comparison
+            while (!r.empty() && (r.back() == '\n' || r.back() == '\r')) r.pop_back();
+            fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
+                    r.empty() ? "(empty — wpa_cli missing or socket gone?)" : r.c_str());
+
+            // Check for FAIL response — driver not ready
+            if (r.find("FAIL") != std::string::npos) {
+                fprintf(stderr, "[scan] scan returned FAIL — driver not ready, waiting 2s...\n");
+                usleep(2000000);
+                continue;
+            }
+        }
+
+        // Wait for scan to complete (3s per attempt)
+        usleep(3000000);
+
+        // Retrieve results
+        {
+            const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan_results", nullptr };
+            results = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
+            fprintf(stderr, "[scan] scan_results (%zu bytes):\n%s\n",
+                    results.size(), results.c_str());
+        }
+
+        // If we got results with the bssid header, we're done
+        if (strstr(results.c_str(), "bssid / frequency")) {
+            fprintf(stderr, "[scan] got results on attempt %d\n", attempt);
+            break;
+        }
+
+        // No results yet — wait before retry
+        if (attempt < max_scan_attempts) {
+            fprintf(stderr, "[scan] no results, retrying in 2s...\n");
+            usleep(2000000);
+        }
     }
 
     // Kill temp wpa_supplicant cleanly
