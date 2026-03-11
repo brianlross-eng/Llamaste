@@ -2024,10 +2024,23 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found
+    // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found.
+    // In desktop mode, supervisor_preflight_wifi() skips entirely (can't use
+    // tty1 — compositor owns the display), so modules may still be probing
+    // when we get here.  Retry init() for up to 6s to catch late interfaces.
 #ifndef _WIN32
     {
         bool wifi_init_ok = g_wifi.init();
+        if (!wifi_init_ok || !g_wifi.has_wifi()) {
+            // Modules may still be probing — retry (especially in desktop mode
+            // where supervisor_preflight_wifi doesn't run its own retry loop)
+            for (int try_n = 0; try_n < 6 && !g_wifi.has_wifi(); try_n++) {
+                if (try_n == 0)
+                    fprintf(stderr, "[wifi] no interface yet, waiting for module probe...\n");
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                wifi_init_ok = g_wifi.init();
+            }
+        }
         std::string wifi_iface;
         if (wifi_init_ok && g_wifi.has_wifi())
             wifi_iface = g_wifi.status().iface;
@@ -2039,14 +2052,18 @@ int child_main(const SupervisorConfig& config) {
     if (wifi_init_ok) {
         if (!wifi_iface.empty()) {
             spawn_wpa_supplicant(wifi_iface);
-            // Give wpa_supplicant a moment to create its control socket
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Give wpa_supplicant a moment to create its control socket.
+            // 500ms is enough here because this is a persistent daemon, not
+            // the temporary instance used in supervisor_scan_wifi.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             // Re-open control socket now that daemon is running
             g_wifi.init();
 
             // Console WiFi setup (first-boot SSID/PSK prompt) runs in the
             // supervisor before this child starts — see supervisor_preflight_wifi().
             // wpa_supplicant starts here with whatever config was saved.
+            // In desktop mode, there's no saved config — the web UI handles
+            // WiFi scanning and connection via wifi.scan / wifi.connect tools.
 
             spawn_dhcpcd(wifi_iface);
         }
