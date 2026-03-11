@@ -61,7 +61,7 @@ BR2_PACKAGE_ESPEAK_NG=y
 BR2_PACKAGE_ONNXRUNTIME=y
 BR2_PACKAGE_SHERPA_ONNX=y
 
-# WiFi support (wpa_supplicant + dhcpcd + firmware)
+# WiFi support (wpa_supplicant + dhcpcd + firmware for ALL common hardware)
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
@@ -80,13 +80,25 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_22000=y
 # Realtek RTL8821CE/RTL8822CE/RTW88 series
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_RTW88=y
-# Realtek RTL88xx
+# Realtek RTL88xx legacy
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_88XX=y
+# Realtek RTW89 (WiFi 6/6E: RTL8852AE/BE/CE)
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_RTW89=y
+# Qualcomm ath10k firmware (QCA9880, QCA6174, QCA9377)
+BR2_PACKAGE_LINUX_FIRMWARE_QUALCOMM_WIL6210=y
+# Qualcomm ath11k firmware (QCA6390, WCN6855)
+BR2_PACKAGE_LINUX_FIRMWARE_QUALCOMM_6390=y
+# Broadcom BCM43xx firmware (BCM4356, BCM4371, BCM43455)
+BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XX=y
+# Ralink RT2800 USB firmware (RT5370, RT5572)
+BR2_PACKAGE_LINUX_FIRMWARE_RALINK_RT2XX=y
+# MediaTek MT76 USB firmware (MT7612U, MT7610U)
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT76X2=y
 # Regulatory database (signed) — required by CFG80211_REQUIRE_SIGNED_REGDB
 # Without this the kernel uses world regulatory domain (no 5GHz channels)
 BR2_PACKAGE_WIRELESS_REGDB=y
-# NOTE: Intel BE200 (Wi-Fi 7 / Typhoon Peak) firmware has NO Buildroot config option.
-# Files iwlwifi-ty-a0-gf-a0-*.ucode are in the rootfs overlay instead.
+# NOTE: Intel BE200 (Wi-Fi 7 / Gale Peak) firmware has NO Buildroot config option.
+# Files iwlwifi-gl-c0-fm-c0-*.ucode are in the rootfs overlay instead.
 
 # Scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LLAMASTE_PATH)/board/llamaste/post_build.sh"

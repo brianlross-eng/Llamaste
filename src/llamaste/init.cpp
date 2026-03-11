@@ -900,35 +900,83 @@ void init_load_modules() {
     // Non-existent modules are silently skipped (hardware not targeted in this build).
     const char* module_paths[] = {
         // WiFi vendor drivers (cfg80211 + mac80211 are built-in =y)
-        // Intel WiFi
+        //
+        // --- Intel WiFi ---
         "drivers/net/wireless/intel/iwlwifi/iwlwifi.ko",
         "drivers/net/wireless/intel/iwlwifi/dvm/iwldvm.ko",
         "drivers/net/wireless/intel/iwlwifi/mvm/iwlmvm.ko",
-        // Realtek RTW88 family
+        //
+        // --- Realtek RTW88 (PCIe + USB) ---
         "drivers/net/wireless/realtek/rtw88/rtw88_core.ko",
         "drivers/net/wireless/realtek/rtw88/rtw88_pci.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_usb.ko",
         "drivers/net/wireless/realtek/rtw88/rtw88_8821c.ko",
         "drivers/net/wireless/realtek/rtw88/rtw88_8821ce.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8821cu.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822b.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822be.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822bu.ko",
         "drivers/net/wireless/realtek/rtw88/rtw88_8822c.ko",
         "drivers/net/wireless/realtek/rtw88/rtw88_8822ce.ko",
-        // Realtek USB WiFi (rtlwifi-based RTL8192CU)
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822cu.ko",
+        //
+        // --- Realtek RTW89 (WiFi 6/6E PCIe) ---
+        "drivers/net/wireless/realtek/rtw89/rtw89_core.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_pci.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852a.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852ae.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852b.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852be.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852c.ko",
+        "drivers/net/wireless/realtek/rtw89/rtw89_8852ce.ko",
+        //
+        // --- Realtek legacy USB (RTL8192CU) ---
         "drivers/net/wireless/realtek/rtlwifi/rtlwifi.ko",
         "drivers/net/wireless/realtek/rtlwifi/rtl_usb.ko",
         "drivers/net/wireless/realtek/rtlwifi/rtl8192c/rtl8192c-common.ko",
         "drivers/net/wireless/realtek/rtlwifi/rtl8192cu/rtl8192cu.ko",
-        // Atheros/Qualcomm
+        //
+        // --- Qualcomm/Atheros ath10k ---
         "drivers/net/wireless/ath/ath.ko",
         "drivers/net/wireless/ath/ath10k/ath10k_core.ko",
         "drivers/net/wireless/ath/ath10k/ath10k_pci.ko",
+        "drivers/net/wireless/ath/ath10k/ath10k_usb.ko",
+        //
+        // --- Qualcomm ath11k (WiFi 6) ---
+        "drivers/net/wireless/ath/ath11k/ath11k.ko",
+        "drivers/net/wireless/ath/ath11k/ath11k_pci.ko",
+        //
+        // --- Atheros ath9k (older hardware) ---
         "drivers/net/wireless/ath/ath9k/ath9k_hw.ko",
         "drivers/net/wireless/ath/ath9k/ath9k_common.ko",
         "drivers/net/wireless/ath/ath9k/ath9k.ko",
-        // MediaTek
+        //
+        // --- MediaTek MT76 PCIe (MT7921/MT7922) ---
         "drivers/net/wireless/mediatek/mt76/mt76.ko",
         "drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko",
         "drivers/net/wireless/mediatek/mt76/mt792x-lib.ko",
         "drivers/net/wireless/mediatek/mt76/mt7921/mt7921-common.ko",
         "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko",
+        //
+        // --- MediaTek MT76 USB (MT7612U, MT7610U dongles) ---
+        "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0-common.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0u.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
+        //
+        // --- Broadcom FullMAC (BCM4356, BCM4371, BCM43455) ---
+        "drivers/net/wireless/broadcom/brcm80211/brcmutil/brcmutil.ko",
+        "drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko",
+        //
+        // --- Ralink/MediaTek RT2800 USB (RT5370, RT5572) ---
+        "drivers/net/wireless/ralink/rt2x00/rt2x00lib.ko",
+        "drivers/net/wireless/ralink/rt2x00/rt2x00usb.ko",
+        "drivers/net/wireless/ralink/rt2x00/rt2800lib.ko",
+        "drivers/net/wireless/ralink/rt2x00/rt2800usb.ko",
+        //
         nullptr
     };
 
@@ -968,7 +1016,8 @@ void init_load_modules() {
     fprintf(stderr, "[init] modules: %d loaded, %d skipped, %d failed\n",
             loaded, skipped, failed);
 
-    // Give drivers a moment to probe hardware and create net interfaces
-    usleep(500000);
+    // Give drivers time to probe hardware and create net interfaces.
+    // With many WiFi modules, probing can take 2-3s on some hardware.
+    usleep(2000000);
 #endif
 }

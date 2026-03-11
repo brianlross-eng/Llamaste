@@ -949,8 +949,8 @@ static std::string capture_cmd(const char* exe, const char* const* argv, int tim
     if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
     if (pid == 0) {
         dup2(pipefd[1], STDOUT_FILENO);
-        int null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) { dup2(null_fd, STDERR_FILENO); close(null_fd); }
+        // Merge stderr into stdout so we capture error messages too
+        dup2(pipefd[1], STDERR_FILENO);
         execv(exe, (char* const*)argv);
         _exit(127);
     }
@@ -983,6 +983,27 @@ struct WifiEntry {
 static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     std::vector<WifiEntry> nets;
 
+    // Unblock rfkill — some laptops have WiFi soft-blocked by default.
+    // Uses /dev/rfkill device directly (no rfkill command needed).
+    {
+        int rf = open("/dev/rfkill", O_RDWR | O_CLOEXEC);
+        if (rf >= 0) {
+            struct {
+                uint32_t idx;
+                uint8_t  type;
+                uint8_t  op;
+                uint8_t  soft;
+                uint8_t  hard;
+            } ev = {};
+            ev.type = 1; // RFKILL_TYPE_WLAN
+            ev.op   = 3; // RFKILL_OP_CHANGE_ALL
+            ev.soft = 0; // unblock
+            if (write(rf, &ev, sizeof(ev)) > 0)
+                fprintf(stderr, "[scan] rfkill: unblocked WLAN\n");
+            close(rf);
+        }
+    }
+
     // Bring interface up (required before scanning)
     {
         int s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -992,7 +1013,10 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
             strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
             if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0) {
                 ifr.ifr_flags |= IFF_UP;
-                ioctl(s, SIOCSIFFLAGS, &ifr);
+                if (ioctl(s, SIOCSIFFLAGS, &ifr) == 0)
+                    fprintf(stderr, "[scan] interface %s UP\n", iface.c_str());
+                else
+                    fprintf(stderr, "[scan] interface %s UP failed: %m\n", iface.c_str());
             }
             close(s);
         }
@@ -1037,9 +1061,9 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     }
 
     // Give the driver time to fully initialize after IFF_UP.
-    // RTL8821CE needs ~2s for firmware load + radio init.
-    fprintf(stderr, "[scan] wpa_supplicant pid=%d, waiting 2s for driver init...\n", wpa_pid);
-    usleep(2000000);
+    // RTL8821CE needs ~2-4s for firmware load + radio init; other drivers vary.
+    fprintf(stderr, "[scan] wpa_supplicant pid=%d, waiting 4s for driver init...\n", wpa_pid);
+    usleep(4000000);
 
     // Check if wpa_supplicant is still alive
     bool wpa_alive = (kill(wpa_pid, 0) == 0);
@@ -1093,10 +1117,10 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     usleep(1000000);
 
     // Scan with retry — driver may need multiple attempts to return results.
-    // RTL8821CE in particular needs time after IFF_UP + wpa_supplicant start
-    // before radio scanning actually works.
+    // Some drivers (RTL8821CE, ath10k) need time after IFF_UP + wpa_supplicant
+    // start before radio scanning actually works. 5 attempts × ~5s each = 25s max.
     std::string results;
-    const int max_scan_attempts = 3;
+    const int max_scan_attempts = 5;
     for (int attempt = 1; attempt <= max_scan_attempts; attempt++) {
         fprintf(stderr, "[scan] attempt %d/%d: triggering scan...\n", attempt, max_scan_attempts);
 
@@ -1409,9 +1433,28 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
 static void supervisor_preflight_wifi(const SupervisorConfig& config) {
     if (config.boot_mode == "desktop") return;
-    std::string iface = supervisor_detect_wifi_iface();
-    if (iface.empty()) return;
-    if (supervisor_wifi_has_saved_networks()) return;
+
+    // Retry interface detection — driver may still be probing after module load.
+    // init_load_modules() only waits 500ms; some drivers need up to 3s to
+    // create the wlan0 interface after finit_module().
+    std::string iface;
+    for (int try_n = 0; try_n < 6; try_n++) {
+        iface = supervisor_detect_wifi_iface();
+        if (!iface.empty()) break;
+        if (try_n == 0)
+            fprintf(stderr, "[wifi] no WiFi iface yet, waiting for driver probe...\n");
+        usleep(1000000); // 1s per retry, up to 6s total
+    }
+    if (iface.empty()) {
+        fprintf(stderr, "[wifi] no WiFi interface found after 6s — skipping setup\n");
+        return;
+    }
+    fprintf(stderr, "[wifi] detected interface: %s\n", iface.c_str());
+
+    if (supervisor_wifi_has_saved_networks()) {
+        fprintf(stderr, "[wifi] saved networks found in wpa.conf — skipping setup\n");
+        return;
+    }
     fprintf(stderr, "[wifi] No saved networks — showing console setup (iface=%s)\n",
             iface.c_str());
     supervisor_console_wifi_setup(iface);
