@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-10 (WiFi scan retry fix — a5e60ac)
+**Last updated**: 2026-03-11 (CONFIG_MODULES=y for generic WiFi — e9fc82a)
 
 ---
 
@@ -89,9 +89,35 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-10) -- WiFi Scan Retry Fix
+## Latest Session (2026-03-11) -- CONFIG_MODULES=y for Generic WiFi
 
-### Phase: WiFi Connection on RTL8821CE — SCAN TIMING FIX (a5e60ac)
+### Phase: WiFi — Kernel Modules for Generic Hardware Support (e9fc82a)
+
+Fundamental fix: WiFi vendor drivers switched from built-in (=y) to modules (=m).
+Modules load AFTER squashfs pivot via init_load_modules() using finit_module() syscall,
+so /lib/firmware/ is available and any supported chip's firmware loads automatically.
+
+| Component | Status |
+|-----------|--------|
+| linux.config: CONFIG_MODULES=y + MODULE_UNLOAD | DONE (e9fc82a) |
+| WiFi drivers changed to =m (iwlwifi, rtw88, ath10k, ath9k, mt7921e) | DONE (e9fc82a) |
+| Core stack stays =y (cfg80211, mac80211, rfkill) | DONE (e9fc82a) |
+| CONFIG_EXTRA_FIRMWARE removed (no longer needed) | DONE (e9fc82a) |
+| init_load_modules() in init.cpp (finit_module syscall, ordered list) | DONE (e9fc82a) |
+| main.cpp: call init_load_modules() after ESP mount | DONE (e9fc82a) |
+| Scan retry fix (2s init + 1s settle + 3 attempts) | DONE (a5e60ac) |
+
+**NEEDS**: `make linux-dirclean && make llamaste-dirclean && make` then `build-iso.sh`.
+Kernel rebuild required (CONFIG_MODULES changed). Flash and test on hardware.
+
+**What this fixes**:
+- WiFi firmware loading on ANY supported chip (not just RTL8821CE)
+- No more CONFIG_EXTRA_FIRMWARE for each chip
+- Other users with Intel/Qualcomm/MediaTek WiFi will work out of the box
+
+---
+
+### Previous: WiFi Scan Retry Fix (a5e60ac)
 
 Hardware test of ISO 5b27a0d showed scan still returning 0 networks. wpa_cli and
 regulatory.db ARE in the image (confirmed by logs), but the scan fires too fast.

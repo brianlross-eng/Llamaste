@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. 1434MB ISO built. WiFi driver + firmware embedded (a0c645e). Console WiFi setup prompt fixed. 62 tools, 13 suites.
+- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. WiFi switched to CONFIG_MODULES=y (e9fc82a) — drivers load after squashfs pivot, generic hardware support. 62 tools, 13 suites. NEEDS REBUILD + NEW ISO.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -122,8 +122,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Console WiFi setup on /dev/tty1**: In server mode, if WiFi hardware is found but wpa.conf has no `network={}` blocks, supervisor opens `/dev/tty1` in raw termios mode and shows SSID/PSK prompts. Uses cfmakeraw() + OPOST|ONLCR for output. Appends network block to wpa.conf. Skipped in desktop mode (web UI handles WiFi there). Runs via `supervisor_preflight_wifi()` in supervisor.cpp BEFORE display/input threads start — this is critical, running inside child_main caused the prompt to be overwritten by the display thread.
 - **WLR_DRM_NO_ATOMIC=1**: simpledrm (EFI framebuffer DRM) on bare metal doesn't support atomic modesetting. Without this flag, wlroots probes atomic ioctls and segfaults (signal 11).
 - **Desktop mode cog auth bypass**: In desktop mode, cog only accesses localhost — `require_auth` short-circuits to serve `index.html` directly. Remove bypass once keyboard input confirmed working.
-- **RTL8821CE WiFi chip**: Actual hardware is Realtek RTL8821CE [10ec:c821] at PCI 0000:01:00.0. Requires `CONFIG_RTW88=y`, `CONFIG_RTW88_PCI=y`, `CONFIG_RTW88_8821C=y`, `CONFIG_RTW88_8821CE=y`. iwlwifi-ty-* (AX210) and iwlwifi-gl-* (BE200) are for different chips entirely.
-- **CONFIG_EXTRA_FIRMWARE required for RTW88 with MODULES=n**: Firmware can't load from filesystem at probe time (squashfs not mounted yet). Embed in kernel: `CONFIG_EXTRA_FIRMWARE="rtw88/rtw8821c_fw.bin"` + `CONFIG_EXTRA_FIRMWARE_DIR="/mnt/d/Llamaste/br2-external/board/llamaste/overlay/lib/firmware"`. Verify: `find build/linux-*/drivers/base/firmware_loader/builtin/ -name '*.gen.o'`.
+- **RTL8821CE WiFi chip**: Actual hardware is Realtek RTL8821CE [10ec:c821] at PCI 0000:01:00.0. Driver is `rtw88_8821ce.ko` (loaded as module). iwlwifi-ty-* (AX210) and iwlwifi-gl-* (BE200) are for different chips entirely.
+- **CONFIG_MODULES=y (e9fc82a)**: WiFi drivers are now kernel modules, NOT built-in. They load after squashfs pivot via `init_load_modules()` in init.cpp using `finit_module()` syscall. This means /lib/firmware/ is available at module load time — no more CONFIG_EXTRA_FIRMWARE needed. Any supported WiFi chip's firmware just works.
+- **Module load order matters**: `init_load_modules()` has a hard-coded dependency-ordered list. If adding a new driver, ensure dependencies are listed before dependents (e.g., `rtw88_core.ko` before `rtw88_8821ce.ko`).
 - **`make linux-rebuild` is incremental — does NOT pick up new Kconfig options**: Always use `make linux-dirclean && make` when linux.config changes. Verify new drivers compiled in build output (e.g. `CC drivers/net/wireless/realtek/rtw88/rtw8821ce.o`).
 
 ## VirtualBox VM
