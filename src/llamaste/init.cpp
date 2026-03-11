@@ -913,6 +913,8 @@ void init_load_modules() {
         "drivers/net/wireless/realtek/rtw88/rtw88_8822ce.ko",
         // Realtek USB WiFi (rtlwifi-based RTL8192CU)
         "drivers/net/wireless/realtek/rtlwifi/rtlwifi.ko",
+        "drivers/net/wireless/realtek/rtlwifi/rtl_usb.ko",
+        "drivers/net/wireless/realtek/rtlwifi/rtl8192c/rtl8192c-common.ko",
         "drivers/net/wireless/realtek/rtlwifi/rtl8192cu/rtl8192cu.ko",
         // Atheros/Qualcomm
         "drivers/net/wireless/ath/ath.ko",
@@ -924,6 +926,7 @@ void init_load_modules() {
         // MediaTek
         "drivers/net/wireless/mediatek/mt76/mt76.ko",
         "drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko",
+        "drivers/net/wireless/mediatek/mt76/mt792x-lib.ko",
         "drivers/net/wireless/mediatek/mt76/mt7921/mt7921-common.ko",
         "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko",
         nullptr
