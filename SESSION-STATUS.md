@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-11 (WiFi scan rewritten: iw replaces wpa_supplicant — 341113a)
+**Last updated**: 2026-03-11 (WiFi: iw scan fallback + connection verification + EAP detection — f8300ce)
 
 ---
 
@@ -89,17 +89,62 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-11 cont.) -- WiFi Scan Rewrite: iw Replaces wpa_supplicant
+## Latest Session (2026-03-11 cont.) -- WiFi Connectivity Fixes (f8300ce)
 
-### Phase: WiFi — Direct nl80211 Scanning via iw (341113a)
+### Hardware Test Results (341113a ISO)
+- ✅ **Server mode WiFi SCAN WORKS** — 9 networks found via `iw dev wlan0 scan`
+- ✅ Console WiFi setup UI works (numbered list, single keypress select)
+- ✅ wpa_supplicant spawns, dhcpcd starts, HTTP server listening
+- ❌ **Server mode can't communicate** — scan works but no actual network connectivity
+- ❌ **Desktop mode still shows "Not Available"** — WiFi card broken
 
-Three test builds confirmed wpa_supplicant scan was fundamentally broken: driver connected
-to nl80211 successfully (Set mode STATION), but wpa_cli scan always returned 0 networks.
-Root cause: ctrl socket approach is unreliable (timing, socket creation, result format).
+### Root Cause Analysis
 
-**Solution**: Replaced `wpa_supplicant + wpa_cli scan` with `iw dev wlan0 scan` (direct
-nl80211 via netlink). No wpa_supplicant needed for scanning. wpa_supplicant only used for
-the actual WiFi connection (child_main.cpp).
+**Server mode**: No post-connection verification. wpa_supplicant + dhcpcd spawn but we
+never check if WPA authentication succeeds or DHCP gets a lease. Also: Enterprise (802.1X)
+networks were shown as [WPA-PSK], misleading users into trying PSK on EAP networks.
+
+**Desktop mode**: Two issues — (1) interface detection retry too short (6s, RTL8821CE needs
+up to 10s), (2) web UI's `wifi.scan` tool uses wpa_supplicant ctrl socket which consistently
+returns 0 networks (same fundamental issue as the supervisor scan had).
+
+### Fixes Implemented (f8300ce)
+
+| Fix | Details |
+|-----|---------|
+| **iw scan fallback in WiFiManager** | `WiFiManager::scan()` now falls back to `iw dev scan` when wpa_supplicant SCAN_RESULTS returns empty. Also tries `iw scan dump` for cached results when device is busy. |
+| **Post-connection verification** | child_main polls WPA state for 20s after spawn. Logs authentication progress, IP assignment, and DNS resolver state. |
+| **WPA-EAP detection** | iw scan parses RSN/WPA Authentication suites to distinguish PSK from Enterprise (802.1X). Console warns about EAP networks. |
+| **Interface retry 6s → 10s** | RTL8821CE needs 3-4s after finit_module; 6s was marginal |
+| **wpa_supplicant ctrl wait 1500ms → 2000ms** | More time for ctrl socket creation |
+
+### Expected Console Output (Server Mode)
+```
+[wifi] waiting for connection...
+[wifi] ...still waiting: state=ASSOCIATING ssid='NetworkName' ip=''
+[wifi] CONNECTED: ssid='NetworkName' ip=192.168.1.100 (took 8500ms)
+[wifi] DNS: nameserver 192.168.1.1
+```
+
+Or if connection fails:
+```
+[wifi] WARNING: no IP address after 20s (state=COMPLETED ssid='NetworkName')
+[wifi] WPA auth OK but no DHCP lease. Network may have MAC filtering or DHCP server issues.
+```
+
+### Expected Desktop Mode Behavior
+```
+[wifi] no interface yet, waiting for module probe...
+[wifi] Found WiFi interface: wlan0
+[wifi] scan: wpa_supplicant returned 0 networks, trying iw fallback
+[wifi] iw_scan fallback on wlan0
+[wifi] iw_scan: got BSS entries on attempt 1
+[wifi] iw_scan: found 9 networks
+```
+
+---
+
+### Previous (2026-03-11) -- WiFi Scan Rewrite: iw Replaces wpa_supplicant (341113a)
 
 | Component | Status |
 |-----------|--------|
@@ -109,28 +154,6 @@ the actual WiFi connection (child_main.cpp).
 | `iw reg get` logged after scan (diagnostics) | DONE (341113a) |
 | 5 scan attempts with 3s retry (handles "busy") | DONE (341113a) |
 | Parse BSS entries: SSID, signal (dBm), capability/RSN/WPA flags | DONE (341113a) |
-| Broad WiFi coverage: 10 vendor families, ~55 modules, ~60 init entries | DONE (df119a1) |
-| ISO built (1478 MB) | DONE |
-
-**ISO READY** — flashing to USB for hardware test.
-
-**Expected console output on success**:
-```
-[scan] rfkill: unblocked WLAN
-[scan] interface wlan0 UP
-[scan] iw reg set US -> '(ok)'
-[scan] waiting 4s for driver init...
-[scan] iw dev wlan0 info: ...
-[scan] attempt 1/5: iw dev wlan0 scan...
-[scan] iw scan returned XXXX bytes
-[scan] got BSS entries on attempt 1
-[scan] found N networks via iw
-```
-
-**What this fixes**:
-- Eliminates wpa_supplicant ctrl socket entirely for scanning
-- Direct nl80211 netlink communication via iw tool
-- No timing dance with socket creation/wpa_cli connection
 
 ---
 
