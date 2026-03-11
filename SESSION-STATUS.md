@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-11 (CONFIG_MODULES=y for generic WiFi — e9fc82a)
+**Last updated**: 2026-03-11 (WiFi scan rewritten: iw replaces wpa_supplicant — 341113a)
 
 ---
 
@@ -89,31 +89,62 @@ by str_trim when flags are empty; now accepts 3+ parts, defaults flags to "").
 
 ---
 
-## Latest Session (2026-03-11) -- CONFIG_MODULES=y for Generic WiFi
+## Latest Session (2026-03-11 cont.) -- WiFi Scan Rewrite: iw Replaces wpa_supplicant
 
-### Phase: WiFi — Kernel Modules for Generic Hardware Support (e9fc82a)
+### Phase: WiFi — Direct nl80211 Scanning via iw (341113a)
 
-Fundamental fix: WiFi vendor drivers switched from built-in (=y) to modules (=m).
-Modules load AFTER squashfs pivot via init_load_modules() using finit_module() syscall,
-so /lib/firmware/ is available and any supported chip's firmware loads automatically.
+Three test builds confirmed wpa_supplicant scan was fundamentally broken: driver connected
+to nl80211 successfully (Set mode STATION), but wpa_cli scan always returned 0 networks.
+Root cause: ctrl socket approach is unreliable (timing, socket creation, result format).
+
+**Solution**: Replaced `wpa_supplicant + wpa_cli scan` with `iw dev wlan0 scan` (direct
+nl80211 via netlink). No wpa_supplicant needed for scanning. wpa_supplicant only used for
+the actual WiFi connection (child_main.cpp).
 
 | Component | Status |
 |-----------|--------|
-| linux.config: CONFIG_MODULES=y + MODULE_UNLOAD | DONE (e9fc82a) |
-| WiFi drivers changed to =m (iwlwifi, rtw88, ath10k, ath9k, mt7921e) | DONE (e9fc82a) |
-| Core stack stays =y (cfg80211, mac80211, rfkill) | DONE (e9fc82a) |
-| CONFIG_EXTRA_FIRMWARE removed (no longer needed) | DONE (e9fc82a) |
-| init_load_modules() in init.cpp (finit_module syscall, ordered list) | DONE (e9fc82a) |
-| main.cpp: call init_load_modules() after ESP mount | DONE (e9fc82a) |
-| Scan retry fix (2s init + 1s settle + 3 attempts) | DONE (a5e60ac) |
+| supervisor_scan_wifi() rewritten: iw scan replaces wpa_supplicant | DONE (341113a) |
+| `iw reg set US` for regulatory domain before scan | DONE (341113a) |
+| `iw dev <iface> info` logged before scan (diagnostics) | DONE (341113a) |
+| `iw reg get` logged after scan (diagnostics) | DONE (341113a) |
+| 5 scan attempts with 3s retry (handles "busy") | DONE (341113a) |
+| Parse BSS entries: SSID, signal (dBm), capability/RSN/WPA flags | DONE (341113a) |
+| Broad WiFi coverage: 10 vendor families, ~55 modules, ~60 init entries | DONE (df119a1) |
+| ISO built (1478 MB) | DONE |
 
-**NEEDS**: `make linux-dirclean && make llamaste-dirclean && make` then `build-iso.sh`.
-Kernel rebuild required (CONFIG_MODULES changed). Flash and test on hardware.
+**ISO READY** — flashing to USB for hardware test.
+
+**Expected console output on success**:
+```
+[scan] rfkill: unblocked WLAN
+[scan] interface wlan0 UP
+[scan] iw reg set US -> '(ok)'
+[scan] waiting 4s for driver init...
+[scan] iw dev wlan0 info: ...
+[scan] attempt 1/5: iw dev wlan0 scan...
+[scan] iw scan returned XXXX bytes
+[scan] got BSS entries on attempt 1
+[scan] found N networks via iw
+```
 
 **What this fixes**:
-- WiFi firmware loading on ANY supported chip (not just RTL8821CE)
-- No more CONFIG_EXTRA_FIRMWARE for each chip
-- Other users with Intel/Qualcomm/MediaTek WiFi will work out of the box
+- Eliminates wpa_supplicant ctrl socket entirely for scanning
+- Direct nl80211 netlink communication via iw tool
+- No timing dance with socket creation/wpa_cli connection
+
+---
+
+### Previous (2026-03-11) -- CONFIG_MODULES=y + Broad Coverage + Diagnostic Builds
+
+Three test builds (92943e0, df119a1, 6f54d71) on hardware confirmed:
+- ✅ Modules load correctly (`[init] modules: loaded ...`)
+- ✅ wlan0 detected, RTL8821CE firmware found
+- ✅ wpa_supplicant connects to nl80211 driver (Set mode STATION)
+- ❌ wpa_cli scan returns 0 networks (ctrl socket unreliable)
+
+Expanded WiFi coverage from 5 to 10 vendor families (55 kernel modules).
+Added `iw` diagnostic tool. Multiple ctrl socket fixes attempted.
+Final conclusion: wpa_supplicant scan approach is fundamentally broken → switched to iw.
 
 ---
 

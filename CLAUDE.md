@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. WiFi switched to CONFIG_MODULES=y (e9fc82a) — drivers load after squashfs pivot, generic hardware support. 62 tools, 13 suites. NEEDS REBUILD + NEW ISO.
+- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. WiFi scan rewritten: `iw` replaces wpa_supplicant (341113a). 10 vendor families, ~55 WiFi modules. 62 tools, 13 suites. ISO FLASHING FOR TEST.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -125,6 +125,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **RTL8821CE WiFi chip**: Actual hardware is Realtek RTL8821CE [10ec:c821] at PCI 0000:01:00.0. Driver is `rtw88_8821ce.ko` (loaded as module). iwlwifi-ty-* (AX210) and iwlwifi-gl-* (BE200) are for different chips entirely.
 - **CONFIG_MODULES=y (e9fc82a)**: WiFi drivers are now kernel modules, NOT built-in. They load after squashfs pivot via `init_load_modules()` in init.cpp using `finit_module()` syscall. This means /lib/firmware/ is available at module load time — no more CONFIG_EXTRA_FIRMWARE needed. Any supported WiFi chip's firmware just works.
 - **Module load order matters**: `init_load_modules()` has a hard-coded dependency-ordered list. If adding a new driver, ensure dependencies are listed before dependents (e.g., `rtw88_core.ko` before `rtw88_8821ce.ko`).
+- **WiFi scanning uses `iw`, NOT wpa_supplicant**: `supervisor_scan_wifi()` uses `iw dev wlan0 scan` (direct nl80211 via netlink). wpa_supplicant ctrl socket approach was unreliable (3 test builds, always 0 networks despite driver working). wpa_supplicant only used for connection (child_main.cpp).
+- **`iw reg set US` before scan**: cfg80211 can't load regulatory.db before squashfs pivot. Set regulatory domain explicitly via `iw reg set US` before scanning. For connection, `country=US` in wpa.conf handles it.
+- **BR2_LEGACY=y keeps reappearing**: Buildroot 2024.02 adds `BR2_LEGACY=y` to `.config` after `make defconfig` or other `make` operations. Must `sed -i "/BR2_LEGACY=y/d" .config` before every `make` build step. Can recur after any step that regenerates .config.
 - **`make linux-rebuild` is incremental — does NOT pick up new Kconfig options**: Always use `make linux-dirclean && make` when linux.config changes. Verify new drivers compiled in build output (e.g. `CC drivers/net/wireless/realtek/rtw88/rtw8821ce.o`).
 
 ## VirtualBox VM
@@ -142,7 +145,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Flash + test new ISO** — WiFi prompt fix in a0c645e. Boot 1434MB USB, enter SSID on console, verify network connects
+1. **Test iw-based WiFi scan** — ISO 341113a flashing. Look for `[scan] got BSS entries` on console
 2. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
 3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
