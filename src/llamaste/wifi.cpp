@@ -42,6 +42,9 @@
 #include <poll.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -87,6 +90,39 @@ static std::string classify_security(const std::string& flags) {
 }
 
 static int g_ctrl_counter = 0;
+
+// ---------------------------------------------------------------------------
+// capture_cmd_wifi — fork/exec a command and capture stdout+stderr
+// ---------------------------------------------------------------------------
+static std::string capture_cmd_wifi(const char* exe, const char* const* argv,
+                                    int timeout_ms) {
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) < 0) return "";
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
+    if (pid == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        execv(exe, (char* const*)argv);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string out;
+    char buf[512];
+    struct pollfd pfd = { pipefd[0], POLLIN, 0 };
+    for (;;) {
+        int r = poll(&pfd, 1, timeout_ms);
+        if (r <= 0) break;
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) break;
+        out.append(buf, (size_t)n);
+        timeout_ms = 300; // shorter subsequent reads
+    }
+    close(pipefd[0]);
+    kill(pid, SIGTERM);
+    waitpid(pid, nullptr, 0);
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // WiFiManager — construction / destruction
@@ -293,23 +329,34 @@ WiFiStatus WiFiManager::status() {
 
 std::vector<WiFiNetwork> WiFiManager::scan() {
     if (!has_wifi()) return {};
-    if (ctrl_fd_ < 0 && !open_ctrl()) return {};
 
-    wpa("SCAN");  // reply may be "OK" or "FAIL-BUSY-SCAN-STARTED"
+    // Try wpa_supplicant scan first (works when ctrl socket is healthy)
+    if (ctrl_fd_ >= 0 || open_ctrl()) {
+        wpa("SCAN");  // reply may be "OK" or "FAIL-BUSY-SCAN-STARTED"
 
-    // Wait for scan to finish (up to 4 seconds)
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-    while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        std::string st = wpa("STATUS");
-        if (st.find("wpa_state=SCANNING") == std::string::npos) break;
+        // Wait for scan to finish (up to 4 seconds)
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::string st = wpa("STATUS");
+            if (st.find("wpa_state=SCANNING") == std::string::npos) break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        std::string results = wpa("SCAN_RESULTS", 5000);
+        auto nets = parse_scan_results(results);
+        if (!nets.empty()) {
+            fprintf(stderr, "[wifi] scan: %zu networks via wpa_supplicant\n", nets.size());
+            return nets;
+        }
+        fprintf(stderr, "[wifi] scan: wpa_supplicant returned 0 networks, trying iw fallback\n");
+    } else {
+        fprintf(stderr, "[wifi] scan: no wpa_supplicant ctrl socket, using iw scan\n");
     }
 
-    // Short additional wait to let results settle
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    std::string results = wpa("SCAN_RESULTS", 5000);
-    return parse_scan_results(results);
+    // Fallback: direct iw scan (confirmed working on RTL8821CE hardware)
+    return iw_scan();
 }
 
 // static
@@ -553,6 +600,186 @@ std::string WiFiManager::get_ip_addr() const {
     return ip;
 }
 
+// ---------------------------------------------------------------------------
+// iw_scan() — direct nl80211 scan via `iw dev <iface> scan`
+//
+// Fallback for when wpa_supplicant SCAN_RESULTS returns empty.
+// This is the same approach used by supervisor_scan_wifi() which
+// confirmed working on real hardware (9 networks found on RTL8821CE).
+// ---------------------------------------------------------------------------
+
+std::vector<WiFiNetwork> WiFiManager::iw_scan() {
+    std::vector<WiFiNetwork> nets;
+    if (iface_.empty()) return nets;
+
+    fprintf(stderr, "[wifi] iw_scan fallback on %s\n", iface_.c_str());
+
+    // Ensure interface is up
+    {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            struct ifreq ifr;
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, iface_.c_str(), IFNAMSIZ - 1);
+            if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0) {
+                if (!(ifr.ifr_flags & IFF_UP)) {
+                    ifr.ifr_flags |= IFF_UP;
+                    ioctl(s, SIOCSIFFLAGS, &ifr);
+                }
+            }
+            close(s);
+        }
+    }
+
+    // Try scan up to 3 times (wpa_supplicant may hold the interface,
+    // causing "Device or resource busy" on the first attempt)
+    std::string raw;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        const char* argv[] = { "iw", "dev", iface_.c_str(), "scan", nullptr };
+        raw = capture_cmd_wifi("/usr/sbin/iw", argv, 15000);
+
+        if (raw.find("BSS ") != std::string::npos) {
+            fprintf(stderr, "[wifi] iw_scan: got BSS entries on attempt %d\n", attempt);
+            break;
+        }
+
+        // "Device or resource busy" — wpa_supplicant is scanning; use its cached results
+        if (raw.find("busy") != std::string::npos) {
+            // Try `iw dev <iface> scan dump` to get cached results instead
+            const char* dump_argv[] = { "iw", "dev", iface_.c_str(), "scan", "dump", nullptr };
+            raw = capture_cmd_wifi("/usr/sbin/iw", dump_argv, 5000);
+            if (raw.find("BSS ") != std::string::npos) {
+                fprintf(stderr, "[wifi] iw_scan: got cached BSS from scan dump\n");
+                break;
+            }
+        }
+
+        if (attempt < 3) {
+            fprintf(stderr, "[wifi] iw_scan: attempt %d failed, retrying in 2s\n", attempt);
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    }
+
+    if (raw.find("BSS ") == std::string::npos) {
+        fprintf(stderr, "[wifi] iw_scan: no BSS entries found\n");
+        return nets;
+    }
+
+    // Parse BSS entries — same format as supervisor_scan_wifi()
+    std::string cur_ssid;
+    std::string cur_bssid;
+    int cur_signal = -100;
+    int cur_freq = 0;
+    bool cur_privacy = false;
+    bool cur_is_eap = false;
+    bool in_bss = false;
+
+    auto flush_bss = [&]() {
+        if (!in_bss || cur_ssid.empty()) return;
+        // Classify security
+        std::string sec = "OPEN";
+        if (cur_privacy) {
+            sec = cur_is_eap ? "WPA2-EAP" : "WPA2-PSK";
+        }
+        // De-duplicate by SSID — keep strongest signal
+        bool dup = false;
+        for (auto& n : nets) {
+            if (n.ssid == cur_ssid) {
+                if (cur_signal > n.signal_dbm) {
+                    n.signal_dbm = cur_signal;
+                    n.security = sec;
+                    n.bssid = cur_bssid;
+                    n.freq_mhz = cur_freq;
+                }
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            WiFiNetwork net;
+            net.ssid = cur_ssid;
+            net.bssid = cur_bssid;
+            net.signal_dbm = cur_signal;
+            net.freq_mhz = cur_freq;
+            net.security = sec;
+            nets.push_back(net);
+        }
+    };
+
+    const char* lp = raw.c_str();
+    while (*lp) {
+        const char* ls = lp;
+        while (*lp && *lp != '\n') lp++;
+        size_t ll = (size_t)(lp - ls);
+        if (*lp == '\n') lp++;
+
+        // New BSS block? "BSS aa:bb:cc:dd:ee:ff(on wlan0)"
+        if (ll >= 4 && ls[0]=='B' && ls[1]=='S' && ls[2]=='S' && ls[3]==' ') {
+            flush_bss();
+            in_bss = true;
+            cur_ssid.clear();
+            cur_bssid.clear();
+            cur_signal = -100;
+            cur_freq = 0;
+            cur_privacy = false;
+            cur_is_eap = false;
+            // Extract BSSID: "BSS aa:bb:cc:dd:ee:ff(on wlan0)"
+            if (ll > 4) {
+                const char* bp = ls + 4;
+                const char* be = bp;
+                while (be < ls + ll && *be != '(' && *be != ' ') be++;
+                cur_bssid.assign(bp, (size_t)(be - bp));
+            }
+            continue;
+        }
+
+        if (!in_bss) continue;
+
+        // Skip leading whitespace
+        const char* tp = ls;
+        while (tp < ls + ll && (*tp == ' ' || *tp == '\t')) tp++;
+        size_t tl = ll - (size_t)(tp - ls);
+        if (tl == 0) continue;
+
+        if (tl > 6 && memcmp(tp, "SSID: ", 6) == 0) {
+            cur_ssid.assign(tp + 6, tl - 6);
+            while (!cur_ssid.empty() &&
+                   (cur_ssid.back()==' '||cur_ssid.back()=='\r'))
+                cur_ssid.pop_back();
+        } else if (tl > 8 && memcmp(tp, "signal: ", 8) == 0) {
+            cur_signal = atoi(tp + 8);
+        } else if (tl > 6 && memcmp(tp, "freq: ", 6) == 0) {
+            cur_freq = atoi(tp + 6);
+        } else if (tl > 12 && memcmp(tp, "capability: ", 12) == 0) {
+            std::string cap(tp + 12, tl - 12);
+            if (cap.find("Privacy") != std::string::npos)
+                cur_privacy = true;
+        } else if ((tl >= 4 && memcmp(tp, "RSN:", 4) == 0) ||
+                   (tl >= 4 && memcmp(tp, "WPA:", 4) == 0)) {
+            cur_privacy = true;
+        } else {
+            // Detect Enterprise (802.1X/EAP) authentication within RSN/WPA IEs
+            // After whitespace strip: "* Authentication suites: PSK" or "...IEEE 802.1X"
+            std::string line(tp, tl);
+            if (line.find("Authentication suites:") != std::string::npos) {
+                if (line.find("802.1X") != std::string::npos ||
+                    line.find("EAP") != std::string::npos) {
+                    cur_is_eap = true;
+                }
+            }
+        }
+    }
+    flush_bss();
+
+    std::sort(nets.begin(), nets.end(),
+              [](const WiFiNetwork& a, const WiFiNetwork& b) {
+                  return a.signal_dbm > b.signal_dbm;
+              });
+
+    fprintf(stderr, "[wifi] iw_scan: found %zu networks\n", nets.size());
+    return nets;
+}
+
 #else // _WIN32
 
 // Stub implementation — WiFi runs only on the Linux target.
@@ -576,6 +803,7 @@ void WiFiManager::close_ctrl() {}
 std::string WiFiManager::wpa(const std::string&, int) { return ""; }
 std::vector<WiFiNetwork> WiFiManager::parse_scan_results(const std::string&) { return {}; }
 std::vector<WiFiNetwork> WiFiManager::parse_list_networks(const std::string&) { return {}; }
+std::vector<WiFiNetwork> WiFiManager::iw_scan() { return {}; }
 std::string WiFiManager::get_ip_addr() const { return ""; }
 
 #endif // _WIN32

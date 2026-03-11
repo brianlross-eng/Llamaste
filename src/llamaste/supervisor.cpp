@@ -1101,26 +1101,34 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     std::string cur_ssid;
     int cur_signal = -100;
     bool cur_privacy = false;
+    bool cur_is_eap = false;
     bool in_bss = false;
 
     auto flush_bss = [&]() {
         if (!in_bss || cur_ssid.empty()) return;
+        // Classify security type
+        std::string flags;
+        if (!cur_privacy) {
+            flags = "[Open]";
+        } else if (cur_is_eap) {
+            flags = "[WPA-EAP]";
+        } else {
+            flags = "[WPA-PSK]";
+        }
         // De-duplicate by SSID — keep strongest signal
         bool dup = false;
         for (auto& e : nets) {
             if (e.ssid == cur_ssid) {
                 if (cur_signal > e.signal_db) {
                     e.signal_db = cur_signal;
-                    e.flags = cur_privacy ? "[WPA-PSK]" : "[Open]";
+                    e.flags = flags;
                 }
                 dup = true;
                 break;
             }
         }
         if (!dup) {
-            nets.push_back({cur_ssid,
-                            cur_privacy ? "[WPA-PSK]" : "[Open]",
-                            cur_signal});
+            nets.push_back({cur_ssid, flags, cur_signal});
         }
     };
 
@@ -1139,6 +1147,7 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
             cur_ssid.clear();
             cur_signal = -100;
             cur_privacy = false;
+            cur_is_eap = false;
             continue;
         }
 
@@ -1168,6 +1177,15 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         } else if ((tl >= 4 && memcmp(tp, "RSN:", 4) == 0) ||
                    (tl >= 4 && memcmp(tp, "WPA:", 4) == 0)) {
             cur_privacy = true;
+        } else {
+            // Detect Enterprise (802.1X/EAP) authentication
+            std::string line(tp, tl);
+            if (line.find("Authentication suites:") != std::string::npos) {
+                if (line.find("802.1X") != std::string::npos ||
+                    line.find("EAP") != std::string::npos) {
+                    cur_is_eap = true;
+                }
+            }
         }
     }
     flush_bss(); // last BSS entry
@@ -1282,13 +1300,11 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
         wstr("  Visible networks:\r\n\r\n");
         for (int i = 0; i < n_show; i++) {
             const auto& e = nets[i];
-            bool open = e.flags.find("PSK") == std::string::npos &&
-                        e.flags.find("WPA") == std::string::npos &&
-                        e.flags.find("WEP") == std::string::npos;
-            char line[80];
-            snprintf(line, sizeof(line), "   %d  %-32s  %s  %4d dBm\r\n",
+            // Use flags as-is — already classified as [Open], [WPA-PSK], or [WPA-EAP]
+            char line[96];
+            snprintf(line, sizeof(line), "   %d  %-32s  %-9s  %4d dBm\r\n",
                      i + 1, e.ssid.substr(0, 32).c_str(),
-                     open ? "[Open]   " : "[WPA-PSK]",
+                     e.flags.c_str(),
                      e.signal_db);
             wstr(line);
         }
@@ -1308,10 +1324,16 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
             int idx = c - '1';
             const auto& chosen = nets[idx];
             ssid    = chosen.ssid;
-            is_open = chosen.flags.find("PSK") == std::string::npos &&
-                      chosen.flags.find("WPA") == std::string::npos &&
-                      chosen.flags.find("WEP") == std::string::npos;
+            is_open = (chosen.flags == "[Open]");
             wstr("  Selected: "); wstr(ssid.c_str()); wstr("\r\n");
+
+            // Warn about Enterprise/802.1X networks — PSK won't work
+            if (chosen.flags.find("EAP") != std::string::npos) {
+                wstr("\r\n");
+                wstr("  ** WARNING: This network uses Enterprise (802.1X) auth **\r\n");
+                wstr("  ** PSK/passphrase may not work — try a different network **\r\n");
+                wstr("\r\n");
+            }
         }
         // else: fall through to manual entry below
     } else {

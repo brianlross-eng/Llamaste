@@ -2027,14 +2027,15 @@ int child_main(const SupervisorConfig& config) {
     // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found.
     // In desktop mode, supervisor_preflight_wifi() skips entirely (can't use
     // tty1 — compositor owns the display), so modules may still be probing
-    // when we get here.  Retry init() for up to 6s to catch late interfaces.
+    // when we get here.  Retry init() for up to 10s to catch late interfaces.
 #ifndef _WIN32
     {
         bool wifi_init_ok = g_wifi.init();
         if (!wifi_init_ok || !g_wifi.has_wifi()) {
             // Modules may still be probing — retry (especially in desktop mode
-            // where supervisor_preflight_wifi doesn't run its own retry loop)
-            for (int try_n = 0; try_n < 6 && !g_wifi.has_wifi(); try_n++) {
+            // where supervisor_preflight_wifi doesn't run its own retry loop).
+            // Some drivers (RTL8821CE) need 3-4s after finit_module().
+            for (int try_n = 0; try_n < 10 && !g_wifi.has_wifi(); try_n++) {
                 if (try_n == 0)
                     fprintf(stderr, "[wifi] no interface yet, waiting for module probe...\n");
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -2052,20 +2053,80 @@ int child_main(const SupervisorConfig& config) {
     if (wifi_init_ok) {
         if (!wifi_iface.empty()) {
             spawn_wpa_supplicant(wifi_iface);
-            // Give wpa_supplicant a moment to create its control socket.
-            // 500ms is enough here because this is a persistent daemon, not
-            // the temporary instance used in supervisor_scan_wifi.
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            // Give wpa_supplicant time to create its control socket.
+            // RTL8821CE needs ~2s for driver init + ctrl socket creation.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
             // Re-open control socket now that daemon is running
             g_wifi.init();
 
-            // Console WiFi setup (first-boot SSID/PSK prompt) runs in the
-            // supervisor before this child starts — see supervisor_preflight_wifi().
-            // wpa_supplicant starts here with whatever config was saved.
-            // In desktop mode, there's no saved config — the web UI handles
-            // WiFi scanning and connection via wifi.scan / wifi.connect tools.
-
             spawn_dhcpcd(wifi_iface);
+
+            // --- Post-connection verification ---
+            // Wait for WPA authentication + DHCP lease.  Log state for
+            // diagnostics so we can tell if connectivity failures are at
+            // the auth, DHCP, or DNS layer.
+            {
+                fprintf(stderr, "[wifi] waiting for connection...\n");
+                std::string final_state = "UNKNOWN";
+                std::string final_ssid;
+                std::string final_ip;
+
+                // Poll wpa_supplicant state for up to 20s
+                for (int w = 0; w < 40; w++) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    auto st = g_wifi.status();
+                    final_state = st.state;
+                    final_ssid  = st.ssid;
+                    final_ip    = st.ip_addr;
+                    if (st.state == "COMPLETED" && !st.ip_addr.empty()) {
+                        fprintf(stderr, "[wifi] CONNECTED: ssid='%s' ip=%s (took %dms)\n",
+                                st.ssid.c_str(), st.ip_addr.c_str(), (w+1)*500);
+                        break;
+                    }
+                    // Log progress at 5s intervals
+                    if (w > 0 && w % 10 == 0) {
+                        fprintf(stderr, "[wifi] ...still waiting: state=%s ssid='%s' ip='%s'\n",
+                                st.state.c_str(), st.ssid.c_str(), st.ip_addr.c_str());
+                    }
+                }
+
+                // Final diagnostic dump
+                if (final_ip.empty()) {
+                    fprintf(stderr, "[wifi] WARNING: no IP address after 20s "
+                            "(state=%s ssid='%s')\n", final_state.c_str(), final_ssid.c_str());
+                    // Check if WPA auth even completed
+                    if (final_state != "COMPLETED") {
+                        fprintf(stderr, "[wifi] WPA authentication failed or timed out. "
+                                "Check password and network security type.\n");
+                    } else {
+                        fprintf(stderr, "[wifi] WPA auth OK but no DHCP lease. "
+                                "Network may have MAC filtering or DHCP server issues.\n");
+                    }
+                }
+
+                // Log DNS resolver state
+                {
+                    FILE* rc = fopen("/etc/resolv.conf", "r");
+                    if (rc) {
+                        char line[256];
+                        bool found_ns = false;
+                        while (fgets(line, sizeof(line), rc)) {
+                            if (strncmp(line, "nameserver", 10) == 0) {
+                                // Trim newline
+                                char* nl = strchr(line, '\n');
+                                if (nl) *nl = '\0';
+                                fprintf(stderr, "[wifi] DNS: %s\n", line);
+                                found_ns = true;
+                            }
+                        }
+                        fclose(rc);
+                        if (!found_ns)
+                            fprintf(stderr, "[wifi] WARNING: no nameservers in /etc/resolv.conf\n");
+                    } else {
+                        fprintf(stderr, "[wifi] WARNING: /etc/resolv.conf not found\n");
+                    }
+                }
+            }
         }
     }
     } // end outer wifi block

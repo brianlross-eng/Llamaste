@@ -97,6 +97,10 @@ private:
     // Parse LIST_NETWORKS output into a list of saved networks.
     static std::vector<WiFiNetwork> parse_list_networks(const std::string& raw);
 
+    // Direct iw scan fallback — uses `iw dev <iface> scan` when
+    // wpa_supplicant's SCAN_RESULTS returns empty.
+    std::vector<WiFiNetwork> iw_scan();
+
     // Run ip addr show <iface> to get the current IP address.
     std::string get_ip_addr() const;
 };
