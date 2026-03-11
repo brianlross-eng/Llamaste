@@ -1037,14 +1037,20 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         fprintf(f, "country=US\n");
         fclose(f);
     }
-    mkdir("/run/wpa_supplicant", 0755);
+    // Ensure /run exists and is writable (live overlay may not have it)
+    mkdir("/run", 0755);
+    if (mkdir("/run/wpa_supplicant", 0755) < 0 && errno != EEXIST)
+        fprintf(stderr, "[scan] mkdir /run/wpa_supplicant failed: %m\n");
 
     // Start wpa_supplicant in foreground so we own its pid.
-    // Log stderr to a file so we can diagnose startup failures.
+    // Log output to a file for diagnostics (NEVER deleted — readable after boot).
     const char* wpa_log = "/tmp/wpa_scan.log";
     pid_t wpa_pid = fork();
     if (wpa_pid < 0) { unlink(scan_conf); return nets; }
     if (wpa_pid == 0) {
+        // Close stdin to prevent any blocking reads
+        close(STDIN_FILENO);
+        open("/dev/null", O_RDONLY);
         int log_fd = open(wpa_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
@@ -1055,19 +1061,19 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
               "-i", iface.c_str(),
               "-c", scan_conf,
               "-D", "nl80211,wext",
-              "-d",   // debug output — shows driver init, ctrl socket, etc.
+              "-dd",  // extra-verbose debug — shows ALL driver init detail
               (char*)nullptr);
         _exit(127);
     }
 
     // Give the driver time to fully initialize after IFF_UP.
-    // RTL8821CE needs ~2-4s for firmware load + radio init; other drivers vary.
+    // RTL8821CE needs ~2-4s for firmware + radio init; other drivers vary.
     fprintf(stderr, "[scan] wpa_supplicant pid=%d, waiting 4s for driver init...\n", wpa_pid);
     usleep(4000000);
 
     // Check if wpa_supplicant is still alive
     bool wpa_alive = (kill(wpa_pid, 0) == 0);
-    fprintf(stderr, "[scan] wpa_supplicant %s after 2s wait\n",
+    fprintf(stderr, "[scan] wpa_supplicant %s after 4s wait\n",
             wpa_alive ? "alive" : "DEAD");
 
     if (!wpa_alive) {
@@ -1075,161 +1081,168 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         int wstatus = 0;
         waitpid(wpa_pid, &wstatus, WNOHANG);
         fprintf(stderr, "[scan] wpa_supplicant exit status=%d\n", WEXITSTATUS(wstatus));
-        fprintf(stderr, "[scan] --- wpa_supplicant log ---\n");
-        FILE* lf = fopen(wpa_log, "r");
-        if (lf) {
-            char buf[256];
-            while (fgets(buf, sizeof(buf), lf)) fprintf(stderr, "  %s", buf);
-            fclose(lf);
+        goto dump_log;
+    }
+
+    {
+        // Wait for control socket (up to 30s — some drivers are very slow to init)
+        std::string sock_path = "/run/wpa_supplicant/" + iface;
+        bool sock_ok = false;
+        for (int i = 0; i < 300; i++) {
+            struct stat st;
+            if (stat(sock_path.c_str(), &st) == 0) { sock_ok = true; break; }
+            // Also check if wpa_supplicant died while waiting
+            if (kill(wpa_pid, 0) != 0) {
+                fprintf(stderr, "[scan] wpa_supplicant died during socket wait\n");
+                break;
+            }
+            usleep(100000); // 100ms × 300 = 30s max
         }
-        fprintf(stderr, "[scan] --- end log ---\n");
+        fprintf(stderr, "[scan] wpa_supplicant ctrl socket %s (%s)\n",
+                sock_ok ? "ready" : "TIMED OUT (30s)",
+                sock_path.c_str());
+
+        if (!sock_ok) {
+            // Socket never appeared — dump log and bail early
+            // The scan won't work without the ctrl socket
+            kill(wpa_pid, SIGTERM);
+            waitpid(wpa_pid, nullptr, 0);
+            goto dump_log;
+        }
+
+        // Wait for regulatory domain to settle
+        usleep(1000000);
+
+        // Scan with retry — 3 attempts with robust error detection
+        std::string results;
+        const int max_scan_attempts = 3;
+        for (int attempt = 1; attempt <= max_scan_attempts; attempt++) {
+            fprintf(stderr, "[scan] attempt %d/%d: triggering scan...\n",
+                    attempt, max_scan_attempts);
+
+            // Trigger scan
+            {
+                const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
+                std::string r = capture_cmd("/usr/sbin/wpa_cli", argv, 5000);
+                while (!r.empty() && (r.back() == '\n' || r.back() == '\r'))
+                    r.pop_back();
+                fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
+                        r.empty() ? "(empty)" : r.c_str());
+
+                // Detect connection failure (case-insensitive "fail" check)
+                bool is_fail = r.empty();
+                for (size_t j = 0; !is_fail && j + 3 < r.size(); j++) {
+                    if ((r[j]=='F'||r[j]=='f') && (r[j+1]=='A'||r[j+1]=='a') &&
+                        (r[j+2]=='I'||r[j+2]=='i') && (r[j+3]=='L'||r[j+3]=='l'))
+                        is_fail = true;
+                }
+                if (is_fail) {
+                    fprintf(stderr, "[scan] wpa_cli failed/empty — ctrl socket issue, "
+                            "waiting 3s...\n");
+                    usleep(3000000);
+                    continue;
+                }
+            }
+
+            // Wait for scan to complete (4s)
+            usleep(4000000);
+
+            // Retrieve results
+            {
+                const char* argv[] = { "wpa_cli", "-i", iface.c_str(),
+                                        "scan_results", nullptr };
+                results = capture_cmd("/usr/sbin/wpa_cli", argv, 5000);
+                fprintf(stderr, "[scan] scan_results (%zu bytes)\n", results.size());
+            }
+
+            if (strstr(results.c_str(), "bssid / frequency")) {
+                fprintf(stderr, "[scan] got results on attempt %d\n", attempt);
+                break;
+            }
+
+            if (attempt < max_scan_attempts) {
+                fprintf(stderr, "[scan] no results, retrying in 3s...\n");
+                usleep(3000000);
+            }
+        }
+
+        // Kill temp wpa_supplicant
+        kill(wpa_pid, SIGTERM);
+        waitpid(wpa_pid, nullptr, 0);
+        unlink(sock_path.c_str());
         unlink(scan_conf);
-        unlink(wpa_log);
-        return nets;
+
+        // Parse scan_results — same as before
+        const char* header_marker = strstr(results.c_str(), "bssid / frequency");
+        if (!header_marker) {
+            fprintf(stderr, "[scan] no bssid header — returning 0 networks\n");
+            // ALWAYS dump wpa_supplicant log so we can see what happened
+            goto dump_log;
+        }
+        const char* p = header_marker;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+
+        while (*p) {
+            char line[512];
+            size_t len = 0;
+            while (*p && *p != '\n' && len < sizeof(line) - 1) line[len++] = *p++;
+            line[len] = '\0';
+            if (*p == '\n') p++;
+            if (len == 0) continue;
+
+            char* tok = strtok(line, "\t");
+            char* fields[5] = {};
+            for (int fi = 0; fi < 5 && tok; fi++, tok = strtok(nullptr, "\t"))
+                fields[fi] = tok;
+            if (!fields[4]) continue;
+
+            std::string ssid  = fields[4];
+            std::string flags = fields[3] ? fields[3] : "";
+            int sig = fields[2] ? atoi(fields[2]) : -100;
+
+            if (ssid.empty()) continue;
+
+            bool dup = false;
+            for (auto& e : nets) {
+                if (e.ssid == ssid) {
+                    if (sig > e.signal_db) { e.signal_db = sig; e.flags = flags; }
+                    dup = true; break;
+                }
+            }
+            if (!dup) nets.push_back({ssid, flags, sig});
+        }
+
+        std::sort(nets.begin(), nets.end(),
+                  [](const WifiEntry& a, const WifiEntry& b){
+                      return a.signal_db > b.signal_db;
+                  });
+
+        // Dump last 10 lines of log for diagnostics (even on success)
+        fprintf(stderr, "[scan] found %zu networks\n", nets.size());
     }
 
-    // Wait for control socket (up to 5s)
-    std::string sock_path = "/run/wpa_supplicant/" + iface;
-    bool sock_ok = false;
-    for (int i = 0; i < 50; i++) {
-        struct stat st;
-        if (stat(sock_path.c_str(), &st) == 0) { sock_ok = true; break; }
-        usleep(100000);
-    }
-    fprintf(stderr, "[scan] wpa_supplicant ctrl socket %s\n",
-            sock_ok ? "ready" : "TIMED OUT");
-
-    if (!sock_ok) {
-        // Socket never appeared — dump wpa_supplicant log for diagnostics
-        fprintf(stderr, "[scan] --- wpa_supplicant log ---\n");
+dump_log:
+    // ALWAYS dump wpa_supplicant log (last 20 lines) for diagnostics.
+    // Log file is preserved at /tmp/wpa_scan.log for inspection.
+    {
+        fprintf(stderr, "[scan] --- wpa_supplicant log (last 20 lines) ---\n");
         FILE* lf = fopen(wpa_log, "r");
         if (lf) {
+            // Read all lines, keep last 20
+            std::vector<std::string> lines;
             char buf[256];
-            while (fgets(buf, sizeof(buf), lf)) fprintf(stderr, "  %s", buf);
+            while (fgets(buf, sizeof(buf), lf)) lines.push_back(buf);
             fclose(lf);
+            size_t start = lines.size() > 20 ? lines.size() - 20 : 0;
+            for (size_t i = start; i < lines.size(); i++)
+                fprintf(stderr, "  %s", lines[i].c_str());
+        } else {
+            fprintf(stderr, "  (no log file)\n");
         }
-        fprintf(stderr, "[scan] --- end log ---\n");
-        // Don't give up — still try wpa_cli in case socket appeared late
+        fprintf(stderr, "[scan] --- end log (full: %s) ---\n", wpa_log);
     }
 
-    // Wait for regulatory domain to settle after wpa_supplicant applies country=US.
-    // Without this, cfg80211 may still be in world domain when scan fires.
-    usleep(1000000);
-
-    // Scan with retry — driver may need multiple attempts to return results.
-    // Some drivers (RTL8821CE, ath10k) need time after IFF_UP + wpa_supplicant
-    // start before radio scanning actually works. 5 attempts × ~5s each = 25s max.
-    std::string results;
-    const int max_scan_attempts = 5;
-    for (int attempt = 1; attempt <= max_scan_attempts; attempt++) {
-        fprintf(stderr, "[scan] attempt %d/%d: triggering scan...\n", attempt, max_scan_attempts);
-
-        // Trigger scan and check return
-        {
-            const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan", nullptr };
-            std::string r = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
-            // Trim trailing whitespace for comparison
-            while (!r.empty() && (r.back() == '\n' || r.back() == '\r')) r.pop_back();
-            fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
-                    r.empty() ? "(empty)" : r.c_str());
-
-            // Empty response means wpa_cli couldn't connect — retry
-            if (r.empty()) {
-                fprintf(stderr, "[scan] wpa_cli returned nothing (no ctrl socket?), waiting 2s...\n");
-                usleep(2000000);
-                continue;
-            }
-
-            // Check for FAIL response — driver not ready
-            if (r.find("FAIL") != std::string::npos) {
-                fprintf(stderr, "[scan] scan returned FAIL — driver not ready, waiting 2s...\n");
-                usleep(2000000);
-                continue;
-            }
-        }
-
-        // Wait for scan to complete (3s per attempt)
-        usleep(3000000);
-
-        // Retrieve results
-        {
-            const char* argv[] = { "wpa_cli", "-i", iface.c_str(), "scan_results", nullptr };
-            results = capture_cmd("/usr/sbin/wpa_cli", argv, 3000);
-            fprintf(stderr, "[scan] scan_results (%zu bytes):\n%s\n",
-                    results.size(), results.c_str());
-        }
-
-        // If we got results with the bssid header, we're done
-        if (strstr(results.c_str(), "bssid / frequency")) {
-            fprintf(stderr, "[scan] got results on attempt %d\n", attempt);
-            break;
-        }
-
-        // No results yet — wait before retry
-        if (attempt < max_scan_attempts) {
-            fprintf(stderr, "[scan] no results, retrying in 2s...\n");
-            usleep(2000000);
-        }
-    }
-
-    // Kill temp wpa_supplicant cleanly
-    kill(wpa_pid, SIGTERM);
-    waitpid(wpa_pid, nullptr, 0);
-    unlink(sock_path.c_str());
-    unlink(scan_conf);
-    unlink(wpa_log);
-
-    // Parse scan_results output.  wpa_cli prepends "Selected interface 'X'\n"
-    // before the real header "bssid / frequency / signal level / flags / ssid".
-    // Find that header by string search so we skip any preamble lines, then
-    // parse tab-delimited data lines after it.
-    //   aa:bb:cc:dd:ee:ff\t2412\t-65\t[WPA2-PSK-CCMP][ESS]\tMyNetwork
-    const char* header_marker = strstr(results.c_str(), "bssid / frequency");
-    if (!header_marker) {
-        fprintf(stderr, "[scan] no bssid header in output — returning 0 networks\n");
-        return nets;
-    }
-    // Skip to end of the header line
-    const char* p = header_marker;
-    while (*p && *p != '\n') p++;
-    if (*p == '\n') p++;
-
-    while (*p) {
-        // Copy line
-        char line[512];
-        size_t len = 0;
-        while (*p && *p != '\n' && len < sizeof(line) - 1) line[len++] = *p++;
-        line[len] = '\0';
-        if (*p == '\n') p++;
-        if (len == 0) continue;
-
-        // Split on tabs: bssid, freq, signal, flags, ssid
-        char* tok = strtok(line, "\t");
-        char* fields[5] = {};
-        for (int fi = 0; fi < 5 && tok; fi++, tok = strtok(nullptr, "\t"))
-            fields[fi] = tok;
-        if (!fields[4]) continue;
-
-        std::string ssid  = fields[4];
-        std::string flags = fields[3] ? fields[3] : "";
-        int sig = fields[2] ? atoi(fields[2]) : -100;
-
-        if (ssid.empty()) continue; // skip hidden networks
-
-        // Deduplicate by SSID — keep strongest signal
-        bool dup = false;
-        for (auto& e : nets) {
-            if (e.ssid == ssid) {
-                if (sig > e.signal_db) { e.signal_db = sig; e.flags = flags; }
-                dup = true; break;
-            }
-        }
-        if (!dup) nets.push_back({ssid, flags, sig});
-    }
-
-    // Sort strongest signal first
-    std::sort(nets.begin(), nets.end(),
-              [](const WifiEntry& a, const WifiEntry& b){ return a.signal_db > b.signal_db; });
     return nets;
 }
 

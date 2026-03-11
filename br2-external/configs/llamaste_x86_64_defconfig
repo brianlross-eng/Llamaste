@@ -61,11 +61,12 @@ BR2_PACKAGE_ESPEAK_NG=y
 BR2_PACKAGE_ONNXRUNTIME=y
 BR2_PACKAGE_SHERPA_ONNX=y
 
-# WiFi support (wpa_supplicant + dhcpcd + firmware for ALL common hardware)
+# WiFi support (wpa_supplicant + dhcpcd + iw + firmware for ALL common hardware)
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_CTRL_IFACE_UNIX=y
+BR2_PACKAGE_IW=y
 BR2_PACKAGE_DHCPCD=y
 BR2_PACKAGE_LINUX_FIRMWARE=y
 # Intel WiFi 6E/AX series: AX200/AX201/AX211 use QuZ/Qu firmware
