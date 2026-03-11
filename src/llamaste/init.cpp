@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <cstdlib>
+#include <dirent.h>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/statfs.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <netinet/in.h>
@@ -855,5 +858,114 @@ bool do_live_pivot(char** argv) {
     execv("/opt/llamaste/llamaste", argv);
     fprintf(stderr, "[init] Live pivot: execv: %m\n");
     return false;   // execv only returns on error
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// init_load_modules — load WiFi kernel modules after squashfs pivot
+//
+// With CONFIG_MODULES=y, WiFi vendor drivers are built as .ko modules instead
+// of being compiled into bzImage. This means they load AFTER the squashfs pivot,
+// when /lib/firmware/ is available — so firmware loading just works for any
+// supported WiFi chip without needing CONFIG_EXTRA_FIRMWARE.
+//
+// We use the finit_module() syscall directly (no modprobe/kmod needed).
+// Modules are loaded in dependency order by scanning /lib/modules/<ver>/kernel/
+// for known paths. Failures are non-fatal (hardware may not be present).
+// ─────────────────────────────────────────────────────────────────────────────
+void init_load_modules() {
+#ifdef _WIN32
+    return;
+#else
+    // Get kernel version for module path
+    struct utsname uts;
+    if (uname(&uts) < 0) {
+        fprintf(stderr, "[init] modules: uname failed: %m\n");
+        return;
+    }
+    std::string mod_base = "/lib/modules/" + std::string(uts.release);
+
+    // Check if modules directory exists (may not exist if CONFIG_MODULES=n kernel)
+    struct stat st;
+    if (stat(mod_base.c_str(), &st) != 0) {
+        fprintf(stderr, "[init] modules: %s not found — built-in kernel, skipping\n",
+                mod_base.c_str());
+        return;
+    }
+
+    fprintf(stderr, "[init] Loading kernel modules from %s\n", mod_base.c_str());
+
+    // Module load order — dependencies must come before dependents.
+    // Each entry is relative to /lib/modules/<ver>/kernel/
+    // Non-existent modules are silently skipped (hardware not targeted in this build).
+    const char* module_paths[] = {
+        // WiFi vendor drivers (cfg80211 + mac80211 are built-in =y)
+        // Intel WiFi
+        "drivers/net/wireless/intel/iwlwifi/iwlwifi.ko",
+        "drivers/net/wireless/intel/iwlwifi/dvm/iwldvm.ko",
+        "drivers/net/wireless/intel/iwlwifi/mvm/iwlmvm.ko",
+        // Realtek RTW88 family
+        "drivers/net/wireless/realtek/rtw88/rtw88_core.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_pci.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8821c.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8821ce.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822c.ko",
+        "drivers/net/wireless/realtek/rtw88/rtw88_8822ce.ko",
+        // Realtek USB WiFi (rtlwifi-based RTL8192CU)
+        "drivers/net/wireless/realtek/rtlwifi/rtlwifi.ko",
+        "drivers/net/wireless/realtek/rtlwifi/rtl8192cu/rtl8192cu.ko",
+        // Atheros/Qualcomm
+        "drivers/net/wireless/ath/ath.ko",
+        "drivers/net/wireless/ath/ath10k/ath10k_core.ko",
+        "drivers/net/wireless/ath/ath10k/ath10k_pci.ko",
+        "drivers/net/wireless/ath/ath9k/ath9k_hw.ko",
+        "drivers/net/wireless/ath/ath9k/ath9k_common.ko",
+        "drivers/net/wireless/ath/ath9k/ath9k.ko",
+        // MediaTek
+        "drivers/net/wireless/mediatek/mt76/mt76.ko",
+        "drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko",
+        "drivers/net/wireless/mediatek/mt76/mt7921/mt7921-common.ko",
+        "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko",
+        nullptr
+    };
+
+    int loaded = 0, skipped = 0, failed = 0;
+
+    for (int i = 0; module_paths[i]; i++) {
+        std::string full_path = mod_base + "/kernel/" + module_paths[i];
+
+        // Skip if module file doesn't exist (driver not built for this config)
+        if (access(full_path.c_str(), R_OK) != 0) {
+            skipped++;
+            continue;
+        }
+
+        int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            fprintf(stderr, "[init] modules: open %s: %m\n", module_paths[i]);
+            failed++;
+            continue;
+        }
+
+        int ret = syscall(SYS_finit_module, fd, "", 0);
+        close(fd);
+
+        if (ret == 0) {
+            fprintf(stderr, "[init] modules: loaded %s\n", module_paths[i]);
+            loaded++;
+        } else if (errno == EEXIST) {
+            // Already loaded (built-in or previously loaded) — not an error
+            skipped++;
+        } else {
+            fprintf(stderr, "[init] modules: %s: %m\n", module_paths[i]);
+            failed++;
+        }
+    }
+
+    fprintf(stderr, "[init] modules: %d loaded, %d skipped, %d failed\n",
+            loaded, skipped, failed);
+
+    // Give drivers a moment to probe hardware and create net interfaces
+    usleep(500000);
 #endif
 }
