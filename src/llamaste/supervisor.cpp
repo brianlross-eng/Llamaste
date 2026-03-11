@@ -1015,24 +1015,54 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     }
     mkdir("/run/wpa_supplicant", 0755);
 
-    // Start wpa_supplicant in foreground so we own its pid
+    // Start wpa_supplicant in foreground so we own its pid.
+    // Log stderr to a file so we can diagnose startup failures.
+    const char* wpa_log = "/tmp/wpa_scan.log";
     pid_t wpa_pid = fork();
     if (wpa_pid < 0) { unlink(scan_conf); return nets; }
     if (wpa_pid == 0) {
-        int null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
+        int log_fd = open(wpa_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
         execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
               "-i", iface.c_str(),
               "-c", scan_conf,
               "-D", "nl80211,wext",
+              "-d",   // debug output — shows driver init, ctrl socket, etc.
               (char*)nullptr);
         _exit(127);
     }
 
     // Give the driver time to fully initialize after IFF_UP.
     // RTL8821CE needs ~2s for firmware load + radio init.
-    fprintf(stderr, "[scan] waiting for driver init after IFF_UP...\n");
+    fprintf(stderr, "[scan] wpa_supplicant pid=%d, waiting 2s for driver init...\n", wpa_pid);
     usleep(2000000);
+
+    // Check if wpa_supplicant is still alive
+    bool wpa_alive = (kill(wpa_pid, 0) == 0);
+    fprintf(stderr, "[scan] wpa_supplicant %s after 2s wait\n",
+            wpa_alive ? "alive" : "DEAD");
+
+    if (!wpa_alive) {
+        // wpa_supplicant crashed — dump its log
+        int wstatus = 0;
+        waitpid(wpa_pid, &wstatus, WNOHANG);
+        fprintf(stderr, "[scan] wpa_supplicant exit status=%d\n", WEXITSTATUS(wstatus));
+        fprintf(stderr, "[scan] --- wpa_supplicant log ---\n");
+        FILE* lf = fopen(wpa_log, "r");
+        if (lf) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), lf)) fprintf(stderr, "  %s", buf);
+            fclose(lf);
+        }
+        fprintf(stderr, "[scan] --- end log ---\n");
+        unlink(scan_conf);
+        unlink(wpa_log);
+        return nets;
+    }
 
     // Wait for control socket (up to 5s)
     std::string sock_path = "/run/wpa_supplicant/" + iface;
@@ -1043,7 +1073,20 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         usleep(100000);
     }
     fprintf(stderr, "[scan] wpa_supplicant ctrl socket %s\n",
-            sock_ok ? "ready" : "TIMED OUT — wpa_supplicant may have failed");
+            sock_ok ? "ready" : "TIMED OUT");
+
+    if (!sock_ok) {
+        // Socket never appeared — dump wpa_supplicant log for diagnostics
+        fprintf(stderr, "[scan] --- wpa_supplicant log ---\n");
+        FILE* lf = fopen(wpa_log, "r");
+        if (lf) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), lf)) fprintf(stderr, "  %s", buf);
+            fclose(lf);
+        }
+        fprintf(stderr, "[scan] --- end log ---\n");
+        // Don't give up — still try wpa_cli in case socket appeared late
+    }
 
     // Wait for regulatory domain to settle after wpa_supplicant applies country=US.
     // Without this, cfg80211 may still be in world domain when scan fires.
@@ -1064,7 +1107,14 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
             // Trim trailing whitespace for comparison
             while (!r.empty() && (r.back() == '\n' || r.back() == '\r')) r.pop_back();
             fprintf(stderr, "[scan] wpa_cli scan -> '%s'\n",
-                    r.empty() ? "(empty — wpa_cli missing or socket gone?)" : r.c_str());
+                    r.empty() ? "(empty)" : r.c_str());
+
+            // Empty response means wpa_cli couldn't connect — retry
+            if (r.empty()) {
+                fprintf(stderr, "[scan] wpa_cli returned nothing (no ctrl socket?), waiting 2s...\n");
+                usleep(2000000);
+                continue;
+            }
 
             // Check for FAIL response — driver not ready
             if (r.find("FAIL") != std::string::npos) {
@@ -1103,6 +1153,7 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
     waitpid(wpa_pid, nullptr, 0);
     unlink(sock_path.c_str());
     unlink(scan_conf);
+    unlink(wpa_log);
 
     // Parse scan_results output.  wpa_cli prepends "Selected interface 'X'\n"
     // before the real header "bssid / frequency / signal level / flags / ssid".
