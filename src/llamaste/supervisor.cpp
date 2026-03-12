@@ -1023,16 +1023,35 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
         }
     }
 
-    // Set regulatory domain via iw — cfg80211 fails to load regulatory.db
-    // before squashfs pivot, so we set country code explicitly.  This enables
-    // 5 GHz channels that would otherwise be blocked under world domain.
+    // Reload regulatory database — cfg80211 (built-in) tried to load
+    // regulatory.db during early kernel init (before squashfs pivot) and
+    // cached the failure.  Now that the pivot is done and /lib/firmware/
+    // is available, tell cfg80211 to retry, then set US regulatory domain
+    // to unlock 5 GHz channels.
     {
+        const char* reload_argv[] = { "iw", "reg", "reload", nullptr };
+        std::string rr = capture_cmd("/usr/sbin/iw", reload_argv, 3000);
+        while (!rr.empty() && (rr.back()=='\n'||rr.back()=='\r')) rr.pop_back();
+        fprintf(stderr, "[scan] iw reg reload -> '%s'\n",
+                rr.empty() ? "(ok)" : rr.c_str());
+
+        // Brief pause for regulatory.db to be parsed
+        usleep(500000);
+
         const char* argv[] = { "iw", "reg", "set", "US", nullptr };
         std::string r = capture_cmd("/usr/sbin/iw", argv, 3000);
-        // Trim trailing whitespace for cleaner log
         while (!r.empty() && (r.back()=='\n'||r.back()=='\r')) r.pop_back();
         fprintf(stderr, "[scan] iw reg set US -> '%s'\n",
                 r.empty() ? "(ok)" : r.c_str());
+
+        // Verify regulatory domain is active
+        const char* get_argv[] = { "iw", "reg", "get", nullptr };
+        std::string reg = capture_cmd("/usr/sbin/iw", get_argv, 3000);
+        if (reg.find("country US") != std::string::npos)
+            fprintf(stderr, "[scan] regulatory domain: US (confirmed)\n");
+        else
+            fprintf(stderr, "[scan] WARNING: regulatory domain NOT US:\n%s\n",
+                    reg.substr(0, 200).c_str());
     }
 
     // Wait for driver to fully initialize after IFF_UP.
@@ -1086,6 +1105,33 @@ static std::vector<WifiEntry> supervisor_scan_wifi(const std::string& iface) {
             //   "command failed: Network is down (-100)" — IFF_UP not settled
             fprintf(stderr, "[scan] no BSS entries, retrying in 3s...\n");
             usleep(3000000);
+        }
+    }
+
+    // Post-scan diagnostics: if 0 BSS entries, dump channel/phy info to help
+    // diagnose regulatory or driver issues (visible via /debug/dmesg or serial)
+    if (raw.find("BSS ") == std::string::npos) {
+        fprintf(stderr, "[scan] --- post-scan diagnostics ---\n");
+        // Show which channels the driver can use
+        {
+            const char* argv[] = { "iw", "phy", "phy0", "channels", nullptr };
+            std::string ch = capture_cmd("/usr/sbin/iw", argv, 3000);
+            // Just log first 500 chars to avoid flooding
+            fprintf(stderr, "[scan] phy0 channels:\n%s\n", ch.substr(0, 500).c_str());
+        }
+        // Show interface link state
+        {
+            const char* argv[] = { "iw", "dev", iface.c_str(), "link", nullptr };
+            std::string lnk = capture_cmd("/usr/sbin/iw", argv, 3000);
+            fprintf(stderr, "[scan] %s link: %s\n", iface.c_str(),
+                    lnk.empty() ? "(empty)" : lnk.substr(0, 200).c_str());
+        }
+        // Show regulatory domain
+        {
+            const char* argv[] = { "iw", "reg", "get", nullptr };
+            std::string reg = capture_cmd("/usr/sbin/iw", argv, 3000);
+            fprintf(stderr, "[scan] --- regulatory domain ---\n%s--- end regulatory ---\n",
+                    reg.substr(0, 500).c_str());
         }
     }
 

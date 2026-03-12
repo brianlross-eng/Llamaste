@@ -8,17 +8,16 @@
 
     let isLiveMode = false;
 
-    // Check if we're in live mode
+    // Check if installer is available (live ISO boot in any mode)
     async function checkLiveMode() {
         try {
-            const res = await fetch('/health');
-            const data = await res.json();
-            if (data.mode === 'live') {
+            const res = await fetch('/install/disks');
+            if (res.ok) {
                 isLiveMode = true;
                 showLiveBanner();
             }
         } catch (e) {
-            // Not in live mode or server not ready
+            // Installer not available (not booted from ISO)
         }
     }
 

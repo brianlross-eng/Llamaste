@@ -1649,9 +1649,17 @@ int child_main(const SupervisorConfig& config) {
 
     // Initialize tools
     register_all_tools(g_tools);
-    if (g_boot_mode == "live") {
+    // Enable installer when booted from USB/ISO (any mode: live, desktop, server).
+    // Detection: after squashfs pivot, the original ISO root is bind-mounted at
+    // /cdrom.  Check for the /cdrom/llamaste-live-iso marker file.
+    // (Previous approach of /run/llamaste-live failed because init_mount_filesystems()
+    // mounts a fresh tmpfs on /run after re-exec, destroying the marker.)
+    bool g_is_live_iso = (access("/cdrom/llamaste-live-iso", F_OK) == 0);
+    fprintf(stderr, "[child] Live ISO check: /cdrom/llamaste-live-iso %s\n",
+            g_is_live_iso ? "EXISTS — installer enabled" : "NOT FOUND");
+    if (g_is_live_iso) {
         register_install_tools(g_tools);
-        fprintf(stderr, "[child] Live mode: installer tools enabled\n");
+        fprintf(stderr, "[child] Installer routes: /install/disks, /install/start, /install/progress\n");
     }
     register_schedule_tools(g_tools, g_scheduler);
     register_auth_tools(g_tools, g_auth);
@@ -2150,6 +2158,23 @@ int child_main(const SupervisorConfig& config) {
     // when we get here.  Retry init() for up to 10s to catch late interfaces.
 #ifndef _WIN32
     {
+        // Reload regulatory database — cfg80211 (built-in) tried to load
+        // regulatory.db during kernel init before squashfs pivot and cached
+        // the failure.  Force a retry now that /lib/firmware/ is available.
+        {
+            const char* reload_argv[] = { "/usr/sbin/iw", "reg", "reload", nullptr };
+            pid_t rpid = fork();
+            if (rpid == 0) { execv(reload_argv[0], const_cast<char**>(reload_argv)); _exit(127); }
+            if (rpid > 0) waitpid(rpid, nullptr, 0);
+            usleep(300000);
+
+            const char* set_argv[] = { "/usr/sbin/iw", "reg", "set", "US", nullptr };
+            pid_t spid = fork();
+            if (spid == 0) { execv(set_argv[0], const_cast<char**>(set_argv)); _exit(127); }
+            if (spid > 0) waitpid(spid, nullptr, 0);
+            fprintf(stderr, "[wifi] regulatory: reload + set US\n");
+        }
+
         bool wifi_init_ok = g_wifi.init();
         if (!wifi_init_ok || !g_wifi.has_wifi()) {
             // Modules may still be probing — retry (especially in desktop mode
@@ -2441,10 +2466,14 @@ int child_main(const SupervisorConfig& config) {
             // input devices are enumerated AFTER wlroots is fully initialised.
             // This prevents the shm-for-XKB race: keyboard enumerated while
             // cage is still starting → os_create_anonymous_file() fails → SIGSEGV.
+            // Optional post_ready_fn is called after socket + udev are ready,
+            // BEFORE waitpid blocks — used by labwc to spawn cog (since labwc's
+            // shell-based autostart doesn't work without /bin/sh).
             // Returns -1 if fork failed.
             static bool udev_triggered = false;
             auto try_compositor = [&](const char* label,
-                                      std::function<void()> exec_fn) -> int {
+                                      std::function<void()> exec_fn,
+                                      std::function<void()> post_ready_fn = nullptr) -> int {
                 pid_t pid = fork();
                 if (pid == 0) {
                     exec_fn();
@@ -2470,6 +2499,8 @@ int child_main(const SupervisorConfig& config) {
                         run_udevadm_trigger();
                         udev_triggered = true;
                     }
+                    // Post-ready callback (e.g. spawn cog for labwc)
+                    if (post_ready_fn) post_ready_fn();
                 } else {
                     fprintf(stderr, "[child] %s socket not ready after 5s\n", label);
                 }
@@ -2528,11 +2559,48 @@ int child_main(const SupervisorConfig& config) {
 
             fprintf(stderr, "[child] cage unavailable/crashed, trying labwc\n");
 
-            // 2. labwc (stacking WM — reads /etc/labwc/autostart which launches cog)
+            // 2. labwc (stacking WM).  labwc's autostart is a shell script but
+            //    Llamaste has no shell (BR2_SYSTEM_BIN_SH_NONE=y), so autostart
+            //    silently fails.  Instead, we spawn cog ourselves via post_ready_fn
+            //    after the Wayland socket appears and udev has triggered.
             {
                 auto t0 = std::chrono::steady_clock::now();
                 int st = try_compositor("labwc", []() {
                     execl("/usr/bin/labwc", "labwc", nullptr);
+                }, []() {
+                    // Wait briefly for HTTP server to start listening on port 80.
+                    // The server starts on the main thread; compositor is on this
+                    // detached thread.  Poll with connect() — max 15s.
+                    fprintf(stderr, "[child] labwc ready, waiting for HTTP server...\n");
+                    for (int i = 0; i < 30; i++) {
+                        int s = socket(AF_INET, SOCK_STREAM, 0);
+                        if (s >= 0) {
+                            struct sockaddr_in addr = {};
+                            addr.sin_family = AF_INET;
+                            addr.sin_port = htons(80);
+                            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                            if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                                close(s);
+                                fprintf(stderr, "[child] HTTP server up, spawning cog\n");
+                                break;
+                            }
+                            close(s);
+                        }
+                        usleep(500000);  // 500ms
+                    }
+                    // Spawn cog as a separate process (labwc manages its window).
+                    // COG_PLATFORM_WL_VIEW_FULLSCREEN must be set here — labwc's
+                    // /etc/labwc/environment is parsed by labwc for ITS children,
+                    // but our cog is fork+exec'd directly, not via labwc.
+                    pid_t cpid = fork();
+                    if (cpid == 0) {
+                        setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+                        setenv("COG_PLATFORM_WL_VIEW_FULLSCREEN", "1", 1);
+                        execl("/usr/bin/cog", "cog", "http://localhost", nullptr);
+                        _exit(127);
+                    }
+                    if (cpid > 0)
+                        fprintf(stderr, "[child] cog spawned pid=%d\n", cpid);
                 });
                 long elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3223,8 +3291,8 @@ int child_main(const SupervisorConfig& config) {
         }
     ));
 
-    // --- Installer routes (live mode only) ---
-    if (g_boot_mode == "live") {
+    // --- Installer routes (any mode when booted from live ISO) ---
+    if (g_is_live_iso) {
         svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {
             std::string result = g_tools.dispatch("install.detect_disks", "{}");
             res.set_content(result, "application/json");
