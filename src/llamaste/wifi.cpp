@@ -434,7 +434,20 @@ std::vector<WiFiNetwork> WiFiManager::parse_list_networks(const std::string& raw
 std::string WiFiManager::connect(const std::string& ssid,
                                  const std::string& psk) {
     if (!has_wifi()) return "No WiFi interface";
-    if (ctrl_fd_ < 0 && !open_ctrl()) return "wpa_supplicant not running";
+    if (ctrl_fd_ < 0 && !open_ctrl()) {
+        // Try to spawn wpa_supplicant on-demand (desktop mode: user clicks
+        // Connect before any daemon was started, or daemon silently crashed).
+        if (spawn_cb_) {
+            fprintf(stderr, "[wifi] connect: no daemon, trying spawn callback\n");
+            spawn_cb_(iface_);
+            // Wait for ctrl socket to appear
+            for (int i = 0; i < 8; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (open_ctrl()) break;
+            }
+        }
+        if (ctrl_fd_ < 0) return "wpa_supplicant not running";
+    }
 
     // Reuse saved network if it exists
     auto saved = list_networks();

@@ -11,6 +11,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <functional>
 
 // Information about a visible or saved WiFi network.
 struct WiFiNetwork {
@@ -78,7 +79,14 @@ public:
     // Bring the WiFi interface down.
     std::string disable();
 
+    // Set a callback that spawns wpa_supplicant on-demand when connect()
+    // finds the daemon isn't running.  Called with the interface name.
+    void set_spawn_callback(std::function<void(const std::string&)> cb) {
+        spawn_cb_ = std::move(cb);
+    }
+
 private:
+    std::function<void(const std::string&)> spawn_cb_;
     std::string iface_;     // detected interface name
     int ctrl_fd_ = -1;      // our side of the socket pair
     std::string ctrl_path_; // /tmp/wpa_ctrl_<pid>_<N>

@@ -853,11 +853,54 @@ static void spawn_wpa_supplicant(const std::string& iface) {
                 strerror(errno));
         _exit(127);
     }
-    // wpa_supplicant daemonizes, so the child exits quickly — no need to track pid
+    // wpa_supplicant daemonizes (-B), so the forked child exits quickly after
+    // the daemon forks itself.  waitpid waits for the first child only.
     int wstatus;
     waitpid(pid, &wstatus, 0);
-    // The real daemon is now running in the background with its own PID file
-    fprintf(stderr, "[child] wpa_supplicant spawned on %s\n", iface.c_str());
+
+    // Verify the daemon is actually running by polling for the ctrl socket.
+    // The daemon child may have silently crashed after the parent exited
+    // (e.g. driver init failure, regulatory issue).  With -B, stderr from the
+    // daemon goes nowhere, so check the socket as the source of truth.
+    std::string sock_path = "/run/wpa_supplicant/" + iface;
+    bool daemon_ok = false;
+    for (int i = 0; i < 6; i++) {  // 3 seconds max
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        struct stat sst;
+        if (stat(sock_path.c_str(), &sst) == 0) { daemon_ok = true; break; }
+    }
+    if (daemon_ok) {
+        fprintf(stderr, "[child] wpa_supplicant spawned on %s\n", iface.c_str());
+    } else {
+        fprintf(stderr, "[child] WARNING: wpa_supplicant ctrl socket not found "
+                "at %s after 3s — daemon may have crashed\n", sock_path.c_str());
+        // Retry once in foreground to capture errors
+        pid_t retry = fork();
+        if (retry == 0) {
+            // Run without -B so errors go to stderr (which we capture)
+            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+                  "-i", iface.c_str(),
+                  "-c", conf,
+                  "-D", "nl80211,wext",
+                  "-B",   // still daemonize, but after successful init
+                  (char*)nullptr);
+            fprintf(stderr, "[child] retry execl wpa_supplicant failed: %s\n",
+                    strerror(errno));
+            _exit(127);
+        } else if (retry > 0) {
+            waitpid(retry, &wstatus, 0);
+            // Check again
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            struct stat sst;
+            if (stat(sock_path.c_str(), &sst) == 0) {
+                fprintf(stderr, "[child] wpa_supplicant spawned on %s (retry)\n",
+                        iface.c_str());
+            } else {
+                fprintf(stderr, "[child] ERROR: wpa_supplicant failed to start "
+                        "on %s after retry\n", iface.c_str());
+            }
+        }
+    }
 }
 
 static void spawn_dhcpcd(const std::string& iface) {
@@ -2016,6 +2059,10 @@ int child_main(const SupervisorConfig& config) {
         fprintf(stderr, "[wifi-diag] rtw8821c_fw.bin: %s\n",
                 access("/lib/firmware/rtw88/rtw8821c_fw.bin", F_OK) == 0 ? "found" : "MISSING");
 
+        // 5b. Regulatory database accessible?
+        fprintf(stderr, "[wifi-diag] regulatory.db: %s\n",
+                access("/lib/firmware/regulatory.db", F_OK) == 0 ? "found" : "MISSING");
+
         // 6. Kernel version (confirms which kernel is running)
         {
             FILE* kv = fopen("/proc/version", "r");
@@ -2050,12 +2097,18 @@ int child_main(const SupervisorConfig& config) {
                 g_wifi.has_wifi() ? "yes" : "no",
                 wifi_iface.c_str(),
                 g_boot_mode.c_str());
+    // Register spawn callback so WiFiManager::connect() can start
+    // wpa_supplicant on-demand (desktop mode: user clicks Connect
+    // before daemon was running, or daemon silently crashed).
+    g_wifi.set_spawn_callback([](const std::string& iface) {
+        spawn_wpa_supplicant(iface);
+    });
+
     if (wifi_init_ok) {
         if (!wifi_iface.empty()) {
             spawn_wpa_supplicant(wifi_iface);
-            // Give wpa_supplicant time to create its control socket.
-            // RTL8821CE needs ~2s for driver init + ctrl socket creation.
-            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            // spawn_wpa_supplicant now includes ctrl socket verification
+            // (up to 3s polling), so no extra sleep needed here.
             // Re-open control socket now that daemon is running
             g_wifi.init();
 
