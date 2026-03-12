@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-12 (debug endpoints + grammar JSON + README + LICENSE — 4e49c1d)
+**Last updated**: 2026-03-12 (install button fix + desktop auto-launch + GRUB simplification — 95c1979)
 
 ---
 
@@ -148,7 +148,11 @@ syslog daemon (PID 1 is the LLM), all messages vanished. The `-f` flag bypasses 
 - ✅ WiFi scan via `iw dev wlan0 scan` — finds networks
 - ✅ Desktop mode WiFi scan via iw fallback
 - ✅ **WiFi CONNECTED** — wpa_supplicant + EAPOL + WPA handshake working (3080038)
-- ⬜ Install to NVMe — next priority
+- ✅ Desktop mode auto-launches cog fullscreen (labwc + C++ fork/exec)
+- ✅ GRUB simplified to 2 entries (server + desktop)
+- ✅ WiFi scan finds networks in both server and desktop mode
+- ⬜ Install button — detection fixed (/cdrom/llamaste-live-iso), needs hardware test
+- ⬜ Install to NVMe — next priority after install button confirmed
 - ⬜ Desktop mode WiFi connect — untested (server mode confirmed)
 
 ---
@@ -168,12 +172,37 @@ Design doc: `docs/plans/2026-03-12-four-items-design.md`
 
 ---
 
+## Latest Session (2026-03-12) — Hardware Testing + Install Button Fix
+
+### Real Hardware Testing (ASUS VivoBook X712JA)
+Iterative build-test cycles on real hardware uncovered and fixed several issues:
+
+| Issue | Root Cause | Fix | Status |
+|-------|-----------|-----|--------|
+| Too many GRUB options | 4+ entries confusing | Simplified to 2 (server + desktop) | ✅ |
+| Desktop blank screen | labwc autostart needs /bin/sh (none on system) | C++ fork+exec cog via post_ready_fn | ✅ |
+| Desktop not fullscreen | COG_PLATFORM_WL_VIEW_FULLSCREEN not inherited | setenv() in fork child before exec | ✅ |
+| WiFi 0 networks | `iw` binary missing (defconfig/.config mismatch) | `make llamaste_x86_64_defconfig` | ✅ |
+| cfg80211 regdb failure | Built-in cfg80211 loads before squashfs pivot | `iw reg reload` + `iw reg set US` | ✅ |
+| Install button missing | `/run/llamaste-live` destroyed by fresh tmpfs | Changed to `/cdrom/llamaste-live-iso` | 🔧 Needs test |
+
+### Commits This Session
+
+| Commit | Description |
+|--------|-------------|
+| f8ff342 | Fix json_object response_format, fix README static claim |
+| 39d5546 | Update session status with four-items completion |
+| 4e49c1d | Debug endpoints, grammar JSON, README, LICENSE, NVMe docs |
+| 95c1979 | Install button detection, desktop auto-launch, GRUB simplification |
+
+---
+
 ## Next Steps
 
 ### Immediate
-1. **Install to NVMe** — Boot live → Install tab → test on real hardware (code is ready)
-2. **Build + deploy** — Rebuild with debug endpoints + grammar JSON, create new ISO
-3. **Test debug endpoints** — Verify `/debug/*` routes work on VDI or real hardware
+1. **Test install button** — Flash ISO (95c1979), boot desktop, verify Install tab appears
+2. **Install to NVMe** — Once install button confirmed, test actual install flow
+3. **DNS fix** — `/etc/resolv.conf` empty after WiFi connect (dhcpcd issue)
 
 ### Backlog
 - Desktop mode WiFi connect test
