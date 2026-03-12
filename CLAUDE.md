@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: Live ISO squashfs pivot + desktop mode COMPLETE. WiFi: iw scan CONFIRMED WORKING on bare metal (desktop + server). Connection fix: disabled signed regdb (5GHz blocked) + wpa_supplicant spawn-on-demand + CRC_CCITT for rt2800. 10 vendor families, ~55 WiFi modules. 62 tools, 13 suites.
+- **Phase**: ✅ WiFi CONNECTED on real hardware (3080038). 8 issues fixed (signed regdb, CONFIG_PACKET, spawn-on-demand, etc). 62 tools, 13 suites.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -145,21 +145,27 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Deploy scripts**: `scripts/deploy-to-vdi.sh` (WSL2, squashfs→VDI partition 3) + `scripts/finish-deploy.ps1` (Windows side)
 - **NTFS rename fails from WSL2**: use PowerShell `Copy-Item -Path $new -Destination $old -Force` + `Remove-Item` instead of `mv`/`Move-Item`
 
+## Build Patterns & Gotchas (continued)
+- **CONFIG_PACKET=y required for wpa_supplicant**: AF_PACKET sockets needed for EAPOL (802.1X auth frames). Without it, `socket(PF_PACKET)` returns EAFNOSUPPORT → wpa_supplicant exits 255 immediately. This was the hidden final blocker for WiFi connection.
+- **wpa_supplicant CONFIG_NO_STDOUT_DEBUG**: Buildroot compiles wpa_supplicant with this flag, routing all `wpa_printf()` to syslog. Since Llamaste has no syslog daemon, errors vanish silently (exit 255, zero output). Fix: use `-dd -f /tmp/wpa_supplicant.log` to capture debug output to file. Also redirect child stdout/stderr to the log file for dynamic linker errors.
+- **wpa_supplicant -B causes silent death**: The `-B` flag triggers an internal double-fork. If the daemon child crashes after the parent exits, stderr is lost. Fix: DON'T use `-B`. Run wpa_supplicant in foreground in our forked child. Use `setsid()` for signal isolation. Poll ctrl socket + `waitpid(WNOHANG)` to detect early crashes.
+
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
 - **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
 
 ## Next Steps
 ### Immediate
-1. **Test iw-based WiFi scan** — ISO 341113a flashing. Look for `[scan] got BSS entries` on console
-2. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
-3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
-4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
-5. **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (needs 2 physical machines)
+1. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
+2. **Remote access** — Add dropbear SSH or debug HTTP endpoint for easier diagnosis
+3. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
+4. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 
 ### Backlog
+- **Desktop mode WiFi connect** — Server mode confirmed working; test desktop connect flow
 - **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
 - **More TTS voices** — Additional locales (en_SC, en_IN, etc.) if needed
+- **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (needs 2 physical machines)
 - **Model auto-download on cluster formation** — Already implemented; test on real hardware
 
 ## User Preferences
