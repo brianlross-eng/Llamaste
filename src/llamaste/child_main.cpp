@@ -868,6 +868,12 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     // daemon child crashed after the parent exited, stderr was lost and we
     // couldn't diagnose the failure.  Now our fork() handles backgrounding,
     // and wpa_supplicant's stderr flows to our console/log.
+    //
+    // IMPORTANT: wpa_supplicant may be built with CONFIG_NO_STDOUT_DEBUG which
+    // sends all wpa_printf output to syslog (not stderr).  Since we have no
+    // syslog daemon, use -f to force output to a log file for diagnosis.
+    static const char* wpa_log = "/tmp/wpa_supplicant.log";
+
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "[child] Failed to fork wpa_supplicant: %s\n",
@@ -877,17 +883,26 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     if (pid == 0) {
         // New session so parent signals don't kill wpa_supplicant
         setsid();
-        // Keep stderr inherited — errors go to console for diagnosis.
         // Close stdin to avoid blocking on terminal input.
         int devnull = open("/dev/null", O_RDONLY);
         if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        // Use -dd for max debug + -f for log file (bypasses CONFIG_NO_STDOUT_DEBUG).
+        // Also redirect stderr to the log file so dynamic linker errors are captured.
+        int logfd = open(wpa_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+            close(logfd);
+        }
         execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+              "-dd",          // max debug verbosity
               "-i", iface.c_str(),
               "-c", conf,
               "-D", "nl80211,wext",
+              "-f", wpa_log,  // log to file (works even with CONFIG_NO_STDOUT_DEBUG)
               (char*)nullptr);
-        fprintf(stderr, "[child] execl wpa_supplicant failed: %s\n",
-                strerror(errno));
+        // If execl fails, write to the log file we opened above
+        dprintf(2, "execl wpa_supplicant failed: %s\n", strerror(errno));
         _exit(127);
     }
 
@@ -921,6 +936,25 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     } else {
         fprintf(stderr, "[child] ERROR: wpa_supplicant ctrl socket not found "
                 "at %s after 5s\n", sock_path.c_str());
+        // Dump the wpa_supplicant log file to console for diagnosis.
+        // This captures output even when CONFIG_NO_STDOUT_DEBUG routes
+        // wpa_printf to syslog (which we don't have).
+        FILE* lf = fopen(wpa_log, "r");
+        if (lf) {
+            fprintf(stderr, "[child] === wpa_supplicant log (%s) ===\n", wpa_log);
+            char lbuf[512];
+            int lines = 0;
+            while (fgets(lbuf, sizeof(lbuf), lf) && lines < 80) {
+                fprintf(stderr, "  %s", lbuf);
+                lines++;
+            }
+            if (lines == 0) fprintf(stderr, "  (empty log file)\n");
+            if (lines >= 80) fprintf(stderr, "  ... (truncated at 80 lines)\n");
+            fprintf(stderr, "[child] === end wpa_supplicant log ===\n");
+            fclose(lf);
+        } else {
+            fprintf(stderr, "[child] No log file at %s\n", wpa_log);
+        }
         // List what IS in /run/wpa_supplicant/ for diagnosis
         DIR* d = opendir("/run/wpa_supplicant");
         if (d) {
