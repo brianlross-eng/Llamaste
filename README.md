@@ -14,7 +14,7 @@ browser.
 
 ### Core
 
-- Single static C++ binary (~11,000 LOC) runs as PID 1 -- no init system, no shell, no BusyBox
+- Single C++ binary (~11,000 LOC) runs as PID 1 -- no init system, no shell, no BusyBox
 - CPU-only inference via llama.cpp with AVX2 SIMD (~14 tok/s on a 1.5B Q4_K_M model)
 - Qwen2.5-Instruct models auto-selected by available RAM (0.5B to 32B)
 - Boots in ~2 seconds on real hardware
