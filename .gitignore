@@ -67,3 +67,9 @@ vm/*.vdi
 
 # Miscellaneous generated / downloaded media
 Meshy_AI_*.png
+*.jpg
+*.jpeg
+
+# Scratch notes and analysis files (not part of the project)
+Copilots analisys.txt
+D?Llamastevm-info.txt

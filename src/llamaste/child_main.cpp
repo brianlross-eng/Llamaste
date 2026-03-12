@@ -65,6 +65,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/utsname.h>
 #endif
 
 #ifdef HAVE_LIBCURL
@@ -3522,6 +3523,208 @@ int child_main(const SupervisorConfig& config) {
             res.set_content(g_mcp->regenerate_api_key().dump(), "application/json");
         }
     ));
+
+    // --- Debug endpoints for remote diagnosis ---
+#ifndef _WIN32
+    // Helper: read last N lines from a file (tail-like)
+    auto tail_file = [](const std::string& path, int max_lines) -> std::string {
+        std::ifstream f(path, std::ios::ate);
+        if (!f.is_open()) return "(file not found: " + path + ")\n";
+        auto size = f.tellg();
+        if (size == 0) return "(empty file)\n";
+
+        // Scan backwards for newlines
+        int newlines = 0;
+        std::streamoff pos = size;
+        while (pos > 0 && newlines <= max_lines) {
+            f.seekg(--pos);
+            if (f.get() == '\n') newlines++;
+        }
+        if (pos > 0) f.seekg(pos + 1); // skip past the newline we stopped on
+        else f.seekg(0);
+
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        return ss.str();
+    };
+
+    // Helper: read entire file contents
+    auto read_file = [](const std::string& path) -> std::string {
+        std::ifstream f(path);
+        if (!f.is_open()) return "(file not found: " + path + ")\n";
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        return ss.str();
+    };
+
+    svr.Get("/debug/logs", require_auth([tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(tail_file("/tmp/llama-server.log", 200), "text/plain");
+    }));
+
+    svr.Get("/debug/wpa", require_auth([tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(tail_file("/tmp/wpa_supplicant.log", 200), "text/plain");
+    }));
+
+    svr.Get("/debug/dmesg", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string output;
+        int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            res.set_content("(cannot open /dev/kmsg)\n", "text/plain");
+            return;
+        }
+        char buf[4096];
+        // Read all available messages until EAGAIN
+        for (;;) {
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            if (n <= 0) break; // EAGAIN or error
+            buf[n] = '\0';
+            output.append(buf, n);
+            // Safety limit: ~1MB
+            if (output.size() > 1024 * 1024) break;
+        }
+        close(fd);
+        if (output.empty()) output = "(no kernel messages available)\n";
+        res.set_content(output, "text/plain");
+    }));
+
+    svr.Get("/debug/modules", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(read_file("/proc/modules"), "text/plain");
+    }));
+
+    svr.Get("/debug/network", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string output;
+
+        // Interfaces from /sys/class/net/
+        output += "=== Interfaces ===\n";
+        DIR* d = opendir("/sys/class/net");
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string iface = ent->d_name;
+                output += iface + ": ";
+                // Read operstate
+                std::ifstream state_f("/sys/class/net/" + iface + "/operstate");
+                if (state_f.is_open()) {
+                    std::string state;
+                    std::getline(state_f, state);
+                    output += "state=" + state;
+                }
+                // Read address
+                std::ifstream addr_f("/sys/class/net/" + iface + "/address");
+                if (addr_f.is_open()) {
+                    std::string addr;
+                    std::getline(addr_f, addr);
+                    output += " mac=" + addr;
+                }
+                output += "\n";
+            }
+            closedir(d);
+        }
+
+        output += "\n=== Routes (/proc/net/route) ===\n";
+        output += read_file("/proc/net/route");
+
+        output += "\n=== DNS (/etc/resolv.conf) ===\n";
+        output += read_file("/etc/resolv.conf");
+
+        res.set_content(output, "text/plain");
+    }));
+
+    svr.Get("/debug/sysinfo", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
+        json info;
+
+        // Hostname
+        char hostname[256] = {};
+        gethostname(hostname, sizeof(hostname));
+        info["hostname"] = hostname;
+
+        // Kernel version
+        struct utsname uts;
+        if (uname(&uts) == 0) {
+            info["kernel"] = uts.release;
+            info["arch"] = uts.machine;
+        }
+
+        // Boot mode
+        info["boot_mode"] = g_boot_mode;
+
+        // Uptime
+        std::ifstream uptime_f("/proc/uptime");
+        if (uptime_f.is_open()) {
+            double up_secs = 0;
+            uptime_f >> up_secs;
+            info["uptime_seconds"] = up_secs;
+            int h = (int)(up_secs / 3600);
+            int m = (int)((up_secs - h * 3600) / 60);
+            int s = (int)(up_secs) % 60;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%dh %dm %ds", h, m, s);
+            info["uptime_human"] = buf;
+        }
+
+        // CPU info (model name + count)
+        std::ifstream cpu_f("/proc/cpuinfo");
+        if (cpu_f.is_open()) {
+            std::string line;
+            int cpu_count = 0;
+            std::string model;
+            while (std::getline(cpu_f, line)) {
+                if (line.find("processor") == 0) cpu_count++;
+                if (model.empty() && line.find("model name") == 0) {
+                    auto colon = line.find(':');
+                    if (colon != std::string::npos)
+                        model = line.substr(colon + 2);
+                }
+            }
+            info["cpu_model"] = model;
+            info["cpu_count"] = cpu_count;
+        }
+
+        // Memory from /proc/meminfo
+        std::ifstream mem_f("/proc/meminfo");
+        if (mem_f.is_open()) {
+            json mem;
+            std::string line;
+            while (std::getline(mem_f, line)) {
+                if (line.find("MemTotal:") == 0 ||
+                    line.find("MemFree:") == 0 ||
+                    line.find("MemAvailable:") == 0 ||
+                    line.find("SwapTotal:") == 0 ||
+                    line.find("SwapFree:") == 0) {
+                    auto colon = line.find(':');
+                    if (colon != std::string::npos) {
+                        std::string key = line.substr(0, colon);
+                        std::string val = line.substr(colon + 1);
+                        // Trim leading whitespace
+                        auto start = val.find_first_not_of(" \t");
+                        if (start != std::string::npos) val = val.substr(start);
+                        mem[key] = val;
+                    }
+                }
+            }
+            info["memory"] = mem;
+        }
+
+        // Disk usage for /
+        struct statvfs st;
+        if (statvfs("/", &st) == 0) {
+            json disk;
+            uint64_t total = (uint64_t)st.f_blocks * st.f_frsize;
+            uint64_t avail = (uint64_t)st.f_bavail * st.f_frsize;
+            uint64_t used  = total - (uint64_t)st.f_bfree * st.f_frsize;
+            disk["total_mb"] = total / (1024 * 1024);
+            disk["used_mb"]  = used / (1024 * 1024);
+            disk["avail_mb"] = avail / (1024 * 1024);
+            info["disk_root"] = disk;
+        }
+
+        // Llamaste server uptime
+        info["server_uptime_seconds"] = (int)(time(nullptr) - g_start_time);
+
+        res.set_content(info.dump(2), "application/json");
+    }));
+#endif // _WIN32
 
     // --- Error handler ---
     // Only sets a default body for responses where the handler didn't set one.

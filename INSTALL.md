@@ -442,6 +442,17 @@ The root filesystem is **immutable** (compressed squashfs). The OS cannot be mod
 - After installing, **remove the ISO** from the virtual CD drive before rebooting.
 - Graphics controller: VMSVGA works best with Linux guests.
 
+### NVMe Installation Notes
+
+- NVMe devices appear as `/dev/nvme0n1` (not `/dev/sdX`). Partitions use the `p` suffix: `/dev/nvme0n1p1`, `/dev/nvme0n1p2`, etc.
+- The installer automatically detects NVMe drives alongside SATA and USB devices.
+- If the NVMe drive does not appear in the installer's disk list, check your BIOS settings:
+  - Ensure NVMe is not set to RAID mode (change to AHCI if needed).
+  - Some laptops require Secure Boot to be disabled.
+  - Intel RST (Rapid Storage Technology) must be disabled for direct NVMe access.
+- After installing to NVMe, remove the USB drive and ensure the BIOS boot order prioritizes the NVMe drive.
+- NVMe drives provide significantly faster boot times and model loading compared to SATA SSDs.
+
 ---
 
 ## Building from Source

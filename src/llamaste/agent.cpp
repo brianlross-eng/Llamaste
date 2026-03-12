@@ -363,6 +363,11 @@ std::string build_inference_request(
     auto tools_array = json::parse(tools_str, nullptr, false);
     if (!tools_array.is_discarded() && tools_array.is_array() && !tools_array.empty()) {
         request["tools"] = tools_array;
+
+        // Grammar-constrained output: force valid JSON from the model.
+        // llama-server converts this to a GBNF grammar automatically.
+        // This prevents malformed tool calls and improves reliability.
+        request["response_format"] = {{"type", "json_object"}};
     }
 
     return request.dump();
