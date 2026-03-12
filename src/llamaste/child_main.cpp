@@ -836,6 +836,38 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     // Ensure control directory exists
     mkdir("/run/wpa_supplicant", 0755);
 
+    // Pre-flight: verify binary exists and is executable
+    if (access("/usr/sbin/wpa_supplicant", X_OK) != 0) {
+        fprintf(stderr, "[child] ERROR: /usr/sbin/wpa_supplicant not found "
+                "or not executable: %s\n", strerror(errno));
+        return;
+    }
+
+    // Pre-flight: verify config file is readable and dump it for diagnostics
+    {
+        FILE* diag = fopen(conf, "r");
+        if (!diag) {
+            fprintf(stderr, "[child] ERROR: cannot read wpa.conf at %s: %s\n",
+                    conf, strerror(errno));
+            return;
+        }
+        fprintf(stderr, "[child] wpa.conf contents:\n");
+        char dline[256];
+        while (fgets(dline, sizeof(dline), diag)) {
+            // Mask PSK values in output
+            if (strncmp(dline, "    psk=", 8) == 0 || strncmp(dline, "\tpsk=", 5) == 0)
+                fprintf(stderr, "  psk=********\n");
+            else
+                fprintf(stderr, "  %s", dline);
+        }
+        fclose(diag);
+    }
+
+    // Run wpa_supplicant in foreground (NO -B flag).
+    // Previous approach used -B which causes an internal double-fork — if the
+    // daemon child crashed after the parent exited, stderr was lost and we
+    // couldn't diagnose the failure.  Now our fork() handles backgrounding,
+    // and wpa_supplicant's stderr flows to our console/log.
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "[child] Failed to fork wpa_supplicant: %s\n",
@@ -843,8 +875,13 @@ static void spawn_wpa_supplicant(const std::string& iface) {
         return;
     }
     if (pid == 0) {
+        // New session so parent signals don't kill wpa_supplicant
+        setsid();
+        // Keep stderr inherited — errors go to console for diagnosis.
+        // Close stdin to avoid blocking on terminal input.
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
         execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
-              "-B",           // background (daemonize)
               "-i", iface.c_str(),
               "-c", conf,
               "-D", "nl80211,wext",
@@ -853,52 +890,53 @@ static void spawn_wpa_supplicant(const std::string& iface) {
                 strerror(errno));
         _exit(127);
     }
-    // wpa_supplicant daemonizes (-B), so the forked child exits quickly after
-    // the daemon forks itself.  waitpid waits for the first child only.
-    int wstatus;
-    waitpid(pid, &wstatus, 0);
 
-    // Verify the daemon is actually running by polling for the ctrl socket.
-    // The daemon child may have silently crashed after the parent exited
-    // (e.g. driver init failure, regulatory issue).  With -B, stderr from the
-    // daemon goes nowhere, so check the socket as the source of truth.
+    // Parent: poll for ctrl socket.  wpa_supplicant creates it during init
+    // (before entering event loop), so it should appear within seconds.
+    fprintf(stderr, "[child] wpa_supplicant forked as PID %d on %s (foreground)\n",
+            pid, iface.c_str());
     std::string sock_path = "/run/wpa_supplicant/" + iface;
     bool daemon_ok = false;
-    for (int i = 0; i < 6; i++) {  // 3 seconds max
+    for (int i = 0; i < 10; i++) {  // 5 seconds max
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         struct stat sst;
         if (stat(sock_path.c_str(), &sst) == 0) { daemon_ok = true; break; }
+        // Check if child is still alive
+        int wstatus;
+        pid_t w = waitpid(pid, &wstatus, WNOHANG);
+        if (w == pid) {
+            // Child exited or was killed — something went wrong
+            if (WIFEXITED(wstatus))
+                fprintf(stderr, "[child] wpa_supplicant exited with code %d "
+                        "(check errors above)\n", WEXITSTATUS(wstatus));
+            else if (WIFSIGNALED(wstatus))
+                fprintf(stderr, "[child] wpa_supplicant killed by signal %d\n",
+                        WTERMSIG(wstatus));
+            break;
+        }
     }
     if (daemon_ok) {
-        fprintf(stderr, "[child] wpa_supplicant spawned on %s\n", iface.c_str());
+        fprintf(stderr, "[child] wpa_supplicant running (PID %d) on %s\n",
+                pid, iface.c_str());
     } else {
-        fprintf(stderr, "[child] WARNING: wpa_supplicant ctrl socket not found "
-                "at %s after 3s — daemon may have crashed\n", sock_path.c_str());
-        // Retry once in foreground to capture errors
-        pid_t retry = fork();
-        if (retry == 0) {
-            // Run without -B so errors go to stderr (which we capture)
-            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
-                  "-i", iface.c_str(),
-                  "-c", conf,
-                  "-D", "nl80211,wext",
-                  "-B",   // still daemonize, but after successful init
-                  (char*)nullptr);
-            fprintf(stderr, "[child] retry execl wpa_supplicant failed: %s\n",
-                    strerror(errno));
-            _exit(127);
-        } else if (retry > 0) {
-            waitpid(retry, &wstatus, 0);
-            // Check again
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-            struct stat sst;
-            if (stat(sock_path.c_str(), &sst) == 0) {
-                fprintf(stderr, "[child] wpa_supplicant spawned on %s (retry)\n",
-                        iface.c_str());
-            } else {
-                fprintf(stderr, "[child] ERROR: wpa_supplicant failed to start "
-                        "on %s after retry\n", iface.c_str());
+        fprintf(stderr, "[child] ERROR: wpa_supplicant ctrl socket not found "
+                "at %s after 5s\n", sock_path.c_str());
+        // List what IS in /run/wpa_supplicant/ for diagnosis
+        DIR* d = opendir("/run/wpa_supplicant");
+        if (d) {
+            struct dirent* ent;
+            fprintf(stderr, "[child] /run/wpa_supplicant/ contents:");
+            bool any = false;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                fprintf(stderr, " %s", ent->d_name);
+                any = true;
             }
+            if (!any) fprintf(stderr, " (empty)");
+            fprintf(stderr, "\n");
+            closedir(d);
+        } else {
+            fprintf(stderr, "[child] /run/wpa_supplicant/ does not exist!\n");
         }
     }
 }
