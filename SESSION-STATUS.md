@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-12 (WiFi CONNECTED on real hardware — CONFIG_PACKET=y fix — 3080038)
+**Last updated**: 2026-03-12 (debug endpoints + grammar JSON + README + LICENSE — 4e49c1d)
 
 ---
 
@@ -153,19 +153,34 @@ syslog daemon (PID 1 is the LLM), all messages vanished. The `-f` flag bypasses 
 
 ---
 
+## Latest Session (2026-03-12) — Four Immediate Items
+
+### Completed (4e49c1d)
+
+| Item | Approach | Details |
+|------|----------|---------|
+| NVMe install docs | INSTALL.md update | Added NVMe device naming, BIOS tips (AHCI, RST, Secure Boot) |
+| Remote access | HTTP debug endpoints | 6 auth-protected endpoints: `/debug/{logs,wpa,dmesg,modules,network,sysinfo}` |
+| Grammar-constrained JSON | `response_format` in agent.cpp | `json_object` type added when tools present — llama-server converts to GBNF |
+| Public GitHub repo | README + LICENSE + push | README.md, Apache 2.0 LICENSE, pushed to brianlross-eng/Llamaste |
+
+Design doc: `docs/plans/2026-03-12-four-items-design.md`
+
+---
+
 ## Next Steps
 
 ### Immediate
-1. **Install to NVMe** — Boot live → Install tab → stop wearing out flash drives
-2. **Remote access** — dropbear SSH or debug HTTP endpoint for easier diagnosis
-3. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
-4. **Public GitHub repo** — Clean up, write README, publish
+1. **Install to NVMe** — Boot live → Install tab → test on real hardware (code is ready)
+2. **Build + deploy** — Rebuild with debug endpoints + grammar JSON, create new ISO
+3. **Test debug endpoints** — Verify `/debug/*` routes work on VDI or real hardware
 
 ### Backlog
 - Desktop mode WiFi connect test
 - Voice quality tuning
 - Real two-VM mDNS test on LAN
 - Model auto-download on cluster formation (test on real hardware)
+- Dropbear SSH (requires adding a shell binary — deferred)
 
 ---
 
