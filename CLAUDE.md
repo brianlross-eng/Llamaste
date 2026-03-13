@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: ✅ WiFi CONNECTED on real hardware (3080038). 8 issues fixed (signed regdb, CONFIG_PACKET, spawn-on-demand, etc). 62 tools, 13 suites.
+- **Phase**: ✅ WiFi CONNECTED + PXE boot nearly working (571fe87). USB ethernet found, static IP deployed, awaiting squashfs download test. 62 tools, 13 suites.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -149,6 +149,14 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **CONFIG_PACKET=y required for wpa_supplicant**: AF_PACKET sockets needed for EAPOL (802.1X auth frames). Without it, `socket(PF_PACKET)` returns EAFNOSUPPORT → wpa_supplicant exits 255 immediately. This was the hidden final blocker for WiFi connection.
 - **wpa_supplicant CONFIG_NO_STDOUT_DEBUG**: Buildroot compiles wpa_supplicant with this flag, routing all `wpa_printf()` to syslog. Since Llamaste has no syslog daemon, errors vanish silently (exit 255, zero output). Fix: use `-dd -f /tmp/wpa_supplicant.log` to capture debug output to file. Also redirect child stdout/stderr to the log file for dynamic linker errors.
 - **wpa_supplicant -B causes silent death**: The `-B` flag triggers an internal double-fork. If the daemon child crashes after the parent exits, stderr is lost. Fix: DON'T use `-B`. Run wpa_supplicant in foreground in our forked child. Use `setsid()` for signal isolation. Poll ctrl socket + `waitpid(WNOHANG)` to detect early crashes.
+- **PXE boot: iPXE `sanboot` doesn't work for Linux**: Creates virtual CD-ROM at EFI firmware level; GRUB can see it but Linux kernel cannot (no `/dev/sr0`). Use iPXE `kernel` + embedded initramfs instead.
+- **PXE boot: iPXE EFI `initrd` unreliable**: EFI_LOAD_FILE2_PROTOCOL doesn't reliably deliver initrd to Linux kernel. Solution: embed initramfs in bzImage via `CONFIG_INITRAMFS_SOURCE`.
+- **PXE boot: busybox udhcpc needs default.script**: Without `/usr/share/udhcpc/default.script`, udhcpc gets DHCP lease, returns 0 (success), but never applies IP to interface. Workaround: use static IP in init script.
+- **PXE boot: USB ethernet drivers must be =y (built-in)**: Modules (=m) are not available in initramfs before squashfs pivot. All USB ethernet CONFIG must be built-in for PXE.
+- **PXE boot: `sit0` virtual interface**: Appears in `/sys/class/net/` but is IPv6 tunnel (no physical device). Filter by requiring `/sys/class/net/$name/device` symlink.
+- **PXE boot: RTL8153B firmware in initramfs**: Without firmware, r8152 driver waits ~10s for firmware timeout before creating eth0. Include `rtl_nic/rtl8153*.fw` in initramfs directory.
+- **PXE boot: SSH key location**: Use `D:\Llamaste\vm\pxe_key`, NOT `/tmp/pxe_key` (cleared between sessions).
+- **root=LABEL=LLAMASTE**: Device-agnostic root mounting — works on USB, CD-ROM, and PXE sanboot. Replaces hardcoded `/dev/sdb`.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
