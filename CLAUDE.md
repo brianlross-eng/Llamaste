@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: ✅ WiFi CONNECTED + PXE boot nearly working (571fe87). USB ethernet found, static IP deployed, awaiting squashfs download test. 62 tools, 13 suites.
+- **Phase**: ✅ WiFi CONNECTED + PXE boot VERIFIED in VirtualBox (2-VM test). Full chain: PXELINUX → bzImage → initramfs → squashfs download → Llamaste server RUNNING. 62 tools, 13 suites.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -156,6 +156,10 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **PXE boot: `sit0` virtual interface**: Appears in `/sys/class/net/` but is IPv6 tunnel (no physical device). Filter by requiring `/sys/class/net/$name/device` symlink.
 - **PXE boot: RTL8153B firmware in initramfs**: Without firmware, r8152 driver waits ~10s for firmware timeout before creating eth0. Include `rtl_nic/rtl8153*.fw` in initramfs directory.
 - **PXE boot: SSH key location**: Use `D:\Llamaste\vm\pxe_key`, NOT `/tmp/pxe_key` (cleared between sessions).
+- **VirtualBox iPXE has NO HTTP support**: VBox's built-in iPXE (`Features: DNS TFTP PXE PXEXT`) cannot download files via HTTP. iPXE script `kernel http://...` silently fails. Use PXELINUX (syslinux) instead for BIOS PXE boot.
+- **VirtualBox iPXE doesn't execute scripts**: boot.ipxe downloaded via TFTP is treated as `[PXE-NBP]` (binary), not `[SCRIPT]`. The `#!ipxe` magic header is ignored. PXELINUX solves this.
+- **PXELINUX for VBox PXE boot**: `apk add syslinux`, copy `pxelinux.0` + `ldlinux.c32` to TFTP root, create `pxelinux.cfg/default` with `KERNEL bzImage`. Set `dhcp-boot=pxelinux.0` in dnsmasq.
+- **Alpine live ISO loopback has no IP**: On Alpine live ISO, the `lo` interface is UP but has no `127.0.0.1` address. All TCP connections to localhost hang. Fix: `ifconfig lo 127.0.0.1 netmask 255.0.0.0 up` before starting any servers.
 - **root=LABEL=LLAMASTE**: Device-agnostic root mounting — works on USB, CD-ROM, and PXE sanboot. Replaces hardcoded `/dev/sdb`.
 
 ## Known Bugs
