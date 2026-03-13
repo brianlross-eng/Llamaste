@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-12 (install button fix + desktop auto-launch + GRUB simplification — 95c1979)
+**Last updated**: 2026-03-13 (PXE server + USB ethernet + DNS fix + dashboard network card — 4ef4fb9)
 
 ---
 
@@ -96,7 +96,77 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-12) -- WiFi Connection Finally Working
+## Latest Session (2026-03-13) -- USB Ethernet, DNS, Dashboard, PXE Boot Server
+
+### USB Ethernet Dongle Support (47255f2 - 1b269df)
+
+Added wired ethernet auto-DHCP for USB dongles. Scans /sys/class/net, filters by
+ARPHRD_ETHER type (skips SIT tunnels), brings interface UP via ioctl, waits for
+carrier, spawns dhcpcd. Fixed 4 bugs during hardware testing:
+
+| Issue | Root Cause | Fix | Commit |
+|-------|-----------|-----|--------|
+| sit0 tunnel false positive | Type 776 picked up as ethernet | Check `/sys/class/net/<iface>/type` == 1 | 57b0bcf |
+| RTL8153B firmware missing | Not in overlay | Copied from linux-firmware-20240115 | 57b0bcf |
+| phylink module failed | CONFIG_PHYLINK not set | Added CONFIG_PHYLINK=m + module load | 57b0bcf |
+| cdc_mbim module failed | CONFIG_USB_WDM not set | Added CONFIG_USB_WDM=m + module load | 57b0bcf |
+
+### DNS Resolution Fix (f626579)
+
+resolv.conf always empty because dhcpcd hooks (shell scripts) require /bin/sh
+which doesn't exist (BR2_SYSTEM_BIN_SH_NONE=y). Fixed by writing DNS directly
+from C++: parses /proc/net/route for gateway IP, writes gateway + 8.8.8.8 + 1.1.1.1.
+
+### Dashboard Network Card (1b269df)
+
+Status endpoint now returns `networks` JSON array with all UP interfaces (name, type,
+IP, state). Dashboard renders them dynamically with WiFi/wired icons.
+
+### PXE Boot Server (4ef4fb9) -- NO MORE USB FLASHING
+
+Set up Alpine Linux VM as PXE server on isolated 10.0.50.0/24 ethernet segment:
+
+| Component | Details |
+|-----------|---------|
+| VM | DHCP-Server (Alpine 3.21, 2GB RAM, bridged + NAT) |
+| DHCP | dnsmasq on eth0 (10.0.50.1), range .100-.200 |
+| TFTP | Custom-built iPXE EFI binary (ipxe.efi) + autoexec.ipxe |
+| HTTP | lighttpd serving llamaste.iso on port 80 |
+| SSH | Port 2222 NAT, key auth (/tmp/pxe_key) |
+| Boot flow | UEFI PXE -> DHCP -> ipxe.efi (TFTP) -> autoexec.ipxe -> sanboot ISO (HTTP) |
+
+Key gotchas discovered:
+- VirtualBox bridged adapter needs **promiscuous mode = allow-all** for DHCP broadcasts
+- Test laptop PXE is **UEFI (Arch:00007)**, not BIOS — needs ipxe.efi not undionly.kpxe
+- iPXE embedded scripts don't work reliably — use `autoexec.ipxe` via TFTP instead
+- Custom iPXE must be built on Alpine (`apk add make gcc musl-dev perl xz-dev`)
+
+Deploy new ISO: `scp -i /tmp/pxe_key -P 2222 llamaste.iso root@127.0.0.1:/data/http/`
+
+### Commits This Session
+
+| Commit | Description |
+|--------|-------------|
+| 47255f2 | feat: USB ethernet dongle support + wired auto-DHCP |
+| 57b0bcf | fix: USB ethernet refinements — sit0 filter, RTL8153B firmware, phylink |
+| f626579 | fix: write DNS resolv.conf directly (dhcpcd hooks need /bin/sh) |
+| 1b269df | feat: dashboard network card shows all interfaces with IPs |
+| 4ef4fb9 | feat: add PXE boot server and deploy script |
+
+---
+
+## Confirmed Working on Real Hardware
+
+- ✅ USB Ethernet dongle (RTL8153B r8152 driver) — auto-DHCP, gigabit
+- ✅ Dual-homed: WiFi (172.30.2.x) + Ethernet (10.0.50.x) simultaneously
+- ✅ PXE boot over USB ethernet — UEFI iPXE sanboot of ISO over HTTP
+- ✅ DNS resolution (gateway + Google + Cloudflare fallback)
+- ✅ Dashboard shows all network interfaces with IPs
+- ✅ Debug endpoints accessible via Bearer token over ethernet
+
+---
+
+## Previous Session (2026-03-12) -- WiFi Connection Finally Working
 
 ### The 8-Issue WiFi Debugging Journey
 
