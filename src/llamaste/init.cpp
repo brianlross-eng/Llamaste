@@ -862,12 +862,12 @@ bool do_live_pivot(char** argv) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// init_load_modules — load WiFi kernel modules after squashfs pivot
+// init_load_modules — load network kernel modules after squashfs pivot
 //
-// With CONFIG_MODULES=y, WiFi vendor drivers are built as .ko modules instead
-// of being compiled into bzImage. This means they load AFTER the squashfs pivot,
-// when /lib/firmware/ is available — so firmware loading just works for any
-// supported WiFi chip without needing CONFIG_EXTRA_FIRMWARE.
+// With CONFIG_MODULES=y, WiFi vendor drivers and USB ethernet drivers are built
+// as .ko modules instead of being compiled into bzImage. This means they load
+// AFTER the squashfs pivot, when /lib/firmware/ is available — so firmware
+// loading just works for any supported chip without CONFIG_EXTRA_FIRMWARE.
 //
 // We use the finit_module() syscall directly (no modprobe/kmod needed).
 // Modules are loaded in dependency order by scanning /lib/modules/<ver>/kernel/
@@ -976,6 +976,29 @@ void init_load_modules() {
         "drivers/net/wireless/ralink/rt2x00/rt2x00usb.ko",
         "drivers/net/wireless/ralink/rt2x00/rt2800lib.ko",
         "drivers/net/wireless/ralink/rt2x00/rt2800usb.ko",
+        //
+        // === USB Ethernet adapters (dongles) ===
+        // Base USB networking framework
+        "drivers/net/mii.ko",
+        "drivers/net/usb/usbnet.ko",
+        "drivers/net/usb/cdc_ether.ko",
+        "drivers/net/usb/cdc_ncm.ko",
+        "drivers/net/usb/cdc_mbim.ko",
+        "drivers/net/usb/rndis_host.ko",
+        "drivers/net/usb/cdc_subset.ko",
+        // Realtek USB ethernet (RTL8152/RTL8153/RTL8156 — most common dongles)
+        "drivers/net/usb/r8152.ko",
+        // ASIX USB ethernet (AX88179, AX88178A, AX88772)
+        "drivers/net/usb/asix.ko",
+        "drivers/net/usb/ax88179_178a.ko",
+        // Microchip/SMSC USB ethernet
+        "drivers/net/usb/smsc75xx.ko",
+        "drivers/net/usb/smsc95xx.ko",
+        // Other USB ethernet chipsets (cheap dongles)
+        "drivers/net/usb/sr9700.ko",
+        "drivers/net/usb/sr9800.ko",
+        "drivers/net/usb/ch9200.ko",
+        "drivers/net/usb/aqc111.ko",
         //
         nullptr
     };

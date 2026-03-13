@@ -65,6 +65,9 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
 #endif
 
@@ -2281,6 +2284,103 @@ int child_main(const SupervisorConfig& config) {
         }
     }
     } // end outer wifi block
+
+    // --- Wired ethernet auto-DHCP ---
+    // Scan for non-WiFi, non-loopback interfaces with carrier (cable plugged in)
+    // and run dhcpcd on them.  This enables connectivity over ethernet dongles,
+    // built-in NICs, etc. without manual configuration.
+    {
+        fprintf(stderr, "[net] Scanning for wired ethernet interfaces...\n");
+        DIR* nd = opendir("/sys/class/net");
+        if (nd) {
+            struct dirent* ne;
+            while ((ne = readdir(nd))) {
+                if (ne->d_name[0] == '.') continue;
+                const std::string ifname = ne->d_name;
+                // Skip loopback and WiFi interfaces
+                if (ifname == "lo") continue;
+                char wpath[256];
+                snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/phy80211", ifname.c_str());
+                if (access(wpath, F_OK) == 0) {
+                    fprintf(stderr, "[net] %s: WiFi interface, skipping\n", ifname.c_str());
+                    continue;
+                }
+
+                fprintf(stderr, "[net] %s: found wired interface\n", ifname.c_str());
+
+                // Bring interface UP first (carrier can only be read when UP)
+                // Can't use system() — no /bin/sh. Use ioctl directly.
+                int sock = socket(AF_INET, SOCK_DGRAM, 0);
+                if (sock < 0) {
+                    fprintf(stderr, "[net] %s: socket() failed: %m\n", ifname.c_str());
+                    continue;
+                }
+                struct ifreq ifr = {};
+                strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+                    if (!(ifr.ifr_flags & IFF_UP)) {
+                        ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+                        if (ioctl(sock, SIOCSIFFLAGS, &ifr) == 0) {
+                            fprintf(stderr, "[net] %s: brought UP\n", ifname.c_str());
+                        } else {
+                            fprintf(stderr, "[net] %s: SIOCSIFFLAGS UP failed: %m\n", ifname.c_str());
+                        }
+                    }
+                }
+                close(sock);
+
+                // Wait for carrier detection after UP (USB ethernet needs ~1s)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+                // Check carrier (cable plugged in)
+                char cpath[256];
+                snprintf(cpath, sizeof(cpath), "/sys/class/net/%s/carrier", ifname.c_str());
+                FILE* cf = fopen(cpath, "r");
+                if (!cf) {
+                    fprintf(stderr, "[net] %s: cannot read carrier: %m\n", ifname.c_str());
+                    continue;
+                }
+                int carrier = 0;
+                fscanf(cf, "%d", &carrier);
+                fclose(cf);
+                if (carrier != 1) {
+                    fprintf(stderr, "[net] %s: no carrier (cable not plugged in)\n", ifname.c_str());
+                    continue;
+                }
+
+                fprintf(stderr, "[net] %s: carrier detected, spawning dhcpcd\n", ifname.c_str());
+                spawn_dhcpcd(ifname);
+
+                // Wait up to 10s for DHCP lease
+                for (int w = 0; w < 20; w++) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                    if (sk >= 0) {
+                        struct ifreq ifr2 = {};
+                        strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                        if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
+                            auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
+                            char ip[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                            if (strcmp(ip, "0.0.0.0") != 0) {
+                                fprintf(stderr, "[net] %s: DHCP lease obtained: %s (took %dms)\n",
+                                        ifname.c_str(), ip, (w + 1) * 500);
+                                close(sk);
+                                break;
+                            }
+                        }
+                        close(sk);
+                    }
+                    if (w == 19) {
+                        fprintf(stderr, "[net] %s: no DHCP lease after 10s\n", ifname.c_str());
+                    }
+                }
+            }
+            closedir(nd);
+        } else {
+            fprintf(stderr, "[net] cannot open /sys/class/net: %m\n");
+        }
+    }
 #endif
 
     // Start session expiry thread (runs every 60 seconds)
