@@ -2297,8 +2297,30 @@ int child_main(const SupervisorConfig& config) {
             while ((ne = readdir(nd))) {
                 if (ne->d_name[0] == '.') continue;
                 const std::string ifname = ne->d_name;
-                // Skip loopback and WiFi interfaces
+                // Skip loopback, WiFi, and tunnel/virtual interfaces
                 if (ifname == "lo") continue;
+                // Skip known tunnel/virtual interfaces (sit0 = IPv6-in-IPv4,
+                // tunl0 = IPIP, ip6tnl0 = IPv6 tunnel, gre0 = GRE)
+                if (ifname == "sit0" || ifname == "tunl0" ||
+                    ifname == "ip6tnl0" || ifname == "gre0" ||
+                    ifname == "ip_vti0" || ifname == "ip6_vti0") {
+                    continue;
+                }
+                // Skip any interface with type != 1 (ARPHRD_ETHER)
+                // This filters out tunnels (776/SIT, 768/IPIP), loopback (772), etc.
+                char tpath[256];
+                snprintf(tpath, sizeof(tpath), "/sys/class/net/%s/type", ifname.c_str());
+                FILE* tf = fopen(tpath, "r");
+                if (tf) {
+                    int iftype = 0;
+                    fscanf(tf, "%d", &iftype);
+                    fclose(tf);
+                    if (iftype != 1) { // 1 = ARPHRD_ETHER (real ethernet)
+                        fprintf(stderr, "[net] %s: not ethernet (type=%d), skipping\n",
+                                ifname.c_str(), iftype);
+                        continue;
+                    }
+                }
                 char wpath[256];
                 snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/phy80211", ifname.c_str());
                 if (access(wpath, F_OK) == 0) {

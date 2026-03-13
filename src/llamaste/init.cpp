@@ -978,6 +978,9 @@ void init_load_modules() {
         "drivers/net/wireless/ralink/rt2x00/rt2800usb.ko",
         //
         // === USB Ethernet adapters (dongles) ===
+        // Dependencies (must load before drivers that need them)
+        "drivers/net/phy/phylink.ko",          // needed by asix
+        "drivers/usb/class/cdc-wdm.ko",       // needed by cdc_mbim
         // Base USB networking framework
         "drivers/net/mii.ko",
         "drivers/net/usb/usbnet.ko",
