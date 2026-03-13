@@ -171,9 +171,10 @@ boot_qemu_iso() {
     require_cmd qemu-system-x86_64
     require_file "$iso" "ISO image"
 
-    local drive_args="-cdrom ${iso}"
+    # Build drive args as an array to preserve proper quoting
+    local -a drive_args=(-cdrom "${iso}")
     if [ -n "$target_disk" ]; then
-        drive_args="${drive_args} -drive file=${target_disk},format=raw,if=virtio"
+        drive_args+=(-drive "file=${target_disk},format=raw,if=virtio")
     fi
 
     # Direct kernel boot bypasses GRUB (saves 10s timeout) and avoids the
@@ -181,12 +182,11 @@ boot_qemu_iso() {
     # The initramfs /init script handles root=/dev/sr0 in its PATH A branch.
     if [ -n "$kernel" ] && [ -f "$kernel" ]; then
         info "Starting QEMU (ISO + direct kernel boot, port ${port})..."
-        # shellcheck disable=SC2086
         qemu-system-x86_64 \
             -m "${QEMU_MEM}" -smp "${QEMU_SMP}" \
             -kernel "${kernel}" \
             -append "root=/dev/sr0 rootfstype=iso9660 ro console=ttyS0 init=/opt/llamaste/llamaste llamaste.mode=live rootwait ip=dhcp" \
-            ${drive_args} \
+            "${drive_args[@]}" \
             -netdev user,id=net0,hostfwd=tcp::${port}-:80 \
             -device virtio-net-pci,netdev=net0 \
             -nographic \
@@ -194,10 +194,9 @@ boot_qemu_iso() {
             &>"${log}" &
     else
         info "Starting QEMU (ISO boot via GRUB, port ${port})..."
-        # shellcheck disable=SC2086
         qemu-system-x86_64 \
             -m "${QEMU_MEM}" -smp "${QEMU_SMP}" \
-            ${drive_args} \
+            "${drive_args[@]}" \
             -netdev user,id=net0,hostfwd=tcp::${port}-:80 \
             -device virtio-net-pci,netdev=net0 \
             -nographic \
