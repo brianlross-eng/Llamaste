@@ -1124,6 +1124,64 @@ static json gather_system_info(const SupervisorConfig& config) {
     // IP address - use MdnsResponder's cross-platform IP detection
     info["ip"] = MdnsResponder::get_local_ip();
 
+    // Network interfaces — enumerate all UP interfaces with their IPs
+#ifndef _WIN32
+    {
+        json nets = json::array();
+        DIR* nd = opendir("/sys/class/net");
+        if (nd) {
+            struct dirent* ne;
+            while ((ne = readdir(nd))) {
+                if (ne->d_name[0] == '.') continue;
+                std::string ifname = ne->d_name;
+                if (ifname == "lo") continue;
+
+                // Read operstate
+                std::string state = "unknown";
+                std::ifstream sf("/sys/class/net/" + ifname + "/operstate");
+                if (sf.is_open()) std::getline(sf, state);
+                if (state != "up" && state != "unknown") continue; // skip down interfaces
+
+                // Determine type: WiFi vs wired vs other
+                std::string iftype = "wired";
+                if (access(("/sys/class/net/" + ifname + "/phy80211").c_str(), F_OK) == 0)
+                    iftype = "wifi";
+                // Check sysfs type for tunnel filtering
+                std::ifstream tf("/sys/class/net/" + ifname + "/type");
+                if (tf.is_open()) {
+                    int t = 0;
+                    tf >> t;
+                    if (t != 1) continue; // skip non-ethernet (tunnels, etc.)
+                }
+
+                // Get IP address via ioctl
+                std::string ip_str = "--";
+                int sock = socket(AF_INET, SOCK_DGRAM, 0);
+                if (sock >= 0) {
+                    struct ifreq ifr = {};
+                    strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                    if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
+                        auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
+                        char ipbuf[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &sa->sin_addr, ipbuf, sizeof(ipbuf));
+                        ip_str = ipbuf;
+                    }
+                    close(sock);
+                }
+
+                json iface;
+                iface["name"] = ifname;
+                iface["type"] = iftype;
+                iface["ip"] = ip_str;
+                iface["state"] = state;
+                nets.push_back(iface);
+            }
+            closedir(nd);
+        }
+        info["networks"] = nets;
+    }
+#endif
+
     // CPU percent - read from /proc/stat
     double cpu_pct = 0.0;
 #ifndef _WIN32

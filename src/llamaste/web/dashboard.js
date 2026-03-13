@@ -25,7 +25,6 @@
   var dashCpuCores = document.getElementById('dash-cpu-cores');
   var dashGpu = document.getElementById('dash-gpu');
   var dashAvx2 = document.getElementById('dash-avx2');
-  var dashIp = document.getElementById('dash-ip');
   var dashMode = document.getElementById('dash-mode');
   var dashUptime = document.getElementById('dash-uptime');
   var dashModel = document.getElementById('dash-model');
@@ -99,7 +98,8 @@
         dashCpuCores.textContent = '--';
         dashGpu.textContent = '--';
         dashAvx2.textContent = '--';
-        dashIp.textContent = '--';
+        var nc = document.getElementById('dash-networks');
+        if (nc) nc.innerHTML = '<div class="dash-row"><span class="label">IP</span><span class="value">--</span></div>';
         dashMode.textContent = '--';
         dashUptime.textContent = '--';
         dashModel.textContent = '--';
@@ -168,7 +168,27 @@
     dashAvx2.textContent = data.has_avx2 ? 'Yes' : (data.has_avx2 === false ? 'No' : '--');
 
     // --- Dashboard tab: Network card ---
-    dashIp.textContent = data.ip || '--';
+    var netContainer = document.getElementById('dash-networks');
+    if (netContainer) {
+      var nets = data.networks || [];
+      if (nets.length > 0) {
+        var html = '';
+        for (var i = 0; i < nets.length; i++) {
+          var n = nets[i];
+          var icon = n.type === 'wifi' ? '📶' : '🔌';
+          var label = n.name + ' (' + n.type + ')';
+          html += '<div class="dash-row">' +
+            '<span class="label">' + icon + ' ' + label + '</span>' +
+            '<span class="value">' + (n.ip || '--') + '</span>' +
+            '</div>';
+        }
+        netContainer.innerHTML = html;
+      } else {
+        netContainer.innerHTML = '<div class="dash-row">' +
+          '<span class="label">IP</span>' +
+          '<span class="value">' + (data.ip || '--') + '</span></div>';
+      }
+    }
     dashMode.textContent = data.mode || '--';
     dashUptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
 
