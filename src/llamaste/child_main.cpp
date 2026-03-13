@@ -1727,6 +1727,10 @@ int child_main(const SupervisorConfig& config) {
     register_cluster_tools(g_tools, g_cluster);
     register_update_tools(g_tools);
     register_wifi_tools(g_tools, g_wifi);
+#ifdef LLAMASTE_TEST_API
+    register_debug_tools(g_tools);
+    fprintf(stderr, "[child] DEBUG tools registered (test build)\n");
+#endif
     fprintf(stderr, "[child] Registered %d tools\n", g_tools.count());
 
     // Detect hardware

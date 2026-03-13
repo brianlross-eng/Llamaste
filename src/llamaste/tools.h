@@ -70,5 +70,9 @@ void register_auth_tools(ToolRegistry& reg, AuthManager& auth);
 class WiFiManager;
 void register_wifi_tools(ToolRegistry& reg, WiFiManager& wifi);
 
+#ifdef LLAMASTE_TEST_API
+void register_debug_tools(ToolRegistry& reg);
+#endif
+
 // Convenience: register all tool categories at once.
 void register_all_tools(ToolRegistry& reg);
