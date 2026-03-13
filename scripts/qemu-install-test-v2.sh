@@ -39,11 +39,12 @@ create_raw_disk "$TARGET" 4G
 # 2. Boot ISO with target disk attached
 PORT=$(find_free_port)
 info "Using port ${PORT} for ISO boot"
-ISO_PID=$(boot_qemu_iso "$PORT" "$LOG_ISO" "$ISO" "$TARGET")
+boot_qemu_iso "$PORT" "$LOG_ISO" "$ISO" "$TARGET" "$KERNEL"
+ISO_PID="${BOOT_PID}"
 info "ISO QEMU started (PID ${ISO_PID})"
 
 # 3. Wait for health
-if ! wait_for_health "$PORT" 90 "$ISO_PID"; then
+if ! wait_for_health "$PORT" 180 "$ISO_PID"; then
     fail "ISO boot: health endpoint never responded"
     cat "$LOG_ISO" | tail -30
     summary
@@ -53,15 +54,25 @@ pass "ISO boot: system healthy"
 
 # 4. Detect disks
 info "Detecting install target disks..."
+DISKS_STATUS=$(http_status "http://localhost:${PORT}/install/disks")
+if [ "$DISKS_STATUS" = "404" ]; then
+    fail "install/disks endpoint not found (404) — installer not enabled (live ISO detection failed?)"
+    summary
+    exit 1
+fi
+
 DISKS_JSON=$(http_get "http://localhost:${PORT}/install/disks")
-assert_json_exists "install/disks returns data" "$DISKS_JSON" ".disks"
+
+# /install/disks returns a bare JSON array (not {disks:[...]})
+DISK_COUNT=$(echo "$DISKS_JSON" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo "0")
+if [ "$DISK_COUNT" -gt 0 ]; then
+    pass "install/disks returned ${DISK_COUNT} disk(s)"
+else
+    fail "install/disks returned no disks (HTTP ${DISKS_STATUS}): ${DISKS_JSON}"
+fi
 
 # Extract the target device name (virtio disk = /dev/vda)
-TARGET_DEV=$(echo "$DISKS_JSON" | jq -r '.disks[0].device // empty' 2>/dev/null)
-if [ -z "$TARGET_DEV" ]; then
-    # Fallback: try .devices array or default to /dev/vda
-    TARGET_DEV=$(echo "$DISKS_JSON" | jq -r '.devices[0].path // .devices[0].device // empty' 2>/dev/null)
-fi
+TARGET_DEV=$(echo "$DISKS_JSON" | jq -r '.[0].device // empty' 2>/dev/null)
 if [ -z "$TARGET_DEV" ]; then
     TARGET_DEV="/dev/vda"
     info "No device found in JSON, defaulting to ${TARGET_DEV}"
@@ -126,11 +137,12 @@ info "=== Phase 2: Boot from installed disk ==="
 
 PORT2=$(find_free_port)
 info "Using port ${PORT2} for installed disk boot"
-DISK_PID=$(boot_qemu "$PORT2" "$LOG_DISK" "$TARGET" "$KERNEL")
+boot_qemu "$PORT2" "$LOG_DISK" "$TARGET" "$KERNEL"
+DISK_PID="${BOOT_PID}"
 info "Disk QEMU started (PID ${DISK_PID})"
 
 # 2. Wait for health
-if ! wait_for_health "$PORT2" 90 "$DISK_PID"; then
+if ! wait_for_health "$PORT2" 120 "$DISK_PID"; then
     fail "Installed disk boot: health endpoint never responded"
     tail -30 "$LOG_DISK"
     summary
@@ -143,7 +155,7 @@ HEALTH_JSON=$(http_get "http://localhost:${PORT2}/health")
 assert_json_field "health status=ok" "$HEALTH_JSON" ".status" "ok"
 
 # 4. Check active slot
-UPDATE_JSON=$(http_get "http://localhost:${PORT2}/update/status")
+UPDATE_JSON=$(http_get "http://localhost:${PORT2}/llamaste/update/status")
 assert_json_field "update/status active_slot=A" "$UPDATE_JSON" ".active_slot" "A"
 
 # 5. Check system info

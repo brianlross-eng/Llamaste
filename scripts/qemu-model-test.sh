@@ -59,14 +59,15 @@ QEMU_SMP="2"
 export QEMU_MEM QEMU_SMP
 
 LOG="/tmp/qemu-model-test-$$.log"
-QEMU_PID=$(boot_qemu "$PORT" "$LOG" "$DISK")
-wait_for_health "$PORT" 90 "$QEMU_PID"
+boot_qemu "$PORT" "$LOG" "$DISK"
+QEMU_PID="${BOOT_PID}"
+wait_for_health "$PORT" 120 "$QEMU_PID"
 
 BASE="http://localhost:${PORT}"
 
 # ===== Test 1: GET /model/list =====
 info "Test 1: GET /model/list"
-MODEL_LIST=$(http_get "${BASE}/model/list")
+MODEL_LIST=$(http_get "${BASE}/llamaste/model/list")
 if [ -n "$MODEL_LIST" ] && echo "$MODEL_LIST" | jq -e '.' >/dev/null 2>&1; then
     pass "/model/list responds with valid JSON"
 else
@@ -75,7 +76,7 @@ fi
 
 # ===== Test 2: GET /model/recommended =====
 info "Test 2: GET /model/recommended"
-RECOMMENDED=$(http_get "${BASE}/model/recommended")
+RECOMMENDED=$(http_get "${BASE}/llamaste/model/recommended")
 if [ -z "$RECOMMENDED" ] || ! echo "$RECOMMENDED" | jq -e '.' >/dev/null 2>&1; then
     fail "/model/recommended did not return valid JSON"
 else
@@ -121,7 +122,7 @@ fi
 
 # ===== Test 4: GET /model/current =====
 info "Test 4: GET /model/current"
-CURRENT=$(http_get "${BASE}/model/current")
+CURRENT=$(http_get "${BASE}/llamaste/model/current")
 if [ -n "$CURRENT" ] && echo "$CURRENT" | jq -e '.' >/dev/null 2>&1; then
     pass "/model/current responds with valid JSON"
 else
@@ -130,9 +131,9 @@ fi
 
 # ===== Test 5: GET /model/usb/scan =====
 info "Test 5: GET /model/usb/scan"
-USB_STATUS=$(http_status "${BASE}/model/usb/scan")
+USB_STATUS=$(http_status "${BASE}/llamaste/model/usb/scan")
 if [ "$USB_STATUS" = "200" ]; then
-    USB_SCAN=$(http_get "${BASE}/model/usb/scan")
+    USB_SCAN=$(http_get "${BASE}/llamaste/model/usb/scan")
     if echo "$USB_SCAN" | jq -e '.' >/dev/null 2>&1; then
         pass "/model/usb/scan responds with valid JSON"
     else
@@ -154,7 +155,7 @@ else
     info "Triggering download of ${MODEL_FILENAME} from ${MODEL_REPO}..."
     DL_BODY=$(jq -n --arg repo "$MODEL_REPO" --arg file "$MODEL_FILENAME" \
         '{repo_id: $repo, filename: $file}')
-    DL_RESP=$(http_post "${BASE}/model/download" "$DL_BODY")
+    DL_RESP=$(http_post "${BASE}/llamaste/model/download" "$DL_BODY")
 
     if [ -n "$DL_RESP" ] && echo "$DL_RESP" | jq -e '.' >/dev/null 2>&1; then
         pass "POST /model/download accepted"
@@ -174,7 +175,7 @@ else
             break
         fi
 
-        LIST_NOW=$(http_get "${BASE}/model/list")
+        LIST_NOW=$(http_get "${BASE}/llamaste/model/list")
         COUNT=0
         if [ -n "$LIST_NOW" ] && echo "$LIST_NOW" | jq -e '.' >/dev/null 2>&1; then
             # Handle both array and object with array field

@@ -64,6 +64,15 @@ TEST_SCRIPTS[update]="${SCRIPT_DIR}/qemu-update-test.sh"
 TEST_SCRIPTS[recovery]="${SCRIPT_DIR}/qemu-recovery-test.sh"
 TEST_SCRIPTS[model]="${SCRIPT_DIR}/qemu-model-test.sh"
 
+# Dedicated port ranges per test to avoid WSL2/SLIRP port reuse issues.
+# Each test gets a 20-port window so TIME_WAIT from previous tests never collides.
+declare -A TEST_PORT_BASE
+TEST_PORT_BASE[install]=9090
+TEST_PORT_BASE[cluster]=9110
+TEST_PORT_BASE[update]=9130
+TEST_PORT_BASE[recovery]=9150
+TEST_PORT_BASE[model]=9170
+
 # --- Results tracking ---
 declare -A results
 num_passed=0
@@ -122,11 +131,23 @@ for name in "${TEST_NAMES[@]}"; do
     echo -e "${BOLD}--- Running: ${name} ---${NC}"
     echo ""
 
+    # Ensure no QEMU processes are running from previous tests
+    pkill -f qemu-system-x86_64 2>/dev/null || true
+    sleep 2
+
+    # Assign a dedicated port range for this test to avoid TIME_WAIT collisions
+    export QEMU_PORT_BASE="${TEST_PORT_BASE[$name]}"
+    echo "  Port range: ${QEMU_PORT_BASE}-$((QEMU_PORT_BASE + 19))"
+
     # Run the test script; capture exit code
     set +e
     bash "$script"
     rc=$?
     set -e
+
+    # Kill any leftover QEMU processes
+    pkill -f qemu-system-x86_64 2>/dev/null || true
+    sleep 1
 
     if [ $rc -eq 0 ]; then
         results[$name]="PASS"
@@ -137,6 +158,9 @@ for name in "${TEST_NAMES[@]}"; do
     fi
 
     echo ""
+
+    # Wait for QEMU ports to fully release and processes to clean up
+    sleep 10
 done
 
 # --- Summary table ---

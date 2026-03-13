@@ -29,7 +29,8 @@ copy_disk "$IMAGE" "$TEST_DISK"
 PORT=$(find_free_port)
 info "Using port ${PORT}"
 
-QEMU_PID=$(boot_qemu "$PORT" "$LOG" "$TEST_DISK")
+boot_qemu "$PORT" "$LOG" "$TEST_DISK"
+QEMU_PID="${BOOT_PID}"
 info "QEMU started (PID ${QEMU_PID})"
 
 wait_for_health "$PORT" "$TIMEOUT" "$QEMU_PID"
@@ -38,7 +39,7 @@ BASE="http://localhost:${PORT}"
 
 # ===== Test 1: GET /update/status =====
 info "Test 1: GET /update/status"
-STATUS=$(http_get "${BASE}/update/status")
+STATUS=$(http_get "${BASE}/llamaste/update/status")
 if [ -z "$STATUS" ]; then
     fail "update/status returned empty response"
 else
@@ -62,14 +63,14 @@ fi
 
 # ===== Test 3: GET /update/check =====
 info "Test 3: GET /update/check"
-CHECK=$(http_get "${BASE}/update/check")
+CHECK=$(http_get "${BASE}/llamaste/update/check")
 if [ -z "$CHECK" ]; then
     skip "update/check returned empty (no network in QEMU)"
 else
     # Either we get current_version or an error -- both are valid responses
-    HAS_VERSION=$(echo "$CHECK" | jq -e '.current_version // .version' 2>/dev/null)
-    HAS_ERROR=$(echo "$CHECK" | jq -e '.error' 2>/dev/null)
-    if [ $? -eq 0 ] || [ -n "$HAS_VERSION" ]; then
+    HAS_VERSION=$(echo "$CHECK" | jq -e '.current_version // .version' 2>/dev/null) || true
+    HAS_ERROR=$(echo "$CHECK" | jq -e '.error' 2>/dev/null) || true
+    if [ -n "$HAS_VERSION" ] || [ -n "$HAS_ERROR" ]; then
         pass "update/check responded with data"
     else
         skip "update/check returned unexpected response (no internet in QEMU is expected)"
@@ -78,13 +79,13 @@ fi
 
 # ===== Test 4: POST /update/rollback =====
 info "Test 4: POST /update/rollback"
-ROLLBACK=$(http_post "${BASE}/update/rollback" '{}')
+ROLLBACK=$(http_post "${BASE}/llamaste/update/rollback" '{}')
 if [ -z "$ROLLBACK" ]; then
     fail "update/rollback returned empty response"
 else
     # Rollback should respond with success, error, or message -- any structured response is valid
-    HAS_CONTENT=$(echo "$ROLLBACK" | jq -e 'type' 2>/dev/null)
-    if [ $? -eq 0 ]; then
+    HAS_CONTENT=$(echo "$ROLLBACK" | jq -e 'type' 2>/dev/null) || true
+    if [ -n "$HAS_CONTENT" ]; then
         pass "update/rollback returned valid JSON"
     else
         fail "update/rollback returned invalid JSON: ${ROLLBACK}"
@@ -93,7 +94,7 @@ fi
 
 # ===== Test 5: Post-rollback status =====
 info "Test 5: POST-rollback GET /update/status"
-POST_STATUS=$(http_get "${BASE}/update/status")
+POST_STATUS=$(http_get "${BASE}/llamaste/update/status")
 if [ -z "$POST_STATUS" ]; then
     fail "post-rollback status returned empty response"
 else
@@ -102,7 +103,7 @@ fi
 
 # ===== Test 6: POST /update/install with invalid path =====
 info "Test 6: POST /update/install with invalid path"
-INSTALL_ERR=$(http_post "${BASE}/update/install" '{"path":"/nonexistent/update.file"}')
+INSTALL_ERR=$(http_post "${BASE}/llamaste/update/install" '{"path":"/nonexistent/update.file"}')
 if [ -z "$INSTALL_ERR" ]; then
     fail "update/install returned empty response"
 else

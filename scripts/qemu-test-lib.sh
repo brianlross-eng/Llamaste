@@ -24,7 +24,7 @@ IMAGES_DIR="${IMAGES_DIR:-$HOME/llamaste-build/output/images}"
 IMAGE="${IMAGE:-${IMAGES_DIR}/llamaste.img}"
 KERNEL="${KERNEL:-${IMAGES_DIR}/bzImage}"
 ISO="${ISO:-${IMAGES_DIR}/llamaste.iso}"
-TIMEOUT="${TIMEOUT:-60}"
+TIMEOUT="${TIMEOUT:-180}"
 QEMU_MEM="${QEMU_MEM:-4G}"
 QEMU_SMP="${QEMU_SMP:-4}"
 
@@ -42,6 +42,7 @@ _skipped=0
 
 # --- QEMU PID tracking ---
 declare -a _qemu_pids=()
+BOOT_PID=""
 
 # ===== Logging =====
 
@@ -84,17 +85,24 @@ require_file() {
 
 # ===== Port Management =====
 
+# QEMU_PORT_BASE can be set per-test to avoid port reuse across sequential tests.
+# Each test gets its own range (e.g., 9100, 9120, 9140) so TIME_WAIT ports from
+# previous tests never collide with the current test.
+QEMU_PORT_BASE="${QEMU_PORT_BASE:-9090}"
+
 find_free_port() {
-    local port=9090
-    while [ "$port" -lt 9200 ]; do
-        if ! ss -tlnp 2>/dev/null | grep -q ":${port} " && \
-           ! netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
+    local port="${QEMU_PORT_BASE}"
+    local max=$((port + 20))
+    while [ "$port" -lt "$max" ]; do
+        # Check ALL TCP states (not just LISTEN) to avoid TIME_WAIT conflicts
+        if ! ss -tanp 2>/dev/null | grep -q ":${port} " && \
+           ! netstat -tanp 2>/dev/null | grep -q ":${port} "; then
             echo "$port"
             return 0
         fi
         ((port++))
     done
-    echo "ERROR: no free port found in range 9090-9199" >&2
+    echo "ERROR: no free port found in range ${QEMU_PORT_BASE}-$((max-1))" >&2
     return 1
 }
 
@@ -138,6 +146,7 @@ boot_qemu() {
 
     local pid=$!
     _qemu_pids+=("$pid")
+    BOOT_PID="$pid"
 
     # Verify QEMU started
     sleep 1
@@ -147,7 +156,9 @@ boot_qemu() {
         return 1
     fi
 
-    echo "$pid"
+    # NOTE: Do NOT echo $pid here. Callers that use $(boot_qemu ...) create
+    # a subshell; when that subshell exits, SIGHUP kills QEMU. Instead,
+    # callers should read BOOT_PID or _qemu_pids[-1] after calling boot_qemu.
 }
 
 boot_qemu_iso() {
@@ -155,6 +166,7 @@ boot_qemu_iso() {
     local log="${2:-/tmp/qemu-iso-test-$$.log}"
     local iso="${3:-${ISO}}"
     local target_disk="${4:-}"
+    local kernel="${5:-}"
 
     require_cmd qemu-system-x86_64
     require_file "$iso" "ISO image"
@@ -164,19 +176,38 @@ boot_qemu_iso() {
         drive_args="${drive_args} -drive file=${target_disk},format=raw,if=virtio"
     fi
 
-    info "Starting QEMU (ISO boot, port ${port})..."
-    # shellcheck disable=SC2086
-    qemu-system-x86_64 \
-        -m "${QEMU_MEM}" -smp "${QEMU_SMP}" \
-        ${drive_args} \
-        -netdev user,id=net0,hostfwd=tcp::${port}-:80 \
-        -device virtio-net-pci,netdev=net0 \
-        -nographic \
-        -no-reboot \
-        &>"${log}" &
+    # Direct kernel boot bypasses GRUB (saves 10s timeout) and avoids the
+    # LABEL= root resolution issue when the embedded PXE initramfs is present.
+    # The initramfs /init script handles root=/dev/sr0 in its PATH A branch.
+    if [ -n "$kernel" ] && [ -f "$kernel" ]; then
+        info "Starting QEMU (ISO + direct kernel boot, port ${port})..."
+        # shellcheck disable=SC2086
+        qemu-system-x86_64 \
+            -m "${QEMU_MEM}" -smp "${QEMU_SMP}" \
+            -kernel "${kernel}" \
+            -append "root=/dev/sr0 rootfstype=iso9660 ro console=ttyS0 init=/opt/llamaste/llamaste llamaste.mode=live rootwait ip=dhcp" \
+            ${drive_args} \
+            -netdev user,id=net0,hostfwd=tcp::${port}-:80 \
+            -device virtio-net-pci,netdev=net0 \
+            -nographic \
+            -no-reboot \
+            &>"${log}" &
+    else
+        info "Starting QEMU (ISO boot via GRUB, port ${port})..."
+        # shellcheck disable=SC2086
+        qemu-system-x86_64 \
+            -m "${QEMU_MEM}" -smp "${QEMU_SMP}" \
+            ${drive_args} \
+            -netdev user,id=net0,hostfwd=tcp::${port}-:80 \
+            -device virtio-net-pci,netdev=net0 \
+            -nographic \
+            -no-reboot \
+            &>"${log}" &
+    fi
 
     local pid=$!
     _qemu_pids+=("$pid")
+    BOOT_PID="$pid"
 
     sleep 1
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -185,7 +216,7 @@ boot_qemu_iso() {
         return 1
     fi
 
-    echo "$pid"
+    # NOTE: Do NOT echo $pid here — see boot_qemu comment above.
 }
 
 # ===== Health Polling =====
@@ -263,8 +294,8 @@ assert_json_exists() {
     local field="$3"
 
     local val
-    val=$(echo "$json" | jq -e "$field" 2>/dev/null)
-    if [ $? -eq 0 ] && [ "$val" != "null" ]; then
+    val=$(echo "$json" | jq -e "$field" 2>/dev/null) || true
+    if [ -n "$val" ] && [ "$val" != "null" ]; then
         pass "$label"
     else
         fail "${label}: field '${field}' missing or null"

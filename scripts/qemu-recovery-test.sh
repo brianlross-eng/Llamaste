@@ -48,10 +48,10 @@ copy_disk "$IMAGE" "$DISK"
 PORT=$(find_free_port)
 LOG="/tmp/qemu-recovery-$$.log"
 
-QEMU_MEM="1G"
-QEMU_SMP="2"
-QEMU_PID=$(boot_qemu "$PORT" "$LOG" "$DISK")
-wait_for_health "$PORT" "$TIMEOUT" "$QEMU_PID"
+# Use default 4G RAM — 2G is too slow under QEMU emulation without KVM
+boot_qemu "$PORT" "$LOG" "$DISK"
+QEMU_PID="${BOOT_PID}"
+wait_for_health "$PORT" 180 "$QEMU_PID"
 
 BASE="http://localhost:${PORT}"
 TOOL_URL="${BASE}/llamaste/tool"
@@ -66,7 +66,9 @@ KILL_RESP=$(http_post "$TOOL_URL" '{"name":"debug.kill_child"}')
 echo "  debug.kill_child response: $KILL_RESP"
 
 # Check if the tool is unknown (image not built with LLAMASTE_TEST_API)
-if echo "$KILL_RESP" | grep -qi "not found\|unknown\|No tool\|no matching tool"; then
+# "unknown tool" or "no matching tool" = tool not registered (no LLAMASTE_TEST_API)
+# "process not found" = tool works but no llama-server running (expected without model)
+if echo "$KILL_RESP" | grep -qi "unknown tool\|no matching tool\|No tool named"; then
     skip "debug.kill_child not available (image not built with LLAMASTE_TEST_API)"
     skip "Kill child and verify recovery (test API unavailable)"
     skip "System functional after recovery (test API unavailable)"
@@ -84,9 +86,9 @@ info ""
 info "--- Test 2: Kill child and verify recovery ---"
 
 # Check if kill actually succeeded (llama-server might not be running if no model)
-KILLED=$(echo "$KILL_RESP" | jq -r '.killed // .result.killed // empty' 2>/dev/null)
+KILLED=$(echo "$KILL_RESP" | jq -r '.killed // .result.killed // empty' 2>/dev/null) || true
 
-if echo "$KILL_RESP" | grep -qi "not found\|no.*running\|no.*child\|no.*process"; then
+if echo "$KILL_RESP" | grep -qi "process not found\|no.*running\|no.*child"; then
     skip "No child process running (no model loaded?) -- skipping recovery tests"
     skip "System functional after recovery (no child to kill)"
     skip "Rapid kills / backoff (no child to kill)"
