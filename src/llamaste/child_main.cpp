@@ -2260,10 +2260,10 @@ int child_main(const SupervisorConfig& config) {
 
                 // Log DNS resolver state
                 {
+                    bool found_ns = false;
                     FILE* rc = fopen("/etc/resolv.conf", "r");
                     if (rc) {
                         char line[256];
-                        bool found_ns = false;
                         while (fgets(line, sizeof(line), rc)) {
                             if (strncmp(line, "nameserver", 10) == 0) {
                                 // Trim newline
@@ -2278,6 +2278,46 @@ int child_main(const SupervisorConfig& config) {
                             fprintf(stderr, "[wifi] WARNING: no nameservers in /etc/resolv.conf\n");
                     } else {
                         fprintf(stderr, "[wifi] WARNING: /etc/resolv.conf not found\n");
+                    }
+
+                    // dhcpcd uses shell hook scripts to write resolv.conf,
+                    // but we have no /bin/sh (BR2_SYSTEM_BIN_SH_NONE=y).
+                    // Write DNS servers directly if resolv.conf is empty.
+                    if (!found_ns) {
+                        fprintf(stderr, "[wifi] Writing fallback DNS (dhcpcd hooks need /bin/sh)\n");
+                        // Try to use the gateway as DNS first (most routers proxy DNS)
+                        // Fall back to Google/Cloudflare public DNS
+                        FILE* dns = fopen("/etc/resolv.conf", "w");
+                        if (dns) {
+                            // Read gateway from /proc/net/route for the WiFi interface
+                            FILE* rt = fopen("/proc/net/route", "r");
+                            char gw_ip[INET_ADDRSTRLEN] = {};
+                            if (rt) {
+                                char rtline[256];
+                                while (fgets(rtline, sizeof(rtline), rt)) {
+                                    char iface[32];
+                                    unsigned long dest, gateway;
+                                    if (sscanf(rtline, "%31s %lx %lx", iface, &dest, &gateway) == 3) {
+                                        if (dest == 0 && gateway != 0 &&
+                                            strcmp(iface, wifi_iface.c_str()) == 0) {
+                                            struct in_addr gw_addr;
+                                            gw_addr.s_addr = (uint32_t)gateway;
+                                            inet_ntop(AF_INET, &gw_addr, gw_ip, sizeof(gw_ip));
+                                            break;
+                                        }
+                                    }
+                                }
+                                fclose(rt);
+                            }
+                            if (gw_ip[0]) {
+                                fprintf(dns, "nameserver %s\n", gw_ip);
+                                fprintf(stderr, "[wifi] DNS: using gateway %s\n", gw_ip);
+                            }
+                            fprintf(dns, "nameserver 8.8.8.8\n");
+                            fprintf(dns, "nameserver 1.1.1.1\n");
+                            fclose(dns);
+                            fprintf(stderr, "[wifi] DNS: wrote /etc/resolv.conf\n");
+                        }
                     }
                 }
             }
