@@ -3246,13 +3246,28 @@ int child_main(const SupervisorConfig& config) {
             return;
         }
 
-        // Step 2: Start download
-        json dl_args;
-        dl_args["repo_id"] = rec.value("repo_id", "");
-        dl_args["filename"] = rec.value("filename", "");
-        std::string dl_result = g_tools.dispatch("model.download", dl_args.dump());
+        // Step 2: Start async download (returns immediately)
+        bool started = start_async_download(
+            rec.value("repo_id", ""),
+            rec.value("filename", ""),
+            rec.value("model_name", ""));
 
-        res.set_content(dl_result, "application/json");
+        json out;
+        if (started) {
+            out["status"] = "started";
+            out["model_name"] = rec.value("model_name", "");
+            out["message"] = "Download started. Poll /llamaste/model/download/progress for status.";
+        } else {
+            out["status"] = "busy";
+            out["message"] = "A download is already in progress.";
+        }
+        res.set_content(out.dump(2), "application/json");
+    }));
+
+    // GET /llamaste/model/download/progress — Poll async download progress
+    svr.Get("/llamaste/model/download/progress", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(get_download_progress(), "application/json");
     }));
 
     svr.Get("/llamaste/model/recommended", require_auth(

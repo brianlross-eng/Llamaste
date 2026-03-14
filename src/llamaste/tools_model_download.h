@@ -24,3 +24,12 @@ const ModelInfo* recommend_model(int available_mb);
 // Build the direct download URL for a HuggingFace GGUF file.
 std::string build_hf_download_url(const std::string& repo_id,
                                    const std::string& filename);
+
+// Start an async model download (returns immediately).
+// Returns true if started, false if a download is already running.
+bool start_async_download(const std::string& repo_id,
+                          const std::string& filename,
+                          const std::string& model_name);
+
+// Get current download progress as JSON string.
+std::string get_download_progress();

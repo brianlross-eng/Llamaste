@@ -34,7 +34,36 @@ static int statvfs(const char*, struct { uint64_t f_bavail; uint64_t f_frsize; }
 #include <curl/curl.h>
 #endif
 
+#include <thread>
+#include <mutex>
+#include <atomic>
+
 using json = nlohmann::json;
+
+// =========================================================================
+// Global download state — enables async download with progress polling
+// =========================================================================
+
+struct GlobalDownloadState {
+    std::mutex mu;
+    std::atomic<bool> active{false};
+    std::atomic<bool> finished{false};
+
+    // Progress fields (updated from curl callback)
+    std::atomic<uint64_t> current_file_downloaded{0};
+    std::atomic<uint64_t> current_file_total{0};
+    std::atomic<int> current_shard{0};
+    std::atomic<int> total_shards{0};
+    std::atomic<uint64_t> completed_bytes{0};  // sum of finished shards
+
+    // Result
+    std::string model_name;
+    std::string filename;
+    std::string result_json;  // final result when finished
+    std::string error;
+};
+
+static GlobalDownloadState g_dl;
 
 // =========================================================================
 // Model table (shared with child_main.cpp auto-upgrade — single source of truth)
@@ -390,6 +419,9 @@ static int curl_progress_cb(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
     auto* prog = (DownloadProgress*)clientp;
     prog->total_bytes = (uint64_t)dltotal;
     prog->downloaded_bytes = (uint64_t)dlnow;
+    // Also update global state for the progress API
+    g_dl.current_file_downloaded.store((uint64_t)dlnow, std::memory_order_relaxed);
+    g_dl.current_file_total.store((uint64_t)dltotal, std::memory_order_relaxed);
     return 0;  // 0 = continue, non-zero = abort
 }
 #endif
@@ -796,6 +828,126 @@ static std::string handle_model_usb_import(const std::string& args_json) {
     (void)args_json;
     return R"json({"error":"USB import not available on this platform"})json";
 #endif
+}
+
+// =========================================================================
+// Async download API (for web UI progress polling)
+// =========================================================================
+
+std::string get_download_progress() {
+    json out;
+    out["active"] = g_dl.active.load();
+    out["finished"] = g_dl.finished.load();
+    out["current_shard"] = g_dl.current_shard.load();
+    out["total_shards"] = g_dl.total_shards.load();
+    out["current_file_bytes"] = g_dl.current_file_downloaded.load();
+    out["current_file_total"] = g_dl.current_file_total.load();
+    out["completed_bytes"] = g_dl.completed_bytes.load();
+
+    uint64_t total_dl = g_dl.completed_bytes.load() + g_dl.current_file_downloaded.load();
+    out["total_downloaded_bytes"] = total_dl;
+    out["total_downloaded_human"] = format_bytes(total_dl);
+
+    {
+        std::lock_guard<std::mutex> lk(g_dl.mu);
+        out["model_name"] = g_dl.model_name;
+        out["filename"] = g_dl.filename;
+        if (g_dl.finished.load()) {
+            out["result"] = json::parse(g_dl.result_json, nullptr, false);
+        }
+        if (!g_dl.error.empty()) {
+            out["error"] = g_dl.error;
+        }
+    }
+    return out.dump(2);
+}
+
+bool start_async_download(const std::string& repo_id,
+                          const std::string& filename,
+                          const std::string& model_name) {
+    if (g_dl.active.load()) return false;  // already running
+
+    // Reset state
+    g_dl.active.store(true);
+    g_dl.finished.store(false);
+    g_dl.current_file_downloaded.store(0);
+    g_dl.current_file_total.store(0);
+    g_dl.current_shard.store(0);
+    g_dl.total_shards.store(0);
+    g_dl.completed_bytes.store(0);
+    {
+        std::lock_guard<std::mutex> lk(g_dl.mu);
+        g_dl.model_name = model_name;
+        g_dl.filename = filename;
+        g_dl.result_json.clear();
+        g_dl.error.clear();
+    }
+
+    // Parse shard info to set total_shards
+    ShardInfo shard = parse_shard_filename(filename);
+    g_dl.total_shards.store(shard.total_shards > 1 ? shard.total_shards : 1);
+
+    // Launch background thread
+    std::thread([repo_id, filename, shard]() {
+#ifdef HAVE_LIBCURL
+        mkdir("/data/models", 0755);
+
+        if (shard.total_shards > 1) {
+            uint64_t total_bytes = 0;
+            for (int i = 1; i <= shard.total_shards; i++) {
+                g_dl.current_shard.store(i);
+                g_dl.current_file_downloaded.store(0);
+                g_dl.current_file_total.store(0);
+
+                std::string shard_name = build_shard_filename(shard.base, i, shard.total_shards);
+                fprintf(stderr, "[download-async] Shard %d/%d: %s\n",
+                        i, shard.total_shards, shard_name.c_str());
+
+                std::string result = download_single_file(repo_id, shard_name);
+                json r = json::parse(result, nullptr, false);
+
+                if (r.value("status", "") == "error") {
+                    std::lock_guard<std::mutex> lk(g_dl.mu);
+                    g_dl.result_json = result;
+                    g_dl.error = r.value("error", "download failed");
+                    g_dl.finished.store(true);
+                    g_dl.active.store(false);
+                    return;
+                }
+
+                uint64_t shard_size = r.value("size_bytes", (uint64_t)0);
+                total_bytes += shard_size;
+                g_dl.completed_bytes.store(total_bytes);
+            }
+
+            json out;
+            out["status"] = "success";
+            out["shards"] = shard.total_shards;
+            out["total_size_bytes"] = total_bytes;
+            out["total_size_human"] = format_bytes(total_bytes);
+            out["message"] = "All shards downloaded. Restart to load model.";
+            std::lock_guard<std::mutex> lk(g_dl.mu);
+            g_dl.result_json = out.dump(2);
+        } else {
+            g_dl.current_shard.store(1);
+            g_dl.total_shards.store(1);
+            std::string result = download_single_file(repo_id, filename);
+            std::lock_guard<std::mutex> lk(g_dl.mu);
+            g_dl.result_json = result;
+        }
+#else
+        json out;
+        out["status"] = "error";
+        out["error"] = "libcurl not available";
+        std::lock_guard<std::mutex> lk(g_dl.mu);
+        g_dl.result_json = out.dump(2);
+        g_dl.error = "libcurl not available";
+#endif
+        g_dl.finished.store(true);
+        g_dl.active.store(false);
+    }).detach();
+
+    return true;
 }
 
 // =========================================================================

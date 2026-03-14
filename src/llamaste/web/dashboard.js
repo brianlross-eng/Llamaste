@@ -298,26 +298,75 @@
       });
     }
 
-    // Download recommended model
+    // Format bytes to human-readable
+    function fmtBytes(b) {
+      if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+      if (b >= 1048576) return (b / 1048576).toFixed(0) + ' MB';
+      return (b / 1024).toFixed(0) + ' KB';
+    }
+
+    // Poll download progress
+    var dlPollTimer = null;
+    function pollDownloadProgress() {
+      fetch('/llamaste/model/download/progress', { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(p) {
+          if (p.finished) {
+            clearInterval(dlPollTimer);
+            dlPollTimer = null;
+            var r = p.result || {};
+            if (r.status === 'success' || r.status === 'already_exists') {
+              dlBtn.textContent = 'Downloaded!';
+              setStatus('Model downloaded. Reboot to load.');
+              refreshModelList();
+            } else {
+              dlBtn.textContent = 'Download Failed';
+              setStatus('Error: ' + (p.error || r.error || 'unknown'));
+              setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
+            }
+            return;
+          }
+          if (!p.active) {
+            clearInterval(dlPollTimer);
+            dlPollTimer = null;
+            dlBtn.disabled = false;
+            dlBtn.textContent = 'Download';
+            return;
+          }
+          // Show progress
+          var shardText = p.total_shards > 1
+            ? ' (shard ' + p.current_shard + '/' + p.total_shards + ')'
+            : '';
+          var pct = p.current_file_total > 0
+            ? Math.round(p.current_file_bytes / p.current_file_total * 100)
+            : 0;
+          dlBtn.textContent = 'Downloading ' + pct + '%' + shardText;
+          setStatus('Downloaded ' + fmtBytes(p.total_downloaded_bytes) + shardText);
+        })
+        .catch(function() {});
+    }
+
+    // Download recommended model (async — returns immediately, poll for progress)
     dlBtn.addEventListener('click', function() {
       dlBtn.disabled = true;
-      dlBtn.textContent = 'Downloading...';
-      setStatus('Download in progress (may take several minutes)...');
+      dlBtn.textContent = 'Starting download...';
+      setStatus('Requesting download...');
 
       fetch('/llamaste/model/download-recommended', { method: 'POST', credentials: 'include' })
         .then(function(r) { return r.json(); })
         .then(function(result) {
-          if (result.status === 'success' || result.status === 'already_exists') {
-            dlBtn.textContent = 'Downloaded!';
-            setStatus('Model downloaded. Select it and reboot to load.');
+          if (result.status === 'started' || result.status === 'busy') {
+            // Start polling for progress
+            if (!dlPollTimer) dlPollTimer = setInterval(pollDownloadProgress, 2000);
+            pollDownloadProgress();
+          } else if (result.status === 'already_exists') {
+            dlBtn.textContent = 'Already Downloaded';
+            setStatus('Model already downloaded. Reboot to load.');
             refreshModelList();
           } else {
             dlBtn.textContent = 'Download Failed';
             setStatus('Error: ' + (result.error || 'unknown'));
-            setTimeout(function() {
-              dlBtn.disabled = false;
-              dlBtn.textContent = 'Retry Download';
-            }, 5000);
+            setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
           }
         })
         .catch(function(err) {
@@ -326,6 +375,17 @@
           setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
         });
     });
+
+    // Check for in-progress download on page load
+    fetch('/llamaste/model/download/progress', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(p) {
+        if (p.active) {
+          dlBtn.disabled = true;
+          if (!dlPollTimer) dlPollTimer = setInterval(pollDownloadProgress, 2000);
+          pollDownloadProgress();
+        }
+      }).catch(function() {});
 
     // Select model
     selBtn.addEventListener('click', function() {
