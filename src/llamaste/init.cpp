@@ -423,29 +423,36 @@ void init_mount_filesystems() {
 bool init_mount_data() {
 #ifndef _WIN32
     const char* candidates[] = {
-        "/dev/vda5", "/dev/sda5", "/dev/nvme0n1p5",
-        "/dev/vda4", "/dev/sda4", "/dev/nvme0n1p4",
+        "/dev/vda5", "/dev/sda5", "/dev/sdb5", "/dev/nvme0n1p5",
+        "/dev/vda4", "/dev/sda4", "/dev/sdb4", "/dev/nvme0n1p4",
         nullptr
     };
 
     mkdir("/data", 0755);
+    rlog("[init] mount_data: scanning for DATA partition...\n");
     for (int i = 0; candidates[i]; i++) {
         struct stat st;
         if (stat(candidates[i], &st) == 0) {
+            rlog("[init] mount_data: found %s (mode=0%o)\n", candidates[i], st.st_mode);
             // Try to grow GPT partition before mounting
             grow_gpt_partition(candidates[i]);
 
             if (mount(candidates[i], "/data", "ext4", 0, nullptr) == 0) {
-                fprintf(stderr, "[init] Mounted %s on /data\n", candidates[i]);
+                rlog("[init] Mounted %s on /data\n", candidates[i]);
 
                 // Grow ext4 filesystem to fill partition
                 grow_ext4_online(candidates[i]);
 
                 return true;
+            } else {
+                rlog("[init] mount_data: mount %s failed: %m\n", candidates[i]);
             }
+        } else {
+            rlog("[init] mount_data: %s not found\n", candidates[i]);
         }
     }
 
+    rlog("[init] WARNING: No data partition found, using tmpfs /data (1G)\n");
     fprintf(stderr, "[init] WARNING: No data partition, using tmpfs\n");
     try_mount("tmpfs", "/data", "tmpfs", 0, "size=1G");
 #endif
