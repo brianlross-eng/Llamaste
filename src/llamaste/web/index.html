@@ -177,21 +177,29 @@
               <span class="label">Speed</span>
               <span class="value" id="dash-speed">-- tok/s</span>
             </div>
-            <div id="model-picker" style="margin-top:8px">
-              <select id="model-select" style="width:100%;padding:6px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee;margin-bottom:6px">
-                <option value="">Loading models...</option>
-              </select>
-              <div style="display:flex;gap:6px;margin-bottom:6px">
-                <select id="model-download-tier" style="flex:1;padding:6px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee">
-                  <option value="">Loading...</option>
-                </select>
-                <button id="dash-download-btn" class="btn btn-primary" style="flex:1">Download</button>
+            <div id="model-picker" class="model-picker">
+              <div class="model-picker-section">
+                <label class="model-picker-label">Load Model</label>
+                <div class="model-picker-row">
+                  <select id="model-select" class="model-picker-select">
+                    <option value="">Loading models...</option>
+                  </select>
+                </div>
+                <div class="model-picker-row">
+                  <button id="model-select-btn" class="model-picker-btn" disabled>Load Selected</button>
+                  <button id="model-usb-btn" class="model-picker-btn secondary">Scan USB</button>
+                </div>
               </div>
-              <div style="display:flex;gap:6px">
-                <button id="model-select-btn" class="btn" style="flex:1;background:#555;color:#eee;border:none;padding:6px;border-radius:4px;cursor:pointer" disabled>Load Selected</button>
-                <button id="model-usb-btn" class="btn" style="flex:1;background:#444;color:#ccc;border:none;padding:6px;border-radius:4px;cursor:pointer">Scan USB</button>
+              <div class="model-picker-section">
+                <label class="model-picker-label">Download New Model</label>
+                <div class="model-picker-row">
+                  <select id="model-download-tier" class="model-picker-select">
+                    <option value="">Loading...</option>
+                  </select>
+                  <button id="dash-download-btn" class="model-picker-btn accent">Download</button>
+                </div>
               </div>
-              <div id="model-status" style="margin-top:4px;font-size:0.85em;color:#aaa"></div>
+              <div id="model-status" class="model-picker-status"></div>
             </div>
           </div>
         </div>
