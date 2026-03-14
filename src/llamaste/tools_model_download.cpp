@@ -253,9 +253,23 @@ static std::string handle_model_recommended(const std::string& /*args_json*/) {
         result["approx_download_mb"] = rec->approx_size_mb;
         result["download_url"] = build_hf_download_url(rec->repo_id, rec->filename);
 
-        // Check if already downloaded
-        std::string path = std::string("/data/models/") + rec->filename;
-        result["already_downloaded"] = (access(path.c_str(), R_OK) == 0);
+        // Check if already downloaded (for sharded models, all shards must exist)
+        ShardInfo si = parse_shard_filename(rec->filename);
+        bool all_downloaded = true;
+        if (si.total_shards > 1) {
+            for (int i = 1; i <= si.total_shards; i++) {
+                std::string sn = build_shard_filename(si.base, i, si.total_shards);
+                std::string sp = std::string("/data/models/") + sn;
+                if (access(sp.c_str(), R_OK) != 0) {
+                    all_downloaded = false;
+                    break;
+                }
+            }
+        } else {
+            std::string path = std::string("/data/models/") + rec->filename;
+            all_downloaded = (access(path.c_str(), R_OK) == 0);
+        }
+        result["already_downloaded"] = all_downloaded;
     } else {
         result["recommended"] = false;
         result["message"] = "Not enough RAM for any supported model (need at least 1500 MB)";
@@ -559,14 +573,27 @@ static std::string handle_model_download(const std::string& args_json) {
         return R"json({"error":"Invalid filename. Must end with .gguf, no path components."})json";
     }
 
-    // Check if already downloaded (shard-1 or single file)
+    // Check if already downloaded (for sharded models, ALL shards must exist)
     std::string dest_path = std::string("/data/models/") + filename;
-    if (access(dest_path.c_str(), R_OK) == 0) {
-        json out;
-        out["status"] = "already_exists";
-        out["path"] = dest_path;
-        out["message"] = "Model already downloaded";
-        return out.dump(2);
+    {
+        ShardInfo si = parse_shard_filename(filename);
+        bool all_exist = true;
+        if (si.total_shards > 1) {
+            for (int i = 1; i <= si.total_shards; i++) {
+                std::string sn = build_shard_filename(si.base, i, si.total_shards);
+                std::string sp = std::string("/data/models/") + sn;
+                if (access(sp.c_str(), R_OK) != 0) { all_exist = false; break; }
+            }
+        } else {
+            all_exist = (access(dest_path.c_str(), R_OK) == 0);
+        }
+        if (all_exist) {
+            json out;
+            out["status"] = "already_exists";
+            out["path"] = dest_path;
+            out["message"] = "Model already downloaded";
+            return out.dump(2);
+        }
     }
 
 #ifdef HAVE_LIBCURL
