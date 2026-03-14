@@ -4,7 +4,7 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: ✅ WiFi CONNECTED + PXE boot VERIFIED in VirtualBox (2-VM test). Full chain: PXELINUX → bzImage → initramfs → squashfs download → Llamaste server RUNNING. 62 tools, 13 suites.
+- **Phase**: ✅ QEMU integration test suite COMPLETE (44 assertions, 0 failures). WiFi CONNECTED + PXE boot VERIFIED. 64 tools, 13 suites.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -75,6 +75,10 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **QEMU E2E tests**: `scripts/qemu-boot-test.sh /root/llamaste-build/output/images/llamaste.img`
 - **EFI boot test**: `scripts/test-efi-boot.sh` (QEMU + OVMF)
 - **Install flow test**: `scripts/qemu-install-test.sh` (ISO boot → install → verify → reboot)
+- **QEMU integration test suite**: `scripts/run-all-tests.sh --quick` runs install+cluster+update+recovery (44 assertions). Run from WSL2 only. Uses per-test port ranges to avoid TIME_WAIT collisions. `pkill -f qemu-system-x86_64` kills ALL QEMUs — NEVER run concurrent QEMU tests.
+- **MSYS path translation**: Git Bash translates `/mnt/d/` → `C:/Program Files/Git/mnt/d/` when passed to `wsl`. Fix: `MSYS_NO_PATHCONV=1` prefix.
+- **QEMU boot timing**: All QEMU boots take 74-76s to reach health endpoint. Test timeouts must be ≥120s (180s recommended).
+- **llama-rpc-server SIGILL in QEMU**: Always crashes with "trap invalid opcode" because GGML_NATIVE=ON uses AVX2 unavailable in QEMU's virtual CPU. Cosmetic — health endpoint still works.
 - **ESP filesystem**: Do NOT force FAT32 on <512MB volumes — use auto-select (FAT16 for 32MB per UEFI spec)
 - **Partition alignment**: Always `align = 1M` in genimage.cfg for EFI compatibility
 - **PMBR updates**: After GPT resize, must update Protective MBR size (offset 458) and CHS end (offsets 451-453)

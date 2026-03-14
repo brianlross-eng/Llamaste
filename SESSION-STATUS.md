@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-13 (PXE server + USB ethernet + DNS fix + dashboard network card — 4ef4fb9)
+**Last updated**: 2026-03-13 (QEMU integration test suite complete — 6d2b10b)
 
 ---
 
@@ -96,7 +96,46 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-13) -- USB Ethernet, DNS, Dashboard, PXE Boot Server
+## Latest Session (2026-03-13) -- QEMU Integration Test Suite
+
+### Test Suite Implementation (a02e022 - 6d2b10b)
+
+Built automated QEMU-based integration test suite — 7 bash scripts + 1 C++ debug endpoint.
+All 44 assertions pass in `run-all-tests.sh --quick` mode.
+
+| Test | Assertions | Status |
+|------|-----------|--------|
+| install | 10 | ✅ PASS — ISO boot → disk detect → install → reboot → health |
+| cluster | 25 | ✅ PASS — 2-node mesh, roles, add-peer, capacity, models, peers, reload |
+| update | 8 | ✅ PASS — status, version, check, rollback, post-rollback, error handling |
+| recovery | 1 (3 skip) | ✅ PASS — debug API available, child kill skipped (no model) |
+| model | -- | SKIP (--quick mode) |
+
+Key design decisions:
+- Per-test port ranges (20-port windows) to avoid WSL2 TIME_WAIT collisions
+- Shared test library with `pass()`/`fail()`/`skip()` assertion framework
+- `tools_debug.cpp` adds `debug.kill_child` endpoint for recovery testing
+- Sequential execution only — `pkill -f qemu-system-x86_64` cleanup kills ALL QEMUs
+
+### Commits This Session (Test Suite)
+
+| Commit | Description |
+|--------|-------------|
+| a02e022 | feat: add shared QEMU test library (qemu-test-lib.sh) |
+| ac8b0ce | feat: add install flow integration test (v2 with assertions) |
+| 6a4302d | feat: add A/B update status integration test |
+| 8aedf5b | feat: add multi-node cluster integration test |
+| e332e64 | feat: add model download integration test |
+| d16242e | feat: add watchdog recovery integration test |
+| b28c2d1 | feat: add master test runner (run-all-tests.sh) |
+| 64f308a | fix: ISO boot networking and sequential test port collisions |
+| c3dd16e | chore: remove temporary verify-wsl-env.sh diagnostic script |
+| 0e4d230 | fix: use bash array for drive_args in boot_qemu_iso |
+| 6d2b10b | fix: increase cluster test health timeout to 180s |
+
+---
+
+## Previous Session (2026-03-13) -- USB Ethernet, DNS, Dashboard, PXE Boot Server
 
 ### USB Ethernet Dongle Support (47255f2 - 1b269df)
 
