@@ -3276,6 +3276,72 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result, "application/json");
     }));
 
+    // GET /llamaste/model/tiers — List all downloadable model sizes
+    svr.Get("/llamaste/model/tiers", require_auth(
+        [](const httplib::Request& /*req*/, httplib::Response& res) {
+        const ModelInfo* table = get_model_table();
+        // Get available RAM
+        int avail_mb = 0;
+        std::ifstream meminfo("/proc/meminfo");
+        std::string line;
+        while (std::getline(meminfo, line)) {
+            if (line.find("MemAvailable:") == 0) {
+                long kb = 0;
+                sscanf(line.c_str(), "MemAvailable: %ld", &kb);
+                avail_mb = (int)(kb / 1024);
+                break;
+            }
+        }
+        const ModelInfo* rec = recommend_model(avail_mb);
+
+        json tiers = json::array();
+        for (int i = 0; table[i].name; i++) {
+            json t;
+            t["name"] = table[i].name;
+            t["filename"] = table[i].filename;
+            t["repo_id"] = table[i].repo_id;
+            t["required_mb"] = table[i].required_mb;
+            t["approx_size_mb"] = table[i].approx_size_mb;
+            t["fits_ram"] = (avail_mb >= table[i].required_mb);
+            t["recommended"] = (rec && strcmp(rec->name, table[i].name) == 0);
+            // Check if already downloaded
+            std::string path = std::string("/data/models/") + table[i].filename;
+            t["downloaded"] = (access(path.c_str(), R_OK) == 0);
+            tiers.push_back(t);
+        }
+        json out;
+        out["tiers"] = tiers;
+        out["ram_available_mb"] = avail_mb;
+        res.set_content(out.dump(2), "application/json");
+    }));
+
+    // POST /llamaste/model/download-tier — Download a specific model tier
+    svr.Post("/llamaste/model/download-tier", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        json body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded()) {
+            res.set_content(R"({"error":"invalid JSON"})", "application/json");
+            return;
+        }
+        std::string repo_id = body.value("repo_id", "");
+        std::string filename = body.value("filename", "");
+        std::string model_name = body.value("name", "");
+        if (repo_id.empty() || filename.empty()) {
+            res.set_content(R"({"error":"repo_id and filename required"})", "application/json");
+            return;
+        }
+        bool started = start_async_download(repo_id, filename, model_name);
+        json out;
+        if (started) {
+            out["status"] = "started";
+            out["model_name"] = model_name;
+        } else {
+            out["status"] = "busy";
+            out["message"] = "A download is already in progress.";
+        }
+        res.set_content(out.dump(2), "application/json");
+    }));
+
     // GET /llamaste/model/list — List all downloaded models
     svr.Get("/llamaste/model/list", require_auth(
         [](const httplib::Request& /*req*/, httplib::Response& res) {

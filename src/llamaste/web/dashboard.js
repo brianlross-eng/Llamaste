@@ -238,13 +238,39 @@
     var statusEl = document.getElementById('model-status');
     if (!dlBtn || !selEl) return;
 
+    var tierEl = document.getElementById('model-download-tier');
     // Track state
     var recommended = null;
     var downloadedModels = [];
 
     function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
 
-    // Load available models into dropdown
+    // Load available model tiers into download dropdown
+    function refreshTierList() {
+      fetch('/llamaste/model/tiers', { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (!tierEl) return;
+          tierEl.innerHTML = '';
+          var tiers = data.tiers || [];
+          tiers.forEach(function(t) {
+            var opt = document.createElement('option');
+            opt.value = JSON.stringify({ repo_id: t.repo_id, filename: t.filename, name: t.name });
+            var sizeStr = t.approx_size_mb > 1024
+              ? (t.approx_size_mb / 1024).toFixed(1) + ' GB'
+              : t.approx_size_mb + ' MB';
+            var label = t.name + ' (' + sizeStr + ')';
+            if (t.downloaded) label += ' [downloaded]';
+            else if (t.recommended) label += ' [recommended]';
+            else if (!t.fits_ram) label += ' [needs more RAM]';
+            opt.textContent = label;
+            if (t.recommended) opt.selected = true;
+            tierEl.appendChild(opt);
+          });
+        }).catch(function() {});
+    }
+
+    // Load downloaded models into select dropdown
     function refreshModelList() {
       Promise.all([
         fetch('/llamaste/model/list', { credentials: 'include' }).then(function(r) { return r.json(); }),
@@ -279,20 +305,6 @@
           });
           selBtn.disabled = false;
         }
-
-        // Update download button text
-        if (recommended && recommended.recommended && !recommended.already_downloaded) {
-          var sizeMb = recommended.approx_download_mb || 0;
-          var sizeStr = sizeMb > 1024
-            ? (sizeMb / 1024).toFixed(1) + ' GB'
-            : sizeMb + ' MB';
-          dlBtn.textContent = 'Download ' + (recommended.model_name || 'Recommended') + ' (' + sizeStr + ')';
-        } else if (recommended && recommended.already_downloaded) {
-          dlBtn.textContent = 'Recommended Already Downloaded';
-          dlBtn.disabled = true;
-        } else {
-          dlBtn.textContent = 'Download Recommended';
-        }
       }).catch(function() {
         setStatus('Failed to load model list');
       });
@@ -317,8 +329,10 @@
             var r = p.result || {};
             if (r.status === 'success' || r.status === 'already_exists') {
               dlBtn.textContent = 'Downloaded!';
+              dlBtn.disabled = false;
               setStatus('Model downloaded. Reboot to load.');
               refreshModelList();
+              refreshTierList();
             } else {
               dlBtn.textContent = 'Download Failed';
               setStatus('Error: ' + (p.error || r.error || 'unknown'));
@@ -346,33 +360,44 @@
         .catch(function() {});
     }
 
-    // Download recommended model (async — returns immediately, poll for progress)
+    // Download selected model tier (async)
     dlBtn.addEventListener('click', function() {
+      var tierVal = tierEl ? tierEl.value : '';
+      if (!tierVal) return;
+
+      var tier;
+      try { tier = JSON.parse(tierVal); } catch(e) { return; }
+
       dlBtn.disabled = true;
       dlBtn.textContent = 'Starting download...';
-      setStatus('Requesting download...');
+      setStatus('Requesting download of ' + (tier.name || 'model') + '...');
 
-      fetch('/llamaste/model/download-recommended', { method: 'POST', credentials: 'include' })
+      fetch('/llamaste/model/download-tier', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tier)
+      })
         .then(function(r) { return r.json(); })
         .then(function(result) {
           if (result.status === 'started' || result.status === 'busy') {
-            // Start polling for progress
             if (!dlPollTimer) dlPollTimer = setInterval(pollDownloadProgress, 2000);
             pollDownloadProgress();
           } else if (result.status === 'already_exists') {
             dlBtn.textContent = 'Already Downloaded';
-            setStatus('Model already downloaded. Reboot to load.');
+            setStatus('Model already downloaded.');
             refreshModelList();
+            refreshTierList();
           } else {
             dlBtn.textContent = 'Download Failed';
             setStatus('Error: ' + (result.error || 'unknown'));
-            setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
+            setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Download'; }, 5000);
           }
         })
         .catch(function(err) {
           dlBtn.textContent = 'Error';
           setStatus(err.message);
-          setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Retry'; }, 5000);
+          setTimeout(function() { dlBtn.disabled = false; dlBtn.textContent = 'Download'; }, 5000);
         });
     });
 
@@ -475,6 +500,7 @@
     }
 
     refreshModelList();
+    refreshTierList();
   }
 
   initModelPicker();
