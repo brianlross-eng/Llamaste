@@ -168,13 +168,14 @@ void ClusterManager::fire_topology_callback() {
 // Built-in model tier table: Qwen2.5-Instruct Q4_K_M quantization
 // Sorted ascending by size so select_model() picks the largest that fits.
 static const std::vector<ModelTier> g_model_tiers = {
+    // 7B+ use shard-1 filename; llama.cpp auto-loads remaining shards
     {"qwen2.5-0.5b-instruct",  "qwen2.5-0.5b-instruct-q4_k_m.gguf",   400,  1024, 24},
     {"qwen2.5-1.5b-instruct",  "qwen2.5-1.5b-instruct-q4_k_m.gguf",  1100,  2048, 28},
     {"qwen2.5-3b-instruct",    "qwen2.5-3b-instruct-q4_k_m.gguf",    2000,  3072, 36},
-    {"qwen2.5-7b-instruct",    "qwen2.5-7b-instruct-q4_k_m.gguf",    4400,  6144, 32},
-    {"qwen2.5-14b-instruct",   "qwen2.5-14b-instruct-q4_k_m.gguf",   8500, 12288, 40},
-    {"qwen2.5-32b-instruct",   "qwen2.5-32b-instruct-q4_k_m.gguf",  19000, 24576, 64},
-    {"qwen2.5-72b-instruct",   "qwen2.5-72b-instruct-q4_k_m.gguf",  42000, 52224, 80},
+    {"qwen2.5-7b-instruct",    "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",    4400,  6144, 32},
+    {"qwen2.5-14b-instruct",   "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",   8500, 12288, 40},
+    {"qwen2.5-32b-instruct",   "qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",  19000, 24576, 64},
+    {"qwen2.5-72b-instruct",   "qwen2.5-72b-instruct-q4_k_m-00001-of-00009.gguf",  42000, 52224, 80},
 };
 
 const std::vector<ModelTier>& ClusterManager::model_tiers() {

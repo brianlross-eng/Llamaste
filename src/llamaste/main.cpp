@@ -18,9 +18,10 @@ struct ModelCandidate {
 };
 
 static const ModelCandidate MODELS[] = {
-    {"Qwen2.5-32B-Instruct",  "qwen2.5-32b-instruct-q4_k_m.gguf",  22000},
-    {"Qwen2.5-14B-Instruct",  "qwen2.5-14b-instruct-q4_k_m.gguf",  11000},
-    {"Qwen2.5-7B-Instruct",   "qwen2.5-7b-instruct-q4_k_m.gguf",    6500},
+    // 7B+ are sharded on HuggingFace; filename is shard-1, llama.cpp auto-loads the rest
+    {"Qwen2.5-32B-Instruct",  "qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",  22000},
+    {"Qwen2.5-14B-Instruct",  "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",  11000},
+    {"Qwen2.5-7B-Instruct",   "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",    6500},
     {"Qwen2.5-3B-Instruct",   "qwen2.5-3b-instruct-q4_k_m.gguf",    4000},
     {"Qwen2.5-1.5B-Instruct", "qwen2.5-1.5b-instruct-q4_k_m.gguf",  2500},
     {"Qwen2.5-0.5B-Instruct", "qwen2.5-0.5b-instruct-q4_k_m.gguf",  1500},

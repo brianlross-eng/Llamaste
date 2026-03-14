@@ -41,11 +41,14 @@ using json = nlohmann::json;
 // =========================================================================
 
 static const ModelInfo MODEL_TABLE[] = {
-    {"Qwen2.5-32B-Instruct",  "qwen2.5-32b-instruct-q4_k_m.gguf",
+    // Note: 7B+ models are sharded on HuggingFace. filename is shard-1;
+    // download logic auto-discovers and downloads all shards.
+    // llama.cpp auto-loads remaining shards when given shard-1.
+    {"Qwen2.5-32B-Instruct",  "qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",
      "Qwen/Qwen2.5-32B-Instruct-GGUF",  22000, 19000},
-    {"Qwen2.5-14B-Instruct",  "qwen2.5-14b-instruct-q4_k_m.gguf",
+    {"Qwen2.5-14B-Instruct",  "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
      "Qwen/Qwen2.5-14B-Instruct-GGUF",  11000, 8700},
-    {"Qwen2.5-7B-Instruct",   "qwen2.5-7b-instruct-q4_k_m.gguf",
+    {"Qwen2.5-7B-Instruct",   "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
      "Qwen/Qwen2.5-7B-Instruct-GGUF",    6500, 4700},
     {"Qwen2.5-3B-Instruct",   "qwen2.5-3b-instruct-q4_k_m.gguf",
      "Qwen/Qwen2.5-3B-Instruct-GGUF",    4000, 2000},
@@ -94,6 +97,60 @@ bool validate_repo_id(const std::string& repo_id) {
     auto slash = repo_id.find('/');
     if (slash == 0 || slash == repo_id.size() - 1) return false;
     return true;
+}
+
+// Parse sharded GGUF filename: returns {base, shard_num, total_shards}
+// e.g. "model-q4_k_m-00001-of-00005.gguf" -> {"model-q4_k_m", 1, 5}
+// Non-sharded files return total_shards=0.
+struct ShardInfo {
+    std::string base;       // filename without shard suffix
+    int shard_num = 0;
+    int total_shards = 0;
+};
+
+static ShardInfo parse_shard_filename(const std::string& filename) {
+    ShardInfo info;
+    // Pattern: *-NNNNN-of-NNNNN.gguf
+    // Find "-of-" near the end
+    auto of_pos = filename.rfind("-of-");
+    if (of_pos == std::string::npos || of_pos < 6) {
+        info.base = filename;
+        return info;
+    }
+    // Total shards: digits between "-of-" and ".gguf"
+    auto dot_pos = filename.rfind(".gguf");
+    if (dot_pos == std::string::npos || dot_pos <= of_pos + 4) {
+        info.base = filename;
+        return info;
+    }
+    std::string total_str = filename.substr(of_pos + 4, dot_pos - (of_pos + 4));
+    // Shard number: digits before "-of-"
+    auto dash_pos = filename.rfind('-', of_pos - 1);
+    if (dash_pos == std::string::npos) {
+        info.base = filename;
+        return info;
+    }
+    std::string shard_str = filename.substr(dash_pos + 1, of_pos - dash_pos - 1);
+
+    // Validate both are all digits
+    for (char c : shard_str) if (c < '0' || c > '9') { info.base = filename; return info; }
+    for (char c : total_str) if (c < '0' || c > '9') { info.base = filename; return info; }
+
+    info.base = filename.substr(0, dash_pos);
+    info.shard_num = std::stoi(shard_str);
+    info.total_shards = std::stoi(total_str);
+    return info;
+}
+
+// Build shard filename from base, shard number, and total
+static std::string build_shard_filename(const std::string& base, int shard, int total) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%05d", shard);
+    std::string s = base + "-" + buf + "-of-";
+    snprintf(buf, sizeof(buf), "%05d", total);
+    s += buf;
+    s += ".gguf";
+    return s;
 }
 
 std::string format_bytes(uint64_t bytes) {
@@ -337,25 +394,11 @@ static int curl_progress_cb(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
 }
 #endif
 
-static std::string handle_model_download(const std::string& args_json) {
-    json args = json::parse(args_json, nullptr, false);
-    if (args.is_discarded()) {
-        return R"json({"error":"Invalid JSON arguments"})json";
-    }
-
-    std::string repo_id = args.value("repo_id", "");
-    std::string filename = args.value("filename", "");
-
-    if (repo_id.empty() || filename.empty()) {
-        return R"json({"error":"Required parameters: repo_id, filename"})json";
-    }
-    if (!validate_repo_id(repo_id)) {
-        return R"json({"error":"Invalid repo_id format"})json";
-    }
-    if (!validate_gguf_filename(filename)) {
-        return R"json({"error":"Invalid filename. Must end with .gguf, no path components."})json";
-    }
-
+// Download a single file from HuggingFace to /data/models/.
+// Returns JSON with status. Supports resume via .part files.
+#ifdef HAVE_LIBCURL
+static std::string download_single_file(const std::string& repo_id,
+                                         const std::string& filename) {
     std::string dest_path = std::string("/data/models/") + filename;
     std::string part_path = dest_path + ".part";
 
@@ -364,17 +407,13 @@ static std::string handle_model_download(const std::string& args_json) {
         json out;
         out["status"] = "already_exists";
         out["path"] = dest_path;
-        out["message"] = "Model already downloaded";
         return out.dump(2);
     }
 
-#ifdef HAVE_LIBCURL
     std::string url = build_hf_download_url(repo_id, filename);
 
-    // Ensure /data/models/ exists
     mkdir("/data/models", 0755);
 
-    // Check for partial download (resume support)
     uint64_t existing_size = 0;
     struct stat st;
     if (stat(part_path.c_str(), &st) == 0) {
@@ -383,13 +422,13 @@ static std::string handle_model_download(const std::string& args_json) {
 
     FILE* fp = fopen(part_path.c_str(), existing_size > 0 ? "ab" : "wb");
     if (!fp) {
-        return R"json({"error":"Cannot write to /data/models/. Check disk and permissions."})json";
+        return R"json({"status":"error","error":"Cannot write to /data/models/"})json";
     }
 
     CURL* curl = curl_easy_init();
     if (!curl) {
         fclose(fp);
-        return R"json({"error":"Failed to initialize download"})json";
+        return R"json({"status":"error","error":"Failed to initialize download"})json";
     }
 
     DownloadProgress progress = {};
@@ -399,19 +438,17 @@ static std::string handle_model_download(const std::string& args_json) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);  // 1KB/s minimum
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);      // for 60 seconds
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    // CA cert bundle for HTTPS verification
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
     }
     fprintf(stderr, "[download] Starting download: %s\n", url.c_str());
 
-    // Resume if partial file exists
     if (existing_size > 0) {
         curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)existing_size);
     }
@@ -450,7 +487,6 @@ static std::string handle_model_download(const std::string& args_json) {
         return out.dump(2);
     }
 
-    // Rename .part -> final
     if (rename(part_path.c_str(), dest_path.c_str()) != 0) {
         json out;
         out["status"] = "error";
@@ -458,7 +494,6 @@ static std::string handle_model_download(const std::string& args_json) {
         return out.dump(2);
     }
 
-    // Get final size
     struct stat final_st;
     stat(dest_path.c_str(), &final_st);
 
@@ -469,11 +504,92 @@ static std::string handle_model_download(const std::string& args_json) {
     out["size_bytes"] = (uint64_t)final_st.st_size;
     out["size_human"] = format_bytes(final_st.st_size);
     out["speed_human"] = format_bytes((uint64_t)speed) + "/s";
-    out["message"] = "Model downloaded successfully. Restart to load it.";
     return out.dump(2);
+}
+#endif // HAVE_LIBCURL
+
+static std::string handle_model_download(const std::string& args_json) {
+    json args = json::parse(args_json, nullptr, false);
+    if (args.is_discarded()) {
+        return R"json({"error":"Invalid JSON arguments"})json";
+    }
+
+    std::string repo_id = args.value("repo_id", "");
+    std::string filename = args.value("filename", "");
+
+    if (repo_id.empty() || filename.empty()) {
+        return R"json({"error":"Required parameters: repo_id, filename"})json";
+    }
+    if (!validate_repo_id(repo_id)) {
+        return R"json({"error":"Invalid repo_id format"})json";
+    }
+    if (!validate_gguf_filename(filename)) {
+        return R"json({"error":"Invalid filename. Must end with .gguf, no path components."})json";
+    }
+
+    // Check if already downloaded (shard-1 or single file)
+    std::string dest_path = std::string("/data/models/") + filename;
+    if (access(dest_path.c_str(), R_OK) == 0) {
+        json out;
+        out["status"] = "already_exists";
+        out["path"] = dest_path;
+        out["message"] = "Model already downloaded";
+        return out.dump(2);
+    }
+
+#ifdef HAVE_LIBCURL
+    mkdir("/data/models", 0755);
+
+    // Detect sharded model (e.g. *-00001-of-00005.gguf)
+    ShardInfo shard = parse_shard_filename(filename);
+
+    if (shard.total_shards > 1) {
+        // Download all shards sequentially
+        uint64_t total_bytes = 0;
+        json shard_results = json::array();
+
+        for (int i = 1; i <= shard.total_shards; i++) {
+            std::string shard_name = build_shard_filename(shard.base, i, shard.total_shards);
+            fprintf(stderr, "[download] Shard %d/%d: %s\n", i, shard.total_shards, shard_name.c_str());
+
+            std::string result = download_single_file(repo_id, shard_name);
+            json r = json::parse(result, nullptr, false);
+
+            std::string status = r.value("status", "error");
+            if (status == "error") {
+                // Return error with shard context
+                r["shard"] = i;
+                r["total_shards"] = shard.total_shards;
+                r["message"] = "Failed on shard " + std::to_string(i) + "/" +
+                               std::to_string(shard.total_shards) + ". Retry will resume.";
+                return r.dump(2);
+            }
+
+            total_bytes += r.value("size_bytes", (uint64_t)0);
+            shard_results.push_back(r);
+        }
+
+        json out;
+        out["status"] = "success";
+        out["path"] = dest_path;
+        out["filename"] = filename;
+        out["shards"] = shard.total_shards;
+        out["total_size_bytes"] = total_bytes;
+        out["total_size_human"] = format_bytes(total_bytes);
+        out["message"] = "All " + std::to_string(shard.total_shards) +
+                         " shards downloaded. Restart to load model.";
+        return out.dump(2);
+    }
+
+    // Single file download
+    std::string result = download_single_file(repo_id, filename);
+    json r = json::parse(result, nullptr, false);
+    if (r.value("status", "") == "success") {
+        r["message"] = "Model downloaded successfully. Restart to load it.";
+    }
+    return r.dump(2);
 #else
     (void)dest_path;
-    (void)part_path;
     json out;
     out["status"] = "error";
     out["error"] = "Download requires HTTPS support (libcurl). Not available in host builds.";
