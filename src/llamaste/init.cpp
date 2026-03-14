@@ -14,6 +14,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/mount.h>
+#include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/statfs.h>
 #include <sys/socket.h>
@@ -568,6 +569,85 @@ void init_create_data_dirs() {
     };
     for (int i = 0; dirs[i]; i++)
         mkdir(dirs[i], 0755);
+}
+
+void init_setup_audio() {
+#ifndef _WIN32
+    // ALSA cards default to muted with volume 0. Without alsa-utils (amixer),
+    // nothing unmutes them. Use the ALSA mixer C API directly.
+    // This requires libasound (alsa-lib) which is already linked.
+    fprintf(stderr, "[init] Setting up ALSA audio...\n");
+
+    // Check if sound cards exist
+    std::ifstream cards("/proc/asound/cards");
+    if (!cards.is_open()) {
+        fprintf(stderr, "[init] No ALSA sound cards found\n");
+        return;
+    }
+    std::string cards_content((std::istreambuf_iterator<char>(cards)),
+                               std::istreambuf_iterator<char>());
+    if (cards_content.find('[') == std::string::npos) {
+        fprintf(stderr, "[init] No ALSA sound cards detected\n");
+        return;
+    }
+    fprintf(stderr, "[init] ALSA cards:%s\n",
+            cards_content.substr(0, 200).c_str());
+
+    // Use amixer-style approach via writing to /sys or using ALSA control files
+    // Since we can't easily link the mixer API without header changes,
+    // write directly to ALSA control via procfs/sysfs
+    // Alternative: fork/exec amixer if available, or write a simple mixer setup
+
+    // Simple approach: try to write volume via /proc/asound/card0/codec#0
+    // or use tinymixer-style direct ioctl. For now, fork/exec amixer if it exists.
+    const char* amixer_paths[] = {
+        "/usr/bin/amixer", "/bin/amixer", "/sbin/amixer", nullptr
+    };
+    const char* amixer = nullptr;
+    for (int i = 0; amixer_paths[i]; i++) {
+        if (access(amixer_paths[i], X_OK) == 0) {
+            amixer = amixer_paths[i];
+            break;
+        }
+    }
+
+    if (!amixer) {
+        // No amixer — try tinyalsa or direct ALSA ioctl approach
+        // For now, just log that audio setup needs alsa-utils
+        fprintf(stderr, "[init] amixer not found — ALSA mixer controls may be muted\n");
+        fprintf(stderr, "[init] Add BR2_PACKAGE_ALSA_UTILS=y to defconfig for audio\n");
+        return;
+    }
+
+    // Unmute Master and set to 80%
+    auto run_amixer = [](const char* amixer_path, const char* const argv[]) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execv(amixer_path, const_cast<char* const*>(argv));
+            _exit(127);
+        }
+        if (pid > 0) {
+            int status = 0;
+            waitpid(pid, &status, 0);
+        }
+    };
+
+    const char* args1[] = { amixer, "sset", "Master", "80%", "unmute", nullptr };
+    run_amixer(amixer, args1);
+    const char* args2[] = { amixer, "sset", "Speaker", "80%", "unmute", nullptr };
+    run_amixer(amixer, args2);
+    const char* args3[] = { amixer, "sset", "Headphone", "80%", "unmute", nullptr };
+    run_amixer(amixer, args3);
+    const char* args4[] = { amixer, "sset", "PCM", "80%", "unmute", nullptr };
+    run_amixer(amixer, args4);
+    // Unmute capture for microphone
+    const char* args5[] = { amixer, "sset", "Capture", "80%", "cap", nullptr };
+    run_amixer(amixer, args5);
+    const char* args6[] = { amixer, "sset", "Internal Mic", "80%", "cap", nullptr };
+    run_amixer(amixer, args6);
+
+    fprintf(stderr, "[init] ALSA mixer: unmuted Master/Speaker/Headphone/PCM/Capture\n");
+#endif
 }
 
 void init_tune_performance() {

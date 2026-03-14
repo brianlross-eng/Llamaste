@@ -185,6 +185,7 @@ int main(int argc, char** argv) {
         init_bring_up_loopback();
         init_apply_network_config();
         init_tune_performance();
+        init_setup_audio();
         init_set_hostname("llamaste");
     }
 

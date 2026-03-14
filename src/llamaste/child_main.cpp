@@ -131,6 +131,7 @@ static std::atomic<pid_t> g_llama_pid{0};
 static std::atomic<bool> g_model_loaded{false};
 static int g_llama_port = 8088;
 static std::string g_model_name;
+static std::atomic<double> g_tokens_per_sec{0.0};
 static std::mutex g_llama_mutex;
 
 // Persistent HTTP client for inference (HTTP keep-alive — avoids TCP reconnect per request).
@@ -637,6 +638,13 @@ static std::string llama_inference(const std::string& request_json) {
     usage["completion_tokens"] = comp_resp.is_discarded() ? 0 : comp_resp.value("tokens_predicted", 0);
     usage["total_tokens"]      = usage["prompt_tokens"].get<int>() + usage["completion_tokens"].get<int>();
     response["usage"] = usage;
+
+    // Extract tokens/sec from llama-server timings
+    if (!comp_resp.is_discarded() && comp_resp.contains("timings")) {
+        auto& t = comp_resp["timings"];
+        double pps = t.value("predicted_per_second", 0.0);
+        if (pps > 0.0) g_tokens_per_sec.store(pps);
+    }
 
     json choice;
     choice["index"] = 0;
@@ -1282,8 +1290,8 @@ static json gather_system_info(const SupervisorConfig& config) {
     info["has_avx2"] = g_hwinfo.has_avx2;
     info["has_avx512"] = g_hwinfo.has_avx512;
 
-    // Phase 2 fields
-    info["tokens_per_sec"] = 0.0;  // will be real when inference is wired
+    // Performance — updated after each inference call
+    info["tokens_per_sec"] = g_tokens_per_sec.load();
     info["scheduled_tasks_count"] = g_scheduler.active_task_count();
     auto next_sched = g_scheduler.next_scheduled_time();
     info["next_scheduled_time"] = next_sched > 0 ? static_cast<long>(next_sched) : 0;
@@ -4076,6 +4084,59 @@ int child_main(const SupervisorConfig& config) {
         output += "\n=== Init Resize Log ===\n";
         std::string rlog = read_file("/tmp/init-resize.log");
         output += rlog.empty() ? "(no log)\n" : rlog;
+
+        res.set_content(output, "text/plain");
+    }));
+
+    svr.Get("/debug/audio", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string output;
+
+        // Check ALSA sound devices
+        output += "=== Sound Cards (/proc/asound/cards) ===\n";
+        output += read_file("/proc/asound/cards");
+
+        output += "\n=== PCM Devices (/proc/asound/pcm) ===\n";
+        output += read_file("/proc/asound/pcm");
+
+        output += "\n=== Sound Devices (/dev/snd/) ===\n";
+        DIR* d = opendir("/dev/snd");
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                output += std::string("  ") + ent->d_name + "\n";
+            }
+            closedir(d);
+        } else {
+            output += "  /dev/snd/ not found\n";
+        }
+
+        // Voice pipeline state
+        output += "\n=== Voice Pipeline ===\n";
+        extern VoicePipeline* g_voice;
+        if (g_voice) {
+            output += "Voice pipeline: INITIALIZED\n";
+            output += "TTS engine: " + g_voice->tts_engine_name() + "\n";
+        } else {
+            output += "Voice pipeline: NOT INITIALIZED (only enabled in desktop mode)\n";
+        }
+
+        // Check TTS model files
+        output += "\n=== TTS Models (/data/models/) ===\n";
+        DIR* md = opendir("/data/models");
+        if (md) {
+            struct dirent* ent;
+            while ((ent = readdir(md)) != nullptr) {
+                std::string name = ent->d_name;
+                if (name.find("vits") != std::string::npos ||
+                    name.find("piper") != std::string::npos ||
+                    name.find("tts") != std::string::npos ||
+                    name.find("onnx") != std::string::npos) {
+                    output += "  " + name + "\n";
+                }
+            }
+            closedir(md);
+        }
 
         res.set_content(output, "text/plain");
     }));
