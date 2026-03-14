@@ -9,7 +9,7 @@
 #include "hwdetect.h"
 #include "supervisor.h"
 
-static const char* VERSION = "0.1.0";
+#include "version.h"
 
 struct ModelCandidate {
     const char* name;
@@ -142,7 +142,7 @@ static void scan_usb_for_model() {
 
 int main(int argc, char** argv) {
     fprintf(stderr, "\n");
-    fprintf(stderr, "  Llamaste v%s — LLM IS the OS\n", VERSION);
+    fprintf(stderr, "  Llamaste v%s — LLM IS the OS\n", LLAMASTE_VERSION);
     fprintf(stderr, "\n");
 
     bool pid1 = (getpid() == 1);

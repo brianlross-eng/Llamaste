@@ -196,13 +196,7 @@
     dashModel.textContent = data.model || 'No model loaded';
     dashSpeed.textContent = tokPerSec + ' tok/s';
 
-    // Show/hide download button based on model status
-    var dlBtn = document.getElementById('dash-download-btn');
-    if (dlBtn) {
-      var m = (data.model || '').toLowerCase();
-      var hasModel = m && m !== 'none' && m !== '--' && m.indexOf('stub') === -1 && m.indexOf('no model') === -1;
-      dlBtn.style.display = hasModel ? 'none' : '';
-    }
+    // Download button always visible — user may want to download additional models
 
     // --- System tab ---
     sysModel.textContent = data.model || '--';

@@ -4010,6 +4010,76 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(output, "text/plain");
     }));
 
+    svr.Get("/debug/block-devices", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string output;
+
+        // List all block devices and their partitions
+        output += "=== Block Devices (/sys/block/) ===\n";
+        DIR* d = opendir("/sys/block");
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string blk = ent->d_name;
+                if (blk.find("loop") == 0 || blk.find("ram") == 0) continue;
+
+                // Read size (in 512-byte sectors)
+                std::string size_str;
+                std::ifstream sf("/sys/block/" + blk + "/size");
+                if (sf.is_open()) std::getline(sf, size_str);
+                uint64_t sectors = size_str.empty() ? 0 : strtoull(size_str.c_str(), nullptr, 10);
+                uint64_t mb = (sectors * 512) / (1024 * 1024);
+
+                output += blk + ": " + std::to_string(mb) + " MB";
+
+                // Read model if available
+                std::ifstream mf("/sys/block/" + blk + "/device/model");
+                if (mf.is_open()) {
+                    std::string model;
+                    std::getline(mf, model);
+                    output += " model=[" + model + "]";
+                }
+                output += "\n";
+
+                // List partitions
+                DIR* bd = opendir(("/sys/block/" + blk).c_str());
+                if (bd) {
+                    struct dirent* pe;
+                    while ((pe = readdir(bd)) != nullptr) {
+                        std::string pn = pe->d_name;
+                        if (pn.find(blk) != 0) continue;
+                        std::string part_file = "/sys/block/" + blk + "/" + pn + "/partition";
+                        struct stat st;
+                        if (stat(part_file.c_str(), &st) == 0) {
+                            std::string psz;
+                            std::ifstream psf("/sys/block/" + blk + "/" + pn + "/size");
+                            if (psf.is_open()) std::getline(psf, psz);
+                            uint64_t ps = psz.empty() ? 0 : strtoull(psz.c_str(), nullptr, 10);
+                            uint64_t pmb = (ps * 512) / (1024 * 1024);
+                            // Check if /dev node exists
+                            std::string devpath = "/dev/" + pn;
+                            bool exists = (stat(devpath.c_str(), &st) == 0);
+                            output += "  " + pn + ": " + std::to_string(pmb) + " MB";
+                            output += exists ? " [/dev node OK]" : " [/dev node MISSING]";
+                            output += "\n";
+                        }
+                    }
+                    closedir(bd);
+                }
+            }
+            closedir(d);
+        }
+
+        output += "\n=== Mounts (/proc/mounts) ===\n";
+        output += read_file("/proc/mounts");
+
+        output += "\n=== Init Resize Log ===\n";
+        std::string rlog = read_file("/tmp/init-resize.log");
+        output += rlog.empty() ? "(no log)\n" : rlog;
+
+        res.set_content(output, "text/plain");
+    }));
+
     svr.Get("/debug/sysinfo", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         json info;
 

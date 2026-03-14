@@ -1,3 +1,4 @@
+#include "version.h"
 // mcp_server.cpp — Model Context Protocol server for Llamaste
 //
 // MCP Streamable HTTP transport (2025-03-26):
@@ -102,7 +103,7 @@ void McpServer::add_routes(httplib::Server& svr, McpAuthCheck auth_check) {
     svr.Get("/mcp", mcp_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         json info;
         info["server"]    = "llamaste";
-        info["version"]   = "0.1.0";
+        info["version"]   = "0.2.0";
         info["protocol"]  = MCP_PROTOCOL_VERSION;
         info["transport"] = "streamable-http";
         info["endpoint"]  = "/mcp";
@@ -360,7 +361,7 @@ json McpServer::handle_initialize(const json& params, std::string& out_session_i
 
     json server_info;
     server_info["name"]    = "llamaste";
-    server_info["version"] = "0.1.0";
+    server_info["version"] = LLAMASTE_VERSION;
     result["serverInfo"] = server_info;
 
     result["instructions"] =

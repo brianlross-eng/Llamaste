@@ -11,7 +11,7 @@
 #
 ################################################################################
 
-LLAMASTE_VERSION = 0.1.0
+LLAMASTE_VERSION = 0.2.0
 LLAMASTE_SITE = /mnt/d/Llamaste/src/llamaste
 LLAMASTE_SITE_METHOD = local
 LLAMASTE_LICENSE = Apache-2.0

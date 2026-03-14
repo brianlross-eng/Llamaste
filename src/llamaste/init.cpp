@@ -420,35 +420,104 @@ void init_mount_filesystems() {
     try_mount("tmpfs",    "/dev/shm", "tmpfs",    0, "size=32M");
 }
 
+// Enumerate all block device partitions from /sys/block/
+static std::vector<std::string> discover_partitions() {
+    std::vector<std::string> parts;
+#ifndef _WIN32
+    DIR* d = opendir("/sys/block");
+    if (!d) return parts;
+
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        std::string blk = ent->d_name;
+        // Skip loop, ram, dm devices
+        if (blk.find("loop") == 0 || blk.find("ram") == 0 ||
+            blk.find("dm-") == 0) continue;
+
+        // Enumerate partitions under /sys/block/<dev>/
+        std::string blk_dir = "/sys/block/" + blk;
+        DIR* bd = opendir(blk_dir.c_str());
+        if (!bd) continue;
+        struct dirent* pe;
+        while ((pe = readdir(bd)) != nullptr) {
+            std::string pname = pe->d_name;
+            // Partition dirs start with the block device name
+            if (pname.find(blk) != 0) continue;
+            std::string part_path = blk_dir + "/" + pname + "/partition";
+            struct stat st;
+            if (stat(part_path.c_str(), &st) == 0) {
+                parts.push_back("/dev/" + pname);
+            }
+        }
+        closedir(bd);
+    }
+    closedir(d);
+#endif
+    return parts;
+}
+
+// Try to mount a partition as ext4 on /data, with GPT grow + ext4 grow.
+// Returns true on success.
+static bool try_mount_data_partition(const char* dev) {
+#ifndef _WIN32
+    rlog("[init] mount_data: trying %s\n", dev);
+    grow_gpt_partition(dev);
+
+    if (mount(dev, "/data", "ext4", 0, nullptr) == 0) {
+        rlog("[init] Mounted %s on /data\n", dev);
+        grow_ext4_online(dev);
+        return true;
+    } else {
+        rlog("[init] mount_data: mount %s failed: %m\n", dev);
+    }
+#endif
+    return false;
+}
+
 bool init_mount_data() {
 #ifndef _WIN32
+    // Static candidate list (common configurations)
     const char* candidates[] = {
-        "/dev/vda5", "/dev/sda5", "/dev/sdb5", "/dev/nvme0n1p5",
-        "/dev/vda4", "/dev/sda4", "/dev/sdb4", "/dev/nvme0n1p4",
+        "/dev/vda5", "/dev/sda5", "/dev/sdb5", "/dev/sdc5", "/dev/nvme0n1p5",
+        "/dev/vda4", "/dev/sda4", "/dev/sdb4", "/dev/sdc4", "/dev/nvme0n1p4",
         nullptr
     };
 
     mkdir("/data", 0755);
+
+    // Log all block devices for diagnostics
     rlog("[init] mount_data: scanning for DATA partition...\n");
+    auto all_parts = discover_partitions();
+    rlog("[init] mount_data: discovered %zu partitions:", all_parts.size());
+    for (const auto& p : all_parts) rlog(" %s", p.c_str());
+    rlog("\n");
+
+    // Phase 1: try static candidates (fast path)
     for (int i = 0; candidates[i]; i++) {
         struct stat st;
         if (stat(candidates[i], &st) == 0) {
             rlog("[init] mount_data: found %s (mode=0%o)\n", candidates[i], st.st_mode);
-            // Try to grow GPT partition before mounting
-            grow_gpt_partition(candidates[i]);
-
-            if (mount(candidates[i], "/data", "ext4", 0, nullptr) == 0) {
-                rlog("[init] Mounted %s on /data\n", candidates[i]);
-
-                // Grow ext4 filesystem to fill partition
-                grow_ext4_online(candidates[i]);
-
+            if (try_mount_data_partition(candidates[i]))
                 return true;
-            } else {
-                rlog("[init] mount_data: mount %s failed: %m\n", candidates[i]);
-            }
-        } else {
-            rlog("[init] mount_data: %s not found\n", candidates[i]);
+        }
+    }
+
+    // Phase 2: try all discovered partitions (handles unexpected device names)
+    rlog("[init] mount_data: static candidates failed, trying all discovered partitions...\n");
+    for (const auto& part : all_parts) {
+        // Skip partitions already tried in static list
+        bool already_tried = false;
+        for (int i = 0; candidates[i]; i++) {
+            if (part == candidates[i]) { already_tried = true; break; }
+        }
+        if (already_tried) continue;
+
+        struct stat st;
+        if (stat(part.c_str(), &st) == 0) {
+            rlog("[init] mount_data: trying discovered %s\n", part.c_str());
+            if (try_mount_data_partition(part.c_str()))
+                return true;
         }
     }
 
