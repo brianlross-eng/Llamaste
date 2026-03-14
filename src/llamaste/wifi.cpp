@@ -478,12 +478,20 @@ std::string WiFiManager::connect(const std::string& ssid,
         }
     }
 
-    if (str_trim(wpa("SELECT_NETWORK " + std::to_string(net_id))) != "OK")
+    // Clear any stale BSSID hint — forces wpa_supplicant to scan for the
+    // AP fresh rather than targeting a cached BSSID that may have moved
+    // channels or be unreachable.  This prevents 4-way handshake timeouts
+    // on installed systems where wpa.conf persists across reboots.
+    std::string id_str = std::to_string(net_id);
+    wpa("SET_NETWORK " + id_str + " bssid any");
+
+    if (str_trim(wpa("SELECT_NETWORK " + id_str)) != "OK")
         return "SELECT_NETWORK failed";
 
-    // Poll for COMPLETED (up to 15s)
+    // Poll for COMPLETED (up to 20s — 4-way handshake can take 10-15s)
     std::string last_state;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    std::string prev_state;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         std::string st = wpa("STATUS");
@@ -496,6 +504,11 @@ std::string WiFiManager::connect(const std::string& ssid,
                 last_state = str_trim(line.substr(eq + 1));
                 break;
             }
+        }
+        if (last_state != prev_state) {
+            fprintf(stderr, "[wifi] connect(%s): state %s -> %s\n",
+                    ssid.c_str(), prev_state.c_str(), last_state.c_str());
+            prev_state = last_state;
         }
         if (last_state == "COMPLETED") break;
     }
@@ -535,6 +548,27 @@ std::string WiFiManager::forget(const std::string& ssid) {
     if (r != "OK") return "REMOVE_NETWORK failed: " + r;
     wpa("SAVE_CONFIG");
     return "";
+}
+
+// ---------------------------------------------------------------------------
+// clear_all_bssids() — remove stale BSSID hints from all saved networks
+// ---------------------------------------------------------------------------
+
+void WiFiManager::clear_all_bssids() {
+    if (ctrl_fd_ < 0 && !open_ctrl()) return;
+
+    auto saved = list_networks();
+    for (const auto& n : saved) {
+        if (n.network_id >= 0) {
+            std::string id = std::to_string(n.network_id);
+            wpa("SET_NETWORK " + id + " bssid any");
+        }
+    }
+    if (!saved.empty()) {
+        wpa("SAVE_CONFIG");
+        fprintf(stderr, "[wifi] Cleared BSSID hints from %zu saved networks\n",
+                saved.size());
+    }
 }
 
 // ---------------------------------------------------------------------------

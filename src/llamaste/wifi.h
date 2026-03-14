@@ -73,6 +73,10 @@ public:
     // Remove a saved network by ssid. Returns "" on success.
     std::string forget(const std::string& ssid);
 
+    // Clear BSSID hints from all saved networks.
+    // Prevents stale BSSID targeting after reboot.
+    void clear_all_bssids();
+
     // Bring the WiFi interface up.
     std::string enable();
 

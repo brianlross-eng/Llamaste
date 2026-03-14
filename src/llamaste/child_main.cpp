@@ -937,6 +937,12 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     if (daemon_ok) {
         fprintf(stderr, "[child] wpa_supplicant running (PID %d) on %s\n",
                 pid, iface.c_str());
+        // Clear stale BSSID hints from persisted wpa.conf.
+        // On installed systems, wpa.conf survives reboots and may contain
+        // BSSIDs from a previous boot where the AP was on a different channel.
+        // Stale BSSIDs cause 4-way handshake timeouts (wpa_supplicant targets
+        // a specific BSSID instead of scanning for the best one).
+        g_wifi.clear_all_bssids();
     } else {
         fprintf(stderr, "[child] ERROR: wpa_supplicant ctrl socket not found "
                 "at %s after 5s\n", sock_path.c_str());
