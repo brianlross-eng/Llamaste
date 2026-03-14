@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(llamaste VERSION 0.2.0 LANGUAGES C CXX)
+project(llamaste VERSION 0.2.0 LANGUAGES C CXX)  # display version: 0.2.0a (see version.h)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

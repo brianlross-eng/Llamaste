@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-14 (Version 0.2.0, bare metal install, DATA resize fix, Web UI improvements)
+**Last updated**: 2026-03-14 (Version 0.2.0a, 14B model tested, roadmap expansion)
 
 ---
 
@@ -96,11 +96,15 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-14) -- Version 0.2.0, Bare Metal Install, Web UI Polish
+## Latest Session (2026-03-14) -- Version 0.2.0a, 14B Model Testing, Roadmap Expansion
 
-### Version 0.2.0 Release
-- Version unified to 0.2.0 across all source files (version.h is now authoritative)
-- ISO built and deployed: llamaste.iso 1485 MB
+### Version 0.2.0a
+- Version bumped to 0.2.0a (version.h authoritative)
+- 14B model tested on bare metal (ASUS VivoBook, 36GB RAM)
+- tok/s wired up from llama-server timings
+- ALSA auto-unmute added (alsa-utils + init_setup_audio)
+- Download button always visible
+- Roadmap expanded: self-learning skills, skill marketplace, peer skill sharing, multi-user auth
 
 ### Bare Metal Hardware Testing (ASUS VivoBook, i5-1035G1, 36GB RAM, Toshiba 1TB SATA)
 
@@ -111,12 +115,17 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | Boot from SATA (server mode) | ✅ PASS |
 | Boot from SATA (desktop mode) | ✅ PASS |
 | WiFi connect (RTL8821CE) | ✅ PASS |
-| DATA partition auto-resize | ✅ PASS — 14.5/901.8 GB (was 1.0/1.0 GB tmpfs fallback) |
+| DATA partition auto-resize | ✅ PASS — 14.5/901.8 GB |
 | DHCP on installed system | ✅ PASS |
-| 3B model download + inference | ✅ PASS |
+| 3B model download + inference | ✅ PASS — ~14 tok/s |
+| 14B model download (3 shards) | ✅ PASS — 8.2 GB loaded |
+| 14B inference | ✅ PASS — 2.0-2.2 tok/s, correct reasoning |
+| NVMe boot speed | ✅ PASS — noticeably faster than SATA |
 | Shutdown/reboot | ✅ PASS |
 | SVG status bar icons | ✅ PASS |
-| Desktop mode | 🔧 Testing in progress |
+| Desktop mode | ✅ PASS — compositor, keyboard, LLM working |
+| Microphone (desktop) | ❌ FAIL — cog/WPE lacks getUserMedia support |
+| Speakers (desktop) | 🔧 ALSA auto-unmute added, untested |
 
 ### DATA Partition Auto-Resize Fix
 - **Root cause**: Static device name candidates (`/dev/sda5`, `/dev/sdb5`, etc.) missed the actual device on this hardware
@@ -379,17 +388,20 @@ Iterative build-test cycles on real hardware uncovered and fixed several issues:
 ## Next Steps
 
 ### Immediate
-1. **Desktop mode test results** — User testing in progress on ASUS VivoBook
-2. **7B/14B model on 36GB RAM** — Test larger models now that 3B confirmed working
+1. **Audio fix (mic/speaker)** — Native C++ audio bypass (not browser-based) for desktop mode
+2. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
 3. **Grammar-constrained JSON** — Add JSON schema to inference requests (speed + reliability)
 4. **A/B update testing on real hardware** — Verify update flow on bare metal
 
-### Backlog
+### Roadmap (Future Phases)
+- **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files
+- **Phase D: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
+- **Phase E: Peer skill sharing** — Cluster nodes sync skills on join
+- **Phase F: Multi-user auth** — User accounts, roles (admin/user/guest), per-user history (v1.1/v2.0)
+- **Peer-to-peer model transfer** — Nodes serve GGUF shards to new cluster members
 - Desktop mode WiFi connect test
 - Voice quality tuning
 - Real two-VM mDNS test on LAN
-- Model auto-download on cluster formation (test on real hardware)
-- Dropbear SSH (requires adding a shell binary — deferred)
 
 ---
 

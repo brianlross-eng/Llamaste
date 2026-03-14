@@ -4,9 +4,9 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: v0.2.0 — bare metal SATA install + inference CONFIRMED. Dynamic partition discovery. 64 tools, 13 suites.
-- **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM, Toshiba 1TB SATA — install, boot, 3B inference all working.
-- **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
+- **Phase**: v0.2.0a — bare metal SATA + NVMe install + 3B/14B inference CONFIRMED. Dynamic partition discovery. 64 tools, 13 suites.
+- **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM — SATA + NVMe install, boot, 3B (~14 tok/s) + 14B (2.2 tok/s) inference working.
+- **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 3B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
 - **Recovery hardening**: Dead-peer crash recovery 239s → 10s (fresh monitor thread per topology spawn).
@@ -176,16 +176,20 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Desktop mode hardware test** — Test desktop (GUI) mode on bare metal (in progress)
-2. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
-3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+1. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
+2. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
+3. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
 
-### Backlog
-- **Desktop mode WiFi connect** — Server mode confirmed working; test desktop connect flow
-- **Voice quality tuning** — Adjust length_scale, noise_scale for natural prosody
-- **More TTS voices** — Additional locales (en_SC, en_IN, etc.) if needed
-- **Real two-VM mDNS test** — Validate mDNS auto-discovery on real LAN (needs 2 physical machines)
-- **Model auto-download on cluster formation** — Already implemented; test on real hardware
+### Roadmap (Future Phases)
+- **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving
+- **Phase D: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
+- **Phase E: Peer skill sharing** — Cluster nodes sync skill manifests on join, auto-transfer missing skills
+- **Phase F: Multi-user auth** — User accounts, roles (admin/user/guest), per-user chat history (v1.1/v2.0)
+- **Peer-to-peer model transfer** — Nodes serve GGUF shards to new cluster members
+- **Office deployment** — Multiple old PCs + DHCP server = distributed AI office assistant
+- Desktop mode WiFi connect test
+- Voice quality tuning
+- Real two-VM mDNS test on LAN
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
