@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-14 (Real hardware testing — WiFi, install, model download)
+**Last updated**: 2026-03-14 (Version 0.2.0, bare metal install, DATA resize fix, Web UI improvements)
 
 ---
 
@@ -96,22 +96,43 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-14) -- Real Hardware Testing & Fixes
+## Latest Session (2026-03-14) -- Version 0.2.0, Bare Metal Install, Web UI Polish
 
-### Hardware Test Results (ASUS VivoBook, i5-1035G1, 36GB RAM)
+### Version 0.2.0 Release
+- Version unified to 0.2.0 across all source files (version.h is now authoritative)
+- ISO built and deployed: llamaste.iso 1485 MB
+
+### Bare Metal Hardware Testing (ASUS VivoBook, i5-1035G1, 36GB RAM, Toshiba 1TB SATA)
 
 | Test | Status |
 |------|--------|
 | USB boot (server-live) | ✅ PASS |
 | Install to SATA Toshiba 1TB | ✅ PASS |
-| Boot from SATA (server mode) | ✅ PASS (after ip=dhcp fix) |
+| Boot from SATA (server mode) | ✅ PASS |
 | Boot from SATA (desktop mode) | ✅ PASS |
-| WiFi connect (RTL8821CE) | ✅ PASS (after BSSID fix) |
-| DATA partition mount + auto-resize | ✅ PASS — 953 GB ext4 |
-| DHCP on installed system | ✅ PASS (dhcpcd-hook binary) |
-| Model download (32B sharded) | IN PROGRESS — shard 1 done, shard 2 downloading |
+| WiFi connect (RTL8821CE) | ✅ PASS |
+| DATA partition auto-resize | ✅ PASS — 14.5/901.8 GB (was 1.0/1.0 GB tmpfs fallback) |
+| DHCP on installed system | ✅ PASS |
+| 3B model download + inference | ✅ PASS |
+| Shutdown/reboot | ✅ PASS |
+| SVG status bar icons | ✅ PASS |
+| Desktop mode | 🔧 Testing in progress |
 
-### Bugs Found & Fixed
+### DATA Partition Auto-Resize Fix
+- **Root cause**: Static device name candidates (`/dev/sda5`, `/dev/sdb5`, etc.) missed the actual device on this hardware
+- **Fix**: Dynamic `/sys/block/` scanning to find the correct partition at runtime
+- **Result**: DATA partition now correctly resized — 14.5/901.8 GB (previously falling back to 1.0 GB tmpfs)
+
+### Web UI Improvements
+- Notification history panel with review/clear functionality
+- SVG icons for voice and connection status indicators
+- Model picker layout cleanup
+- Download button always visible (not hidden when model loaded)
+
+### New Debug Endpoints
+- `/debug/block-devices` — shows all block devices + partitions + mounts
+
+### Bugs Found & Fixed (Previous 2026-03-14 Session)
 
 | # | Bug | Root Cause | Fix | Commit |
 |---|-----|-----------|-----|--------|
@@ -120,7 +141,7 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 | 3 | /var/run read-only on squashfs | Squashfs is immutable | tmpfs mounts on /var/run, /var/db | 1a7ed51 |
 | 4 | WiFi 4-way handshake failure (installed) | Stale BSSID in persisted wpa.conf | clear_all_bssids() at startup | 942ebe4 |
 | 5 | Model download 404 (HuggingFace) | Sharded GGUF format change | Updated filenames + shard loop | 55016e3 |
-| 6 | DATA partition shows 1G (tmpfs fallback) | Mount failure logged only to stderr | rlog diagnostics + /dev/sdb candidates | e065204 |
+| 6 | DATA partition shows 1G (tmpfs fallback) | Static device name candidates missed actual device | Dynamic /sys/block/ scanning | e065204 |
 | 7 | Download UI stuck with no progress | Synchronous HTTP (30+ min block) | Async download + progress polling API | b60a8ab |
 | 8 | Only "Download Recommended" button | No model size picker | Tier selector dropdown + download-tier API | bbf990e |
 | 9 | Shard-1-only download check | Incomplete shards reported as done | Check all N shards exist | 0f2a08b |
@@ -304,9 +325,14 @@ syslog daemon (PID 1 is the LLM), all messages vanished. The `-f` flag bypasses 
 - ✅ Desktop mode auto-launches cog fullscreen (labwc + C++ fork/exec)
 - ✅ GRUB simplified to 2 entries (server + desktop)
 - ✅ WiFi scan finds networks in both server and desktop mode
-- ⬜ Install button — detection fixed (/cdrom/llamaste-live-iso), needs hardware test
-- ⬜ Install to NVMe — next priority after install button confirmed
-- ⬜ Desktop mode WiFi connect — untested (server mode confirmed)
+- ✅ Install to SATA — working on Toshiba 1TB
+- ✅ DATA partition auto-resize — 14.5/901.8 GB (dynamic /sys/block/ scanning)
+- ✅ 3B model download + inference — working on bare metal
+- ✅ Shutdown/reboot — working
+- ✅ SVG status bar icons — working
+- ⬜ Desktop mode — testing in progress
+- ⬜ 7B/14B model on 36GB RAM — next test
+- ⬜ A/B update on real hardware — untested
 
 ---
 
@@ -353,9 +379,10 @@ Iterative build-test cycles on real hardware uncovered and fixed several issues:
 ## Next Steps
 
 ### Immediate
-1. **Test install button** — Flash ISO (95c1979), boot desktop, verify Install tab appears
-2. **Install to NVMe** — Once install button confirmed, test actual install flow
-3. **DNS fix** — `/etc/resolv.conf` empty after WiFi connect (dhcpcd issue)
+1. **Desktop mode test results** — User testing in progress on ASUS VivoBook
+2. **7B/14B model on 36GB RAM** — Test larger models now that 3B confirmed working
+3. **Grammar-constrained JSON** — Add JSON schema to inference requests (speed + reliability)
+4. **A/B update testing on real hardware** — Verify update flow on bare metal
 
 ### Backlog
 - Desktop mode WiFi connect test
@@ -393,7 +420,7 @@ Iterative build-test cycles on real hardware uncovered and fixed several issues:
 | libsherpa-onnx-c-api.so | 3.5 MB | sherpa-onnx v1.12.28, Piper VITS TTS |
 | bzImage kernel | ~10 MB | CONFIG_MODULES=y, ~60 WiFi modules, CONFIG_PACKET=y |
 | rootfs.squashfs | ~170 MB | llamaste + ORT + sherpa-onnx + WPEWebKit + Mesa + Wayland + all libs |
-| llamaste.iso | 1.5 GB | Live ISO with GRUB, squashfs pivot, installer |
+| llamaste.iso | 1485 MB | Live ISO with GRUB, squashfs pivot, installer (v0.2.0) |
 | Boot time | ~2 seconds | Kernel -> HTTP server ready |
 
 ---

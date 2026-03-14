@@ -4,7 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: ✅ QEMU integration test suite COMPLETE (44 assertions, 0 failures). WiFi CONNECTED + PXE boot VERIFIED. 64 tools, 13 suites.
+- **Phase**: v0.2.0 — bare metal SATA install + inference CONFIRMED. Dynamic partition discovery. 64 tools, 13 suites.
+- **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM, Toshiba 1TB SATA — install, boot, 3B inference all working.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 1.5B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
@@ -139,6 +140,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **`iw reg set US` before scan**: cfg80211 can't load regulatory.db before squashfs pivot. Set regulatory domain explicitly via `iw reg set US` before scanning. For connection, `country=US` in wpa.conf handles it.
 - **BR2_LEGACY=y keeps reappearing**: Buildroot 2024.02 adds `BR2_LEGACY=y` to `.config` after `make defconfig` or other `make` operations. Must `sed -i "/BR2_LEGACY=y/d" .config` before every `make` build step. Can recur after any step that regenerates .config.
 - **`make linux-rebuild` is incremental — does NOT pick up new Kconfig options**: Always use `make linux-dirclean && make` when linux.config changes. Verify new drivers compiled in build output (e.g. `CC drivers/net/wireless/realtek/rtw88/rtw8821ce.o`).
+- **Dynamic partition discovery**: init_mount_data() now scans /sys/block/ as fallback after static candidates. Static list missed devices with unexpected names (e.g., SATA drive not at /dev/sda5 on some hardware). Always use dynamic fallback.
+- **Version is in version.h**: All version references (main.cpp, mcp_server.cpp, CMakeLists.txt, llamaste.mk) now use LLAMASTE_VERSION from version.h. Bump version.h for releases.
+- **Debug endpoints**: /debug/block-devices (auth required) shows all block devices, partitions, mounts, and init resize log. /llamaste/debug/resize-log (no auth) shows init partition discovery log.
 
 ## VirtualBox VM
 - VM "Llamaste2" at `D:\Llamaste\vm\Llamaste2\` — 4GB RAM, 2 CPUs, EFI64, NAT 8080→80
@@ -172,10 +176,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Install to NVMe** — Boot live → install → test inference on bare metal (GGML_NATIVE=ON + real CPU)
-2. **Remote access** — Add dropbear SSH or debug HTTP endpoint for easier diagnosis
-3. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
-4. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
+1. **Desktop mode hardware test** — Test desktop (GUI) mode on bare metal (in progress)
+2. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
+3. **Public GitHub repo** — Set up and publish the Llamaste repository publicly
 
 ### Backlog
 - **Desktop mode WiFi connect** — Server mode confirmed working; test desktop connect flow
