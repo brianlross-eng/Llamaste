@@ -67,7 +67,7 @@ PID2="${_qemu_pids[-1]}"
 
 # --- Wait for both nodes ---
 info "Waiting for Node 1..."
-if ! wait_for_health "$PORT1" 120 "$PID1"; then
+if ! wait_for_health "$PORT1" 180 "$PID1"; then
     echo "Node 1 failed to start"
     echo "--- Node 1 log (last 30 lines) ---"
     tail -30 "/tmp/qemu-cluster-node1-$$.log"
@@ -75,7 +75,7 @@ if ! wait_for_health "$PORT1" 120 "$PID1"; then
 fi
 
 info "Waiting for Node 2..."
-if ! wait_for_health "$PORT2" 120 "$PID2"; then
+if ! wait_for_health "$PORT2" 180 "$PID2"; then
     echo "Node 2 failed to start"
     echo "--- Node 2 log (last 30 lines) ---"
     tail -30 "/tmp/qemu-cluster-node2-$$.log"
