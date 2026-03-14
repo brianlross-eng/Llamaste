@@ -12,6 +12,12 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": ["scripts/host-test.sh"],
       "port": 0
+    },
+    {
+      "name": "static-preview",
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/c", "npx serve src/llamaste/web -l 3333 --no-clipboard"],
+      "port": 3333
     }
   ]
 }
