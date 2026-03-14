@@ -163,11 +163,16 @@ static void supervisor_sigchld(int) {
 
 static void supervisor_sigterm(int) {
     g_shutdown_requested = 1;
+    // Kill the child so waitpid() returns.  Without this, SA_RESTART
+    // causes waitpid() to silently restart and the supervisor never
+    // breaks out of the wait loop.
+    if (g_child_pid > 0) kill(g_child_pid, SIGTERM);
 }
 
 static void supervisor_sigusr1(int) {
     g_reboot_requested = 1;
     g_shutdown_requested = 1;
+    if (g_child_pid > 0) kill(g_child_pid, SIGTERM);
 }
 
 extern int child_main(const SupervisorConfig& config);
