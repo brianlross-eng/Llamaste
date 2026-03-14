@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-13 (QEMU integration test suite complete — 6d2b10b)
+**Last updated**: 2026-03-14 (Real hardware testing — WiFi, install, model download)
 
 ---
 
@@ -96,7 +96,51 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-13) -- QEMU Integration Test Suite
+## Latest Session (2026-03-14) -- Real Hardware Testing & Fixes
+
+### Hardware Test Results (ASUS VivoBook, i5-1035G1, 36GB RAM)
+
+| Test | Status |
+|------|--------|
+| USB boot (server-live) | ✅ PASS |
+| Install to SATA Toshiba 1TB | ✅ PASS |
+| Boot from SATA (server mode) | ✅ PASS (after ip=dhcp fix) |
+| Boot from SATA (desktop mode) | ✅ PASS |
+| WiFi connect (RTL8821CE) | ✅ PASS (after BSSID fix) |
+| DATA partition mount + auto-resize | ✅ PASS — 953 GB ext4 |
+| DHCP on installed system | ✅ PASS (dhcpcd-hook binary) |
+| Model download (32B sharded) | IN PROGRESS — shard 1 done, shard 2 downloading |
+
+### Bugs Found & Fixed
+
+| # | Bug | Root Cause | Fix | Commit |
+|---|-----|-----------|-----|--------|
+| 1 | 2-min boot timeout on installed system | `ip=dhcp` in grub.cfg | Removed kernel DHCP param | 6dfa105 |
+| 2 | dhcpcd can't run hooks without /bin/sh | Shell-based dhcpcd-run-hooks | C binary replacement (dhcpcd-hook.c) | 1a7ed51 |
+| 3 | /var/run read-only on squashfs | Squashfs is immutable | tmpfs mounts on /var/run, /var/db | 1a7ed51 |
+| 4 | WiFi 4-way handshake failure (installed) | Stale BSSID in persisted wpa.conf | clear_all_bssids() at startup | 942ebe4 |
+| 5 | Model download 404 (HuggingFace) | Sharded GGUF format change | Updated filenames + shard loop | 55016e3 |
+| 6 | DATA partition shows 1G (tmpfs fallback) | Mount failure logged only to stderr | rlog diagnostics + /dev/sdb candidates | e065204 |
+| 7 | Download UI stuck with no progress | Synchronous HTTP (30+ min block) | Async download + progress polling API | b60a8ab |
+| 8 | Only "Download Recommended" button | No model size picker | Tier selector dropdown + download-tier API | bbf990e |
+| 9 | Shard-1-only download check | Incomplete shards reported as done | Check all N shards exist | 0f2a08b |
+
+### Commits This Session
+
+| Commit | Description |
+|--------|-------------|
+| 1a7ed51 | feat: add dhcpcd-hook C binary and fix read-only squashfs mounts |
+| 6dfa105 | fix: remove ip=dhcp from grub.cfg to prevent 2-min boot timeout |
+| 55016e3 | feat: support HuggingFace sharded GGUF model downloads |
+| e065204 | fix: improve DATA partition mount diagnostics and add sdb candidates |
+| 942ebe4 | fix: clear stale BSSID hints to prevent WiFi 4-way handshake failures |
+| b60a8ab | feat: async model download with progress polling |
+| bbf990e | feat: add model tier selector and download-tier endpoint |
+| 0f2a08b | fix: check all shards exist before reporting model as downloaded |
+
+---
+
+## Previous Session (2026-03-13) -- QEMU Integration Test Suite
 
 ### Test Suite Implementation (a02e022 - 6d2b10b)
 
