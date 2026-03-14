@@ -405,6 +405,10 @@ void init_mount_filesystems() {
     try_mount("devtmpfs", "/dev",     "devtmpfs", 0, nullptr);
     try_mount("tmpfs",    "/tmp",     "tmpfs",    0, "size=64M");
     try_mount("tmpfs",    "/run",     "tmpfs",    0, "size=16M");
+    // /var/run and /var/db must be writable for dhcpcd, wpa_supplicant, etc.
+    // Squashfs is read-only, so mount tmpfs over them.
+    try_mount("tmpfs",    "/var/run",  "tmpfs",    0, "size=4M");
+    try_mount("tmpfs",    "/var/db",   "tmpfs",    0, "size=4M");
     mkdir("/dev/pts", 0755);
     try_mount("devpts",   "/dev/pts", "devpts",   0, nullptr);
     // /dev/shm: required by wlroots' os_create_anonymous_file() fallback path.

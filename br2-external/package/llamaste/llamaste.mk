@@ -38,6 +38,8 @@ endif
 define LLAMASTE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \
 		$(TARGET_DIR)/opt/llamaste/llamaste
+	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/dhcpcd-hook \
+		$(TARGET_DIR)/lib/dhcpcd/dhcpcd-run-hooks
 endef
 
 $(eval $(cmake-package))

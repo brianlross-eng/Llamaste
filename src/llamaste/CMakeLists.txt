@@ -216,4 +216,10 @@ if(LLAMASTE_EMBED_WEB)
     target_compile_definitions(llamaste PRIVATE LLAMASTE_HAS_EMBED)
 endif()
 
+# dhcpcd-hook: minimal C replacement for shell-based dhcpcd-run-hooks.
+# Allows dhcpcd to configure interfaces on systems without /bin/sh.
+add_executable(dhcpcd-hook dhcpcd-hook.c)
+target_link_options(dhcpcd-hook PRIVATE -static-libgcc)
+install(TARGETS dhcpcd-hook RUNTIME DESTINATION lib/dhcpcd)
+
 install(TARGETS llamaste RUNTIME DESTINATION opt/llamaste)
