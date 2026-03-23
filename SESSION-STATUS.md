@@ -96,7 +96,42 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-14) -- Version 0.2.0a, 14B Model Testing, Roadmap Expansion
+## Latest Session (2026-03-23) -- EVO-X2 Bugfixes + Boot Debugging
+
+### Bugfixes Applied (from BUGFIX-*.md files)
+| Bugfix | Status |
+|--------|--------|
+| DATA partition resize crash on 2TB+ NVMe (init.cpp) | ✅ Applied — safer GPT write with error checks, PMBR clamp to uint32 |
+| Desktop mode AMD GPU (linux.config, hwdetect.cpp) | ⚠️ Applied then REVERTED — CONFIG_DRM_AMDGPU=y caused black screen (steals display before firmware available). Needs =m module approach with firmware in overlay |
+| DHCP first boot (grub.cfg, child_main.cpp, dhcpcd.conf) | ✅ Applied — ip=dhcp in grub.cfg, dhcpcd.conf timeout 30, fork/exec retry (system() broken w/o /bin/sh) |
+| main.cpp tmpfs fallback | ✅ Applied — init_mount_data() failure → tmpfs /data |
+| hwdetect.cpp PCI scan | ✅ Applied — fallback GPU detection via PCI bus |
+
+### EVO-X2 Kernel Panic — INVESTIGATING
+- **Symptom**: `Kernel Panic - not syncing: Attempting to kill init! exitcode=0x00000`
+- **When**: Booting from USB (live ISO) on GMKtec EVO-X2
+- **Binary never reaches main()**: Ultra-early `write()` diagnostic (`[INIT] BINARY STARTED`) never appears
+- **Exit code 0x00000**: Binary exits cleanly before main() — not a crash/signal
+- **All shared libs present in ISO**: liblzma, libcurl, libasound, libflite*, libespeak-ng, libsherpa-onnx-c-api, libc — all verified
+- **No RPATH/RUNPATH**: Binary relies on musl default paths (/lib, /usr/lib) — all correct
+- **Works in QEMU**: Same ISO boots fine in QEMU emulation
+- **Prime suspect**: ONNX Runtime global constructor (libonnxruntime.so.1 loaded via libsherpa-onnx-c-api.so) — ORT does CPU feature detection at load time
+- **Diagnostic ISO built**: 3rd GRUB entry "Diagnostic - Kernel Test (static init)" — tiny 18KB static binary, no shared libs
+- **Next step**: User boots diagnostic entry. If static init works → problem is in shared libs (likely ORT). If static init also panics → kernel config issue
+
+### Files Modified
+- `br2-external/board/llamaste/grub.cfg` — ip=dhcp added to both entries
+- `br2-external/board/llamaste/grub-live.cfg` — loglevel=7 panic=30 + diagnostic entry
+- `br2-external/board/llamaste/linux.config` — AMDGPU removed (was causing black screen)
+- `br2-external/board/llamaste/overlay/etc/dhcpcd.conf` — timeout 30, reboot 10
+- `src/llamaste/child_main.cpp` — DHCP retry fork/exec (replaced broken system() call)
+- `src/llamaste/init.cpp` — GPT resize error handling, PMBR uint32 clamp
+- `src/llamaste/main.cpp` — init_mount_data() bool check + tmpfs fallback + early diagnostics
+- `src/llamaste/hwdetect.cpp` — PCI bus GPU scan fallback
+
+---
+
+## Previous Session (2026-03-14) -- Version 0.2.0a, 14B Model Testing, Roadmap Expansion
 
 ### Version 0.2.0a
 - Version bumped to 0.2.0a (version.h authoritative)

@@ -2489,29 +2489,52 @@ int child_main(const SupervisorConfig& config) {
                 fprintf(stderr, "[net] %s: carrier detected, spawning dhcpcd\n", ifname.c_str());
                 spawn_dhcpcd(ifname);
 
-                // Wait up to 10s for DHCP lease
-                for (int w = 0; w < 20; w++) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    int sk = socket(AF_INET, SOCK_DGRAM, 0);
-                    if (sk >= 0) {
-                        struct ifreq ifr2 = {};
-                        strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
-                        if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
-                            auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
-                            char ip[INET_ADDRSTRLEN];
-                            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
-                            if (strcmp(ip, "0.0.0.0") != 0) {
-                                fprintf(stderr, "[net] %s: DHCP lease obtained: %s (took %dms)\n",
-                                        ifname.c_str(), ip, (w + 1) * 500);
-                                close(sk);
-                                break;
+                // Wait up to 10s for DHCP lease, then retry once with
+                // a fresh dhcpcd spawn (handles cold DHCP servers like
+                // Windows ICS that are slow on first-seen MAC addresses)
+                bool got_lease = false;
+                for (int attempt = 0; attempt < 2 && !got_lease; attempt++) {
+                    int wait_iters = (attempt == 0) ? 20 : 30;  // 10s first, 15s retry
+                    for (int w = 0; w < wait_iters; w++) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sk >= 0) {
+                            struct ifreq ifr2 = {};
+                            strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                            if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
+                                auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
+                                char ip[INET_ADDRSTRLEN];
+                                inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                                if (strcmp(ip, "0.0.0.0") != 0) {
+                                    fprintf(stderr, "[net] %s: DHCP lease obtained: %s (attempt %d, %dms)\n",
+                                            ifname.c_str(), ip, attempt + 1, (w + 1) * 500);
+                                    close(sk);
+                                    got_lease = true;
+                                    break;
+                                }
                             }
+                            close(sk);
                         }
-                        close(sk);
                     }
-                    if (w == 19) {
-                        fprintf(stderr, "[net] %s: no DHCP lease after 10s\n", ifname.c_str());
+                    if (!got_lease && attempt == 0) {
+                        fprintf(stderr, "[net] %s: no DHCP lease after 10s, retrying...\n", ifname.c_str());
+                        // Kill stale dhcpcd and respawn fresh
+                        // NOTE: system() doesn't work — no /bin/sh (BR2_SYSTEM_BIN_SH_NONE)
+                        // Use fork/exec directly
+                        pid_t kpid = fork();
+                        if (kpid == 0) {
+                            execl("/sbin/dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
+                            _exit(1);
+                        } else if (kpid > 0) {
+                            int kst = 0;
+                            waitpid(kpid, &kst, 0);
+                        }
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        spawn_dhcpcd(ifname);
                     }
+                }
+                if (!got_lease) {
+                    fprintf(stderr, "[net] %s: no DHCP lease after retries (dhcpcd -b will keep trying in background)\n", ifname.c_str());
                 }
             }
             closedir(nd);

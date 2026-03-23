@@ -259,6 +259,12 @@ static void grow_gpt_partition(const char* part_dev) {
     ssize_t w2 = pwrite(fd, &hdr, sizeof(hdr), 512);
     rlog("[init] GPT: primary write: entries=%zd header=%zd\n", w1, w2);
 
+    if (w1 != (ssize_t)entries_bytes || w2 != (ssize_t)sizeof(hdr)) {
+        rlog("[init] GPT: WARNING — primary GPT write failed, skipping resize\n");
+        close(fd);
+        return;
+    }
+
     // Write backup GPT structures
     uint64_t backup_entries_lba = disk_sectors - 33;
     ssize_t w3 = pwrite(fd, entries.data(), entries_bytes, backup_entries_lba * 512);
@@ -272,16 +278,26 @@ static void grow_gpt_partition(const char* part_dev) {
     ssize_t w4 = pwrite(fd, &backup, sizeof(backup), (disk_sectors - 1) * 512);
     rlog("[init] GPT: backup write: entries=%zd header=%zd\n", w3, w4);
 
+    if (w3 != (ssize_t)entries_bytes || w4 != (ssize_t)sizeof(backup)) {
+        rlog("[init] GPT: WARNING — backup GPT write failed (non-fatal)\n");
+    }
+
     // Update Protective MBR size + CHS end
     uint8_t mbr[512];
     if (pread(fd, mbr, 512, 0) == 512) {
+        // PMBR disk size at offset 458 is 32-bit — clamp to max uint32
         uint32_t pmbr_size = (uint32_t)std::min(disk_sectors - 1,
                                                   (uint64_t)0xFFFFFFFF);
         memcpy(&mbr[458], &pmbr_size, 4);
-        mbr[446 + 5] = 0xFE;  // CHS end: head
-        mbr[446 + 6] = 0xFF;  // CHS end: sector + cyl_hi
-        mbr[446 + 7] = 0xFF;  // CHS end: cyl_lo
-        pwrite(fd, mbr, 512, 0);
+        // CHS end at offsets 451-453 — use max value (all disks > 8GB)
+        mbr[446 + 5] = 0xFE;  // CHS end: head 254
+        mbr[446 + 6] = 0xFF;  // CHS end: sector 63 + cylinder high bits
+        mbr[446 + 7] = 0xFF;  // CHS end: cylinder low bits
+        if (pwrite(fd, mbr, 512, 0) != 512) {
+            rlog("[init] GPT: WARNING — PMBR write failed (non-fatal)\n");
+        }
+    } else {
+        rlog("[init] GPT: WARNING — PMBR read failed, skipping PMBR update\n");
     }
 
     int sync_ret = fsync(fd);

@@ -141,19 +141,25 @@ static void scan_usb_for_model() {
 }
 
 int main(int argc, char** argv) {
+    // Ultra-early diagnostic — if this doesn't appear, binary didn't start
+    write(STDERR_FILENO, "[INIT] BINARY STARTED\n", 22);
+
     fprintf(stderr, "\n");
     fprintf(stderr, "  Llamaste v%s — LLM IS the OS\n", LLAMASTE_VERSION);
     fprintf(stderr, "\n");
 
     bool pid1 = (getpid() == 1);
+    fprintf(stderr, "[main] PID=%d pid1=%s\n", getpid(), pid1 ? "true" : "false");
 
     if (pid1) {
+        fprintf(stderr, "[main] Mounting filesystems...\n");
         init_mount_filesystems();
+        fprintf(stderr, "[main] Filesystems mounted, attempting live pivot...\n");
         // Live ISO: pivot to the full squashfs system and re-exec.
-        // No-op on installed system (guard checks /boot/bzImage which only
-        // exists on the ISO root, not inside rootfs.squashfs).
+        // Guard: /llamaste-live-iso marker file (only in ISO root, not squashfs).
         // If pivot succeeds, execv() is called and we never reach the next line.
         do_live_pivot(argv);
+        fprintf(stderr, "[main] Live pivot returned (not a live ISO, or pivot failed)\n");
     }
 
     std::string mode = init_parse_boot_mode();
@@ -168,7 +174,10 @@ int main(int argc, char** argv) {
             // Check for a second USB drive with a .gguf model file
             scan_usb_for_model();
         } else {
-            init_mount_data();
+            if (!init_mount_data()) {
+                fprintf(stderr, "[main] WARNING: DATA partition mount failed — using tmpfs fallback\n");
+                mount("tmpfs", "/data", "tmpfs", 0, "size=512M");
+            }
         }
         init_create_data_dirs();
         init_mount_esp();   // Mount ESP for grubenv (A/B update slot management)
@@ -207,6 +216,10 @@ int main(int argc, char** argv) {
 
     if (pid1) {
         supervisor_run(sc);
+        // supervisor_run should never return; if it does, sleep forever
+        // to prevent PID 1 exit (which triggers kernel panic)
+        fprintf(stderr, "[main] ERROR: supervisor_run returned unexpectedly\n");
+        while (true) { sleep(3600); }
     } else {
         fprintf(stderr, "[main] Not PID 1, running child_main directly\n");
         extern int child_main(const SupervisorConfig& config);

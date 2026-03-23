@@ -173,12 +173,16 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
 - **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
+- **EVO-X2 kernel panic on boot**: `exitcode=0x00000` — binary exits before main(). Diagnostic ISO built with static test init. Suspect: ORT global constructor or CPU-specific issue. INVESTIGATING.
+- **CONFIG_DRM_AMDGPU=y causes black screen**: Built-in AMDGPU steals display from simpledrm before rootfs mounted (no firmware). Must use =m (module) loaded after squashfs pivot. Currently disabled.
+- **system() silently fails**: `BR2_SYSTEM_BIN_SH_NONE=y` means `system()` returns -1 (no /bin/sh). Always use `fork()/execl()` instead. Fixed in DHCP retry (child_main.cpp).
 
 ## Next Steps
 ### Immediate
-1. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
-2. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
-3. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
+1. **EVO-X2 boot diagnostic** — Test static init GRUB entry to isolate kernel vs binary/libs
+2. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
+3. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
+4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
 
 ### Roadmap (Future Phases)
 - **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving

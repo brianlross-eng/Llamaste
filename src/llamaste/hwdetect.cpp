@@ -72,5 +72,31 @@ HardwareInfo detect_hardware() {
         closedir(drm);
     }
 
+    // Fallback: scan PCI bus for GPUs not exposed via DRM (e.g. no kernel driver loaded)
+    if (!hw.gpu_detected) {
+        DIR* pci = opendir("/sys/bus/pci/devices");
+        if (pci) {
+            struct dirent* entry;
+            while ((entry = readdir(pci)) != nullptr) {
+                if (entry->d_name[0] == '.') continue;
+                std::string base = std::string("/sys/bus/pci/devices/") + entry->d_name;
+                std::string vendor = read_sysfs_line((base + "/vendor").c_str());
+                std::string cls = read_sysfs_line((base + "/class").c_str());
+                // PCI class 0x03xxxx = display controller
+                unsigned long cls_val = 0;
+                if (!cls.empty()) cls_val = strtoul(cls.c_str(), nullptr, 16);
+                if ((cls_val >> 16) == 0x03) {
+                    hw.gpu_detected = true;
+                    if (vendor == "0x10de") hw.gpu_name = "NVIDIA";
+                    else if (vendor == "0x1002") hw.gpu_name = "AMD";
+                    else if (vendor == "0x8086") hw.gpu_name = "Intel";
+                    else hw.gpu_name = "GPU (PCI " + vendor + ")";
+                    break;
+                }
+            }
+            closedir(pci);
+        }
+    }
+
     return hw;
 }
