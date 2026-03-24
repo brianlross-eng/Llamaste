@@ -1107,13 +1107,17 @@ void init_load_modules() {
     // udev coldplug would race with compositor startup.
     fprintf(stderr, "[init] Loading critical GPU modules...\n");
 
-    // DRM memory manager dependencies (shared by amdgpu + nouveau)
-    load_module_by_path(mod_base, "drivers/gpu/drm/drm_ttm_helper.ko");
+    // DRM dependencies (shared by amdgpu + nouveau)
+    load_module_by_path(mod_base, "drivers/gpu/drm/scheduler/gpu-sched.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/drm_exec.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/drm_suballoc_helper.ko");
+    // TTM/buddy may be built-in or separate modules depending on kernel version
     load_module_by_path(mod_base, "drivers/gpu/drm/ttm/ttm.ko");
     load_module_by_path(mod_base, "drivers/gpu/drm/drm_buddy.ko");
-    load_module_by_path(mod_base, "drivers/gpu/drm/scheduler/gpu-sched.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/drm_ttm_helper.ko");
 
     // AMD GPU (=m, must load after squashfs pivot for firmware)
+    load_module_by_path(mod_base, "drivers/gpu/drm/amd/amdxcp/amdxcp.ko");
     load_module_by_path(mod_base, "drivers/gpu/drm/amd/amdgpu/amdgpu.ko");
 
     // NVIDIA nouveau (=m)
