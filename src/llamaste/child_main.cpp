@@ -619,8 +619,17 @@ static std::string llama_inference(const std::string& request_json) {
             result->body.size(), result->body.c_str());
     auto comp_resp = json::parse(result->body, nullptr, false);
     std::string content;
-    if (!comp_resp.is_discarded() && comp_resp.contains("content")) {
+    if (!comp_resp.is_discarded() && comp_resp.contains("content") && comp_resp["content"].is_string()) {
         content = comp_resp["content"].get<std::string>();
+    } else if (!comp_resp.is_discarded()) {
+        // Log what we actually got — helps debug 3B model null content issues
+        std::string content_type = comp_resp.contains("content")
+            ? comp_resp["content"].type_name() : "missing";
+        fprintf(stderr, "[inference] WARNING: /completion content is %s (not string), "
+                "full response keys:", content_type);
+        for (auto it = comp_resp.begin(); it != comp_resp.end(); ++it)
+            fprintf(stderr, " %s(%s)", it.key().c_str(), it.value().type_name());
+        fprintf(stderr, "\n");
     }
 
     // --- Parse Qwen2.5 native <tool_call> tags from the generated text ---
@@ -3595,9 +3604,9 @@ int child_main(const SupervisorConfig& config) {
                 return;
             }
             auto body = json::parse(req.body, nullptr, false);
-            if (body.is_discarded() || !body.contains("text")) {
+            if (body.is_discarded() || !body.contains("text") || !body["text"].is_string()) {
                 res.status = 400;
-                res.set_content(R"json({"error":"text field required"})json", "application/json");
+                res.set_content(R"json({"error":"text field required (string)"})json", "application/json");
                 return;
             }
             std::string text = body["text"].get<std::string>();
