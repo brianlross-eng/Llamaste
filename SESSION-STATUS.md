@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-14 (Version 0.2.0a, 14B model tested, roadmap expansion)
+**Last updated**: 2026-03-24 (Hardware compatibility research + design + plan complete)
 
 ---
 
@@ -96,7 +96,49 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-23) -- EVO-X2 Bugfixes + Boot Debugging
+## Latest Session (2026-03-24) -- Hardware Compatibility Research + Design + Plan
+
+### Hardware Compatibility Expansion (Phase B + C)
+
+Comprehensive research and planning session for expanding hardware coverage from ~75% to ~97% (Phase B) and ~99% (Phase C).
+
+| Deliverable | Status |
+|-------------|--------|
+| 7 research documents (4,786 lines) | DONE — research/hardware-compat-*.md |
+| Design spec (Approach B: eudev + Approach C: kernel 6.12) | DONE — docs/superpowers/specs/2026-03-24-hardware-compatibility-design.md |
+| 9-step implementation plan (Phase B: 5-7 sessions) | DONE — docs/superpowers/plans/2026-03-24-hardware-compatibility-plan.md |
+| Spec review (5 critical + 7 important issues found & fixed) | DONE — docs/superpowers/reviews/2026-03-24-hardware-compatibility-review.md |
+| linux-kernel-hardware skill created | DONE — ~/.claude/skills/linux-kernel-hardware.md |
+
+### Key Architecture Decisions
+- **eudev + kmod** replaces hardcoded 80-module `init_load_modules()` — auto-detection via modalias
+- **GPU modules explicitly loaded** before udev trigger (amdgpu, nouveau need firmware from squashfs)
+- **udevadm trigger --subsystem-nomatch=input** early, input trigger delayed until Wayland socket exists
+- **BlueZ + dbus** for Bluetooth HID (~4.5MB), with supervisor restart monitoring
+- **3-tier firmware**: Tier 1 bundled (~50-70MB), Tier 2 downloadable, Tier 3 on-demand
+- **IOMMU_DEFAULT_DMA_LAZY** (NOT PASSTHROUGH — avoids silent memory corruption)
+- **Squashfs size budget**: ~200MB → ~300MB (under 350MB limit)
+
+### Commits
+| Commit | Description |
+|--------|-------------|
+| a7a4fc5 | docs: hardware compatibility research + design spec + implementation plan |
+| 0d02327 | fix: address spec review findings — 5 critical + 7 important fixes |
+
+### Phase B Implementation Plan (9 Steps)
+1. Kernel config — platform (I2C, HID, IOMMU, ACPI, pinctrl, cpufreq)
+2. Kernel config — ethernet + WiFi expansion
+3. Kernel config — GPU (amdgpu, nouveau, Mesa)
+4. Bluetooth (BlueZ, dbus, kernel BT, pairing)
+5. eudev auto-detection (replace hardcoded modules) — most complex
+6. Firmware expansion + sound
+7. Hardware detection enhancement
+8. Testing + regression
+9. Documentation
+
+---
+
+## Previous Session (2026-03-23) -- EVO-X2 Bugfixes + Boot Debugging
 
 ### Bugfixes Applied (from BUGFIX-*.md files)
 | Bugfix | Status |
@@ -422,21 +464,25 @@ Iterative build-test cycles on real hardware uncovered and fixed several issues:
 
 ## Next Steps
 
-### Immediate
-1. **Audio fix (mic/speaker)** — Native C++ audio bypass (not browser-based) for desktop mode
-2. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
-3. **Grammar-constrained JSON** — Add JSON schema to inference requests (speed + reliability)
-4. **A/B update testing on real hardware** — Verify update flow on bare metal
+### Immediate — Phase B Hardware Compatibility (IN PROGRESS)
+1. **Step 1**: Kernel config — platform support (I2C, HID, IOMMU, ACPI, pinctrl, cpufreq)
+2. **Step 2**: Kernel config — ethernet + WiFi expansion
+3. **Step 3**: Kernel config — GPU drivers (amdgpu=m, nouveau=m, xe=m) + Mesa (radeonsi, nouveau, llvmpipe)
+4. **Step 4**: Bluetooth (BlueZ, dbus, kernel BT modules, pairing persistence)
+5. **Step 5**: eudev auto-detection (replace hardcoded init_load_modules)
+6. **Steps 6-9**: Firmware, hwdetect, testing, docs
+
+### After Phase B
+- **Phase C**: Kernel 6.12 LTS upgrade (WiFi 7, Intel Xe, Thunderbolt, webcam)
+- **Audio fix (mic/speaker)** — Native C++ audio bypass for desktop mode
+- **EVO-X2 boot diagnostic** — Static init test to isolate kernel vs binary/libs
 
 ### Roadmap (Future Phases)
-- **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files
+- **Phase C (Skills)**: Self-learning skills — `/data/skills/` loader, LLM writes own skill files
 - **Phase D: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
 - **Phase E: Peer skill sharing** — Cluster nodes sync skills on join
 - **Phase F: Multi-user auth** — User accounts, roles (admin/user/guest), per-user history (v1.1/v2.0)
 - **Peer-to-peer model transfer** — Nodes serve GGUF shards to new cluster members
-- Desktop mode WiFi connect test
-- Voice quality tuning
-- Real two-VM mDNS test on LAN
 
 ---
 
