@@ -1185,7 +1185,7 @@ void init_load_modules() {
 // Runs in foreground with setsid() for signal isolation (not --daemon,
 // which double-forks and loses PID tracking — same issue as wpa_supplicant).
 // ─────────────────────────────────────────────────────────────────────────────
-static pid_t g_udevd_pid = 0;
+pid_t g_udevd_pid = 0;
 
 void init_start_udevd() {
 #ifdef _WIN32
@@ -1225,7 +1225,7 @@ void init_start_udevd() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Start dbus-daemon (system bus) — required by BlueZ for Bluetooth HID.
 // ─────────────────────────────────────────────────────────────────────────────
-static pid_t g_dbus_pid = 0;
+pid_t g_dbus_pid = 0;
 
 void init_start_dbus() {
 #ifdef _WIN32
@@ -1265,7 +1265,7 @@ void init_start_dbus() {
 // Requires dbus to be running first.
 // Pairing info stored at /data/bluetooth/ (symlinked from /var/lib/bluetooth).
 // ─────────────────────────────────────────────────────────────────────────────
-static pid_t g_bluetoothd_pid = 0;
+pid_t g_bluetoothd_pid = 0;
 
 void init_start_bluetoothd() {
 #ifdef _WIN32

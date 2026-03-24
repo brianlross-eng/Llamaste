@@ -10,6 +10,11 @@ void init_set_hostname(const std::string& default_name);
 std::string init_parse_boot_mode();
 void init_bring_up_loopback();
 void init_apply_network_config();
+// Daemon PIDs (for supervisor restart monitoring)
+extern pid_t g_udevd_pid;
+extern pid_t g_dbus_pid;
+extern pid_t g_bluetoothd_pid;
+
 void init_load_modules();          // Load critical GPU modules + start eudev auto-detection
 void init_start_udevd();           // Start udevd daemon for hardware auto-detection
 void init_start_dbus();            // Start dbus-daemon (required by BlueZ)

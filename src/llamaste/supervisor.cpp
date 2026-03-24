@@ -1,4 +1,5 @@
 #include "supervisor.h"
+#include "init.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1552,12 +1553,59 @@ static void supervisor_preflight_wifi(const SupervisorConfig& config) {
 
         fprintf(stderr, "[supervisor] Child PID %d running\n", g_child_pid);
 
-        // Wait for child to exit.
-        // The dedicated kicker thread handles watchdog kicks, so this waitpid()
-        // can block indefinitely without risking the softdog timeout.
+        // Wait for any child to exit.
+        // Uses waitpid(-1) to catch exits from child_main, dbus, or bluetoothd.
+        // If dbus/bluetoothd exit, respawn them (max 3 per 5 minutes).
+        // When child_main exits, proceed with restart logic.
         int status = 0;
-        waitpid(g_child_pid, &status, 0);
-        g_child_exited = 1;
+        static int dbus_restarts = 0, bt_restarts = 0;
+        static time_t dbus_restart_window = 0, bt_restart_window = 0;
+
+        while (true) {
+            pid_t exited = waitpid(-1, &status, 0);
+            if (exited < 0) break; // error or no children
+
+            if (exited == g_child_pid) {
+                // Main inference child exited — handle below
+                g_child_exited = 1;
+                break;
+            }
+
+            // Check if it's a daemon we should respawn
+            time_t now = time(nullptr);
+
+            if (exited == g_dbus_pid) {
+                fprintf(stderr, "[supervisor] dbus-daemon exited, respawning\n");
+                if (now - dbus_restart_window > 300) { dbus_restarts = 0; dbus_restart_window = now; }
+                if (dbus_restarts < 3) {
+                    init_start_dbus();
+                    dbus_restarts++;
+                    // Also restart bluetoothd since it depends on dbus
+                    if (g_bluetoothd_pid > 0) {
+                        kill(g_bluetoothd_pid, SIGTERM);
+                        waitpid(g_bluetoothd_pid, nullptr, WNOHANG);
+                    }
+                    init_start_bluetoothd();
+                } else {
+                    fprintf(stderr, "[supervisor] dbus-daemon restart limit (3/5min) reached\n");
+                }
+                continue;
+            }
+
+            if (exited == g_bluetoothd_pid) {
+                fprintf(stderr, "[supervisor] bluetoothd exited, respawning\n");
+                if (now - bt_restart_window > 300) { bt_restarts = 0; bt_restart_window = now; }
+                if (bt_restarts < 3) {
+                    init_start_bluetoothd();
+                    bt_restarts++;
+                } else {
+                    fprintf(stderr, "[supervisor] bluetoothd restart limit (3/5min) reached\n");
+                }
+                continue;
+            }
+
+            // Unknown child — ignore (could be a fire-and-forget process)
+        }
 
         fprintf(stderr, "[supervisor] Child exited (status=%d)\n", status);
 
