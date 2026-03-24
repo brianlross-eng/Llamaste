@@ -181,7 +181,9 @@ int main(int argc, char** argv) {
         }
         init_create_data_dirs();
         init_mount_esp();   // Mount ESP for grubenv (A/B update slot management)
-        init_load_modules();  // Load WiFi modules now that /lib/firmware/ is available
+        init_load_modules();  // Load GPU modules + start eudev auto-detection
+        init_start_dbus();    // Start dbus (required by BlueZ)
+        init_start_bluetoothd(); // Start BlueZ for Bluetooth HID
     }
 
     HardwareInfo hw = detect_hardware();

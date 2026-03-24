@@ -2584,13 +2584,45 @@ int child_main(const SupervisorConfig& config) {
         // when no native GPU driver is present (Xe/i915 firmware not yet loaded).
         setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
 
-        // Force pixman software renderer as fallback when no GPU driver is active.
-        // wlroots will use GL/Vulkan if available; pixman ensures we always get a
-        // display even with simpledrm only (no 3D acceleration).
-        // Can be overridden by setting WLR_RENDERER=gles2 from /etc/labwc/autostart
-        // once a proper GPU driver is confirmed.
-        if (!getenv("WLR_RENDERER"))
-            setenv("WLR_RENDERER", "pixman", 1);
+        // GPU-aware renderer selection.
+        // If a real GPU driver is loaded (amdgpu/nouveau/i915), wlroots auto-selects
+        // GL/Vulkan. We only force pixman when simpledrm is the only DRM device.
+        // This check looks at /sys/class/drm for card devices with real drivers.
+        if (!getenv("WLR_RENDERER")) {
+            bool has_real_gpu = false;
+            DIR* drm_dir = opendir("/sys/class/drm");
+            if (drm_dir) {
+                struct dirent* ent;
+                while ((ent = readdir(drm_dir))) {
+                    if (strncmp(ent->d_name, "card", 4) != 0) continue;
+                    if (strchr(ent->d_name, '-')) continue; // skip card0-HDMI-A-1 etc.
+                    std::string driver_path = std::string("/sys/class/drm/") +
+                        ent->d_name + "/device/driver";
+                    char link[256] = {};
+                    ssize_t len = readlink(driver_path.c_str(), link, sizeof(link) - 1);
+                    if (len > 0) {
+                        link[len] = '\0';
+                        const char* drv = strrchr(link, '/');
+                        if (drv) drv++; else drv = link;
+                        // simpledrm is software-only; everything else is a real GPU
+                        if (strcmp(drv, "simple-framebuffer") != 0 &&
+                            strcmp(drv, "simpledrm") != 0 &&
+                            strcmp(drv, "vboxvideo") != 0 &&
+                            strcmp(drv, "bochs-drm") != 0) {
+                            has_real_gpu = true;
+                            fprintf(stderr, "[child] Real GPU detected: %s (%s)\n",
+                                    ent->d_name, drv);
+                        }
+                    }
+                }
+                closedir(drm_dir);
+            }
+            if (!has_real_gpu) {
+                fprintf(stderr, "[child] No real GPU — using pixman renderer\n");
+                setenv("WLR_RENDERER", "pixman", 1);
+            }
+            // else: let wlroots auto-select GL/Vulkan
+        }
 
         // Point XDG config to /etc so labwc reads /etc/labwc/rc.xml etc.
         setenv("XDG_CONFIG_DIRS", "/etc", 1);
@@ -2620,29 +2652,11 @@ int child_main(const SupervisorConfig& config) {
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
 
-        // Start udevd so it can assign udev properties (ID_SEAT etc.) that
-        // libinput uses for device enumeration. We do NOT run udevadm trigger
-        // here — it runs later, AFTER cage creates its Wayland socket. Running
-        // trigger too early causes a race: keyboard device is enumerated while
-        // cage is still initializing → wlroots fails to allocate the shm file
-        // for the XKB keymap ("Failed to allocate shm file for XKB keymap:
-        // [errno]") → SIGSEGV on first key press. Delaying until the socket
-        // exists ensures wlroots is fully ready before handling any devices.
-        {
-            pid_t upid = fork();
-            if (upid == 0) {
-                int null_fd = open("/dev/null", O_WRONLY);
-                if (null_fd >= 0) { dup2(null_fd, STDOUT_FILENO); dup2(null_fd, STDERR_FILENO); close(null_fd); }
-                execl("/sbin/udevd", "udevd", "--daemon", nullptr);
-                execl("/usr/sbin/udevd", "udevd", "--daemon", nullptr);
-                _exit(1);
-            } else if (upid > 0) {
-                fprintf(stderr, "[child] Started udevd pid=%d\n", upid);
-                sleep(1);  // give udevd time to initialise before compositor starts
-            } else {
-                fprintf(stderr, "[child] fork for udevd failed: %m\n");
-            }
-        }
+        // NOTE: udevd is now started early in init_load_modules() (init.cpp).
+        // It handles coldplug for all subsystems EXCEPT input. The input
+        // trigger is still delayed until AFTER the Wayland socket exists
+        // (see run_udevadm_trigger lambda below) to prevent the wlroots
+        // XKB shm race condition (SIGSEGV on first key press).
 
 
         // Compositor spawn with crash fallback chain.

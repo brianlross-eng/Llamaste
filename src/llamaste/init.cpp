@@ -1047,13 +1047,46 @@ bool do_live_pivot(char** argv) {
 //
 // We use the finit_module() syscall directly (no modprobe/kmod needed).
 // Modules are loaded in dependency order by scanning /lib/modules/<ver>/kernel/
-// for known paths. Failures are non-fatal (hardware may not be present).
+// GPU modules + eudev auto-detection for all other hardware.
+//
+// Strategy:
+//   1. Load critical GPU modules explicitly (need to be ready before compositor)
+//   2. Start udevd (auto-loads all other modules via modalias matching)
+//   3. Trigger udev coldplug for all subsystems EXCEPT input
+//      (input trigger is delayed until Wayland socket exists — see child_main.cpp)
+//   4. Wait for device probing to settle
+//
+// This replaces the old hardcoded 80-module list. eudev + kmod handles
+// dependency resolution and hardware detection automatically.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: load a single module via finit_module() syscall
+static int load_module_by_path(const std::string& mod_base, const char* rel_path) {
+    std::string full_path = mod_base + "/kernel/" + rel_path;
+    if (access(full_path.c_str(), R_OK) != 0) return -1; // not built
+
+    int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+
+    int ret = syscall(SYS_finit_module, fd, "", 0);
+    int saved_errno = errno;
+    close(fd);
+
+    if (ret == 0) {
+        fprintf(stderr, "[init] GPU module: loaded %s\n", rel_path);
+        return 0;
+    } else if (saved_errno == EEXIST) {
+        return 0; // already loaded
+    } else {
+        fprintf(stderr, "[init] GPU module: %s: %s\n", rel_path, strerror(saved_errno));
+        return -1;
+    }
+}
+
 void init_load_modules() {
 #ifdef _WIN32
     return;
 #else
-    // Get kernel version for module path
     struct utsname uts;
     if (uname(&uts) < 0) {
         fprintf(stderr, "[init] modules: uname failed: %m\n");
@@ -1061,7 +1094,6 @@ void init_load_modules() {
     }
     std::string mod_base = "/lib/modules/" + std::string(uts.release);
 
-    // Check if modules directory exists (may not exist if CONFIG_MODULES=n kernel)
     struct stat st;
     if (stat(mod_base.c_str(), &st) != 0) {
         fprintf(stderr, "[init] modules: %s not found — built-in kernel, skipping\n",
@@ -1069,157 +1101,204 @@ void init_load_modules() {
         return;
     }
 
-    fprintf(stderr, "[init] Loading kernel modules from %s\n", mod_base.c_str());
+    // --- Phase 1: Load critical GPU modules explicitly ---
+    // GPU must be ready before the desktop compositor starts.
+    // These are loaded via finit_module() BEFORE eudev trigger because
+    // udev coldplug would race with compositor startup.
+    fprintf(stderr, "[init] Loading critical GPU modules...\n");
 
-    // Module load order — dependencies must come before dependents.
-    // Each entry is relative to /lib/modules/<ver>/kernel/
-    // Non-existent modules are silently skipped (hardware not targeted in this build).
-    const char* module_paths[] = {
-        // WiFi vendor drivers (cfg80211 + mac80211 are built-in =y)
-        //
-        // --- Intel WiFi ---
-        "drivers/net/wireless/intel/iwlwifi/iwlwifi.ko",
-        "drivers/net/wireless/intel/iwlwifi/dvm/iwldvm.ko",
-        "drivers/net/wireless/intel/iwlwifi/mvm/iwlmvm.ko",
-        //
-        // --- Realtek RTW88 (PCIe + USB) ---
-        "drivers/net/wireless/realtek/rtw88/rtw88_core.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_pci.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_usb.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8821c.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8821ce.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8821cu.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822b.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822be.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822bu.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822c.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822ce.ko",
-        "drivers/net/wireless/realtek/rtw88/rtw88_8822cu.ko",
-        //
-        // --- Realtek RTW89 (WiFi 6/6E PCIe) ---
-        "drivers/net/wireless/realtek/rtw89/rtw89_core.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_pci.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852a.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852ae.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852b.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852be.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852c.ko",
-        "drivers/net/wireless/realtek/rtw89/rtw89_8852ce.ko",
-        //
-        // --- Realtek legacy USB (RTL8192CU) ---
-        "drivers/net/wireless/realtek/rtlwifi/rtlwifi.ko",
-        "drivers/net/wireless/realtek/rtlwifi/rtl_usb.ko",
-        "drivers/net/wireless/realtek/rtlwifi/rtl8192c/rtl8192c-common.ko",
-        "drivers/net/wireless/realtek/rtlwifi/rtl8192cu/rtl8192cu.ko",
-        //
-        // --- Qualcomm/Atheros ath10k ---
-        "drivers/net/wireless/ath/ath.ko",
-        "drivers/net/wireless/ath/ath10k/ath10k_core.ko",
-        "drivers/net/wireless/ath/ath10k/ath10k_pci.ko",
-        "drivers/net/wireless/ath/ath10k/ath10k_usb.ko",
-        //
-        // --- Qualcomm ath11k (WiFi 6) ---
-        "drivers/net/wireless/ath/ath11k/ath11k.ko",
-        "drivers/net/wireless/ath/ath11k/ath11k_pci.ko",
-        //
-        // --- Atheros ath9k (older hardware) ---
-        "drivers/net/wireless/ath/ath9k/ath9k_hw.ko",
-        "drivers/net/wireless/ath/ath9k/ath9k_common.ko",
-        "drivers/net/wireless/ath/ath9k/ath9k.ko",
-        //
-        // --- MediaTek MT76 PCIe (MT7921/MT7922) ---
-        "drivers/net/wireless/mediatek/mt76/mt76.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko",
-        "drivers/net/wireless/mediatek/mt76/mt792x-lib.ko",
-        "drivers/net/wireless/mediatek/mt76/mt7921/mt7921-common.ko",
-        "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko",
-        //
-        // --- MediaTek MT76 USB (MT7612U, MT7610U dongles) ---
-        "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0-common.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0u.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-        "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
-        //
-        // --- Broadcom FullMAC (BCM4356, BCM4371, BCM43455) ---
-        "drivers/net/wireless/broadcom/brcm80211/brcmutil/brcmutil.ko",
-        "drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko",
-        //
-        // --- Ralink/MediaTek RT2800 USB (RT5370, RT5572) ---
-        "drivers/net/wireless/ralink/rt2x00/rt2x00lib.ko",
-        "drivers/net/wireless/ralink/rt2x00/rt2x00usb.ko",
-        "drivers/net/wireless/ralink/rt2x00/rt2800lib.ko",
-        "drivers/net/wireless/ralink/rt2x00/rt2800usb.ko",
-        //
-        // === USB Ethernet adapters (dongles) ===
-        // Dependencies (must load before drivers that need them)
-        "drivers/net/phy/phylink.ko",          // needed by asix
-        "drivers/usb/class/cdc-wdm.ko",       // needed by cdc_mbim
-        // Base USB networking framework
-        "drivers/net/mii.ko",
-        "drivers/net/usb/usbnet.ko",
-        "drivers/net/usb/cdc_ether.ko",
-        "drivers/net/usb/cdc_ncm.ko",
-        "drivers/net/usb/cdc_mbim.ko",
-        "drivers/net/usb/rndis_host.ko",
-        "drivers/net/usb/cdc_subset.ko",
-        // Realtek USB ethernet (RTL8152/RTL8153/RTL8156 — most common dongles)
-        "drivers/net/usb/r8152.ko",
-        // ASIX USB ethernet (AX88179, AX88178A, AX88772)
-        "drivers/net/usb/asix.ko",
-        "drivers/net/usb/ax88179_178a.ko",
-        // Microchip/SMSC USB ethernet
-        "drivers/net/usb/smsc75xx.ko",
-        "drivers/net/usb/smsc95xx.ko",
-        // Other USB ethernet chipsets (cheap dongles)
-        "drivers/net/usb/sr9700.ko",
-        "drivers/net/usb/sr9800.ko",
-        "drivers/net/usb/ch9200.ko",
-        "drivers/net/usb/aqc111.ko",
-        //
-        nullptr
-    };
+    // DRM memory manager dependencies (shared by amdgpu + nouveau)
+    load_module_by_path(mod_base, "drivers/gpu/drm/drm_ttm_helper.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/ttm/ttm.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/drm_buddy.ko");
+    load_module_by_path(mod_base, "drivers/gpu/drm/scheduler/gpu-sched.ko");
 
-    int loaded = 0, skipped = 0, failed = 0;
+    // AMD GPU (=m, must load after squashfs pivot for firmware)
+    load_module_by_path(mod_base, "drivers/gpu/drm/amd/amdgpu/amdgpu.ko");
 
-    for (int i = 0; module_paths[i]; i++) {
-        std::string full_path = mod_base + "/kernel/" + module_paths[i];
+    // NVIDIA nouveau (=m)
+    load_module_by_path(mod_base, "drivers/gpu/drm/nouveau/nouveau.ko");
 
-        // Skip if module file doesn't exist (driver not built for this config)
-        if (access(full_path.c_str(), R_OK) != 0) {
-            skipped++;
-            continue;
-        }
-
-        int fd = open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            fprintf(stderr, "[init] modules: open %s: %m\n", module_paths[i]);
-            failed++;
-            continue;
-        }
-
-        int ret = syscall(SYS_finit_module, fd, "", 0);
-        close(fd);
-
-        if (ret == 0) {
-            fprintf(stderr, "[init] modules: loaded %s\n", module_paths[i]);
-            loaded++;
-        } else if (errno == EEXIST) {
-            // Already loaded (built-in or previously loaded) — not an error
-            skipped++;
-        } else {
-            fprintf(stderr, "[init] modules: %s: %m\n", module_paths[i]);
-            failed++;
+    // --- Phase 2: Run depmod if modules.dep is missing ---
+    // eudev's kmod integration needs modules.dep + modules.alias for auto-loading.
+    // Buildroot should generate these, but safety check.
+    std::string moddep = mod_base + "/modules.dep";
+    if (access(moddep.c_str(), R_OK) != 0) {
+        fprintf(stderr, "[init] modules.dep missing — running depmod\n");
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/usr/bin/depmod", "depmod", "-a", uts.release, nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            int wstatus;
+            waitpid(pid, &wstatus, 0);
+            if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0) {
+                fprintf(stderr, "[init] depmod completed\n");
+            } else {
+                fprintf(stderr, "[init] depmod failed (status %d)\n", wstatus);
+            }
         }
     }
 
-    fprintf(stderr, "[init] modules: %d loaded, %d skipped, %d failed\n",
-            loaded, skipped, failed);
+    // --- Phase 3: Start udevd ---
+    init_start_udevd();
 
-    // Give drivers time to probe hardware and create net interfaces.
-    // With many WiFi modules, probing can take 2-3s on some hardware.
-    usleep(2000000);
+    // --- Phase 4: Trigger udev coldplug (everything EXCEPT input) ---
+    // Input devices are triggered later in child_main.cpp after the Wayland
+    // socket exists. Triggering input before wlroots initializes causes SIGSEGV.
+    fprintf(stderr, "[init] Triggering udev coldplug (excluding input)...\n");
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/usr/bin/udevadm", "udevadm", "trigger",
+                  "--action=add", "--subsystem-nomatch=input", nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            int wstatus;
+            waitpid(pid, &wstatus, 0);
+        }
+    }
+
+    // --- Phase 5: Wait for device probing to settle ---
+    fprintf(stderr, "[init] Waiting for udev settle (30s timeout)...\n");
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/usr/bin/udevadm", "udevadm", "settle",
+                  "--timeout=30", nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            int wstatus;
+            waitpid(pid, &wstatus, 0);
+            if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0) {
+                fprintf(stderr, "[init] udev settle complete\n");
+            } else {
+                fprintf(stderr, "[init] udev settle timed out (non-fatal)\n");
+            }
+        }
+    }
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Start udevd daemon for hardware auto-detection.
+// Runs in foreground with setsid() for signal isolation (not --daemon,
+// which double-forks and loses PID tracking — same issue as wpa_supplicant).
+// ─────────────────────────────────────────────────────────────────────────────
+static pid_t g_udevd_pid = 0;
+
+void init_start_udevd() {
+#ifdef _WIN32
+    return;
+#else
+    // Check if udevd is already running (e.g. started by child_main for desktop mode)
+    if (g_udevd_pid > 0 && kill(g_udevd_pid, 0) == 0) {
+        fprintf(stderr, "[init] udevd already running (PID %d)\n", g_udevd_pid);
+        return;
+    }
+
+    fprintf(stderr, "[init] Starting udevd...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid(); // New session for signal isolation
+        // Redirect stderr to log file to avoid console flooding
+        int log_fd = open("/tmp/udevd.log", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+        execl("/sbin/udevd", "udevd", nullptr);
+        // Fallback path
+        execl("/usr/sbin/udevd", "udevd", nullptr);
+        _exit(127);
+    } else if (pid > 0) {
+        g_udevd_pid = pid;
+        fprintf(stderr, "[init] udevd started (PID %d)\n", pid);
+        // Brief wait for udevd to initialize its netlink socket
+        usleep(500000);
+    } else {
+        fprintf(stderr, "[init] udevd fork failed: %m\n");
+    }
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Start dbus-daemon (system bus) — required by BlueZ for Bluetooth HID.
+// ─────────────────────────────────────────────────────────────────────────────
+static pid_t g_dbus_pid = 0;
+
+void init_start_dbus() {
+#ifdef _WIN32
+    return;
+#else
+    // Ensure /run/dbus exists
+    mkdir("/run/dbus", 0755);
+
+    fprintf(stderr, "[init] Starting dbus-daemon...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        execl("/usr/bin/dbus-daemon", "dbus-daemon",
+              "--system", "--nofork", "--nopidfile", nullptr);
+        _exit(127);
+    } else if (pid > 0) {
+        g_dbus_pid = pid;
+        fprintf(stderr, "[init] dbus-daemon started (PID %d)\n", pid);
+        // Wait for socket to appear
+        for (int i = 0; i < 20; i++) {
+            if (access("/run/dbus/system_bus_socket", F_OK) == 0) break;
+            usleep(100000); // 100ms
+        }
+        if (access("/run/dbus/system_bus_socket", F_OK) == 0) {
+            fprintf(stderr, "[init] dbus socket ready\n");
+        } else {
+            fprintf(stderr, "[init] WARNING: dbus socket not found after 2s\n");
+        }
+    } else {
+        fprintf(stderr, "[init] dbus-daemon fork failed: %m\n");
+    }
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Start BlueZ bluetoothd daemon for Bluetooth HID (keyboards, mice).
+// Requires dbus to be running first.
+// Pairing info stored at /data/bluetooth/ (symlinked from /var/lib/bluetooth).
+// ─────────────────────────────────────────────────────────────────────────────
+static pid_t g_bluetoothd_pid = 0;
+
+void init_start_bluetoothd() {
+#ifdef _WIN32
+    return;
+#else
+    // Check dbus is available
+    if (access("/run/dbus/system_bus_socket", F_OK) != 0) {
+        fprintf(stderr, "[init] bluetoothd: dbus not available, skipping\n");
+        return;
+    }
+
+    // Symlink pairing data to persistent storage
+    mkdir("/data/bluetooth", 0700);
+    mkdir("/var/lib", 0755);
+    // Remove existing symlink/dir if any, then create symlink
+    remove("/var/lib/bluetooth");
+    symlink("/data/bluetooth", "/var/lib/bluetooth");
+
+    fprintf(stderr, "[init] Starting bluetoothd...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        execl("/usr/libexec/bluetooth/bluetoothd", "bluetoothd",
+              "--nodetach", nullptr);
+        // Fallback path
+        execl("/usr/lib/bluetooth/bluetoothd", "bluetoothd",
+              "--nodetach", nullptr);
+        _exit(127);
+    } else if (pid > 0) {
+        g_bluetoothd_pid = pid;
+        fprintf(stderr, "[init] bluetoothd started (PID %d)\n", pid);
+    } else {
+        fprintf(stderr, "[init] bluetoothd fork failed: %m\n");
+    }
 #endif
 }
