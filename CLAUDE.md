@@ -12,8 +12,11 @@ Llamaste is a bootable Linux image where the LLM IS the operating system. A sing
 - **Recovery hardening**: Dead-peer crash recovery 239s → 10s (fresh monitor thread per topology spawn).
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
 - **Implementation plan**: `D:\Llamaste\LLAMASTE-IMPLEMENTATION-PLAN.md` (v2, current)
+- **Hardware compatibility**: Phase B implemented — eudev auto-detection, Bluetooth HID, GPU modules, ~97% x86_64 coverage target. Needs build + test.
+- **Phase B HW compat design**: `D:\Llamaste\docs\superpowers\specs\2026-03-24-hardware-compatibility-design.md`
+- **Phase B HW compat plan**: `D:\Llamaste\docs\superpowers\plans\2026-03-24-hardware-compatibility-plan.md`
 - **Phase 5 design doc**: `D:\Llamaste\docs\plans\2026-03-07-mesh-auto-offload-design.md`
-- **Phase B design doc**: `D:\Llamaste\docs\plans\2026-03-07-neural-tts-design.md`
+- **Phase B TTS design doc**: `D:\Llamaste\docs\plans\2026-03-07-neural-tts-design.md`
 - **Phase 4 design doc**: `D:\Llamaste\docs\plans\2026-03-06-ab-update-design.md`
 
 ## Key Architecture Decisions
@@ -130,8 +133,16 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **WLR_DRM_NO_ATOMIC=1**: simpledrm (EFI framebuffer DRM) on bare metal doesn't support atomic modesetting. Without this flag, wlroots probes atomic ioctls and segfaults (signal 11).
 - **Desktop mode cog auth bypass**: In desktop mode, cog only accesses localhost — `require_auth` short-circuits to serve `index.html` directly. Remove bypass once keyboard input confirmed working.
 - **RTL8821CE WiFi chip**: Actual hardware is Realtek RTL8821CE [10ec:c821] at PCI 0000:01:00.0. Driver is `rtw88_8821ce.ko` (loaded as module). iwlwifi-ty-* (AX210) and iwlwifi-gl-* (BE200) are for different chips entirely.
-- **CONFIG_MODULES=y (e9fc82a)**: WiFi drivers are now kernel modules, NOT built-in. They load after squashfs pivot via `init_load_modules()` in init.cpp using `finit_module()` syscall. This means /lib/firmware/ is available at module load time — no more CONFIG_EXTRA_FIRMWARE needed. Any supported WiFi chip's firmware just works.
-- **Module load order matters**: `init_load_modules()` has a hard-coded dependency-ordered list. If adding a new driver, ensure dependencies are listed before dependents (e.g., `rtw88_core.ko` before `rtw88_8821ce.ko`).
+- **eudev auto-detection (Phase B)**: `init_load_modules()` in init.cpp now uses eudev + kmod for automatic module loading via modalias matching. The old hardcoded 80-module list is replaced. Only GPU modules (amdgpu, nouveau + deps) are loaded explicitly via `finit_module()` before udev trigger — they must be ready before compositor. All other modules (WiFi, Ethernet, BT, I2C, pinctrl, sound) are auto-loaded by eudev.
+- **Boot sequence (Phase B)**: `init_load_modules()` → `init_start_dbus()` → `init_start_bluetoothd()` in main.cpp. udevd starts inside init_load_modules(). Input trigger delayed until Wayland socket in child_main.cpp.
+- **udevadm trigger --subsystem-nomatch=input**: Early trigger excludes input to prevent wlroots SIGSEGV. Input triggered separately AFTER Wayland socket exists (child_main.cpp compositor thread).
+- **dbus + bluetoothd supervisor monitoring**: Supervisor uses `waitpid(-1)` to catch exits from child_main, dbus, or bluetoothd. Daemons auto-respawned (max 3 per 5 minutes). dbus crash also restarts bluetoothd (dependency).
+- **BlueZ pairing persistence**: `/var/lib/bluetooth` symlinked to `/data/bluetooth` for pairing data across reboots.
+- **GPU-aware WLR_RENDERER**: child_main.cpp checks `/sys/class/drm/` for real GPU drivers. Only sets `WLR_RENDERER=pixman` if no real GPU found (simpledrm only).
+- **IOMMU_DEFAULT_DMA_LAZY**: NOT PASSTHROUGH — avoids silent memory corruption on devices doing DMA. Set in linux.config.
+- **CONFIG_FW_LOADER_USER_HELPER disabled**: No shell means userspace firmware helper causes 60s timeouts per missing firmware file. Direct kernel firmware loading only.
+- **MFD_INTEL_LPSS_PCI/ACPI**: Required parent driver for I2C bus controllers on Kaby Lake+ Intel laptops. Without it, touchpads don't work even with I2C HID enabled.
+- **kmod + depmod**: Buildroot generates `modules.dep` + `modules.alias` in `/lib/modules/<ver>/`. eudev uses kmod's built-in to resolve dependencies and load modules. Safety check in init.cpp runs `depmod -a` if `modules.dep` is missing.
 - **WiFi scanning uses `iw`, NOT wpa_supplicant**: `supervisor_scan_wifi()` uses `iw dev wlan0 scan` (direct nl80211 via netlink). wpa_supplicant ctrl socket approach was unreliable (3 test builds, always 0 networks despite driver working). `WiFiManager::scan()` also falls back to `iw dev scan` when wpa_supplicant SCAN_RESULTS returns empty (f8300ce). wpa_supplicant only used for actual connection (child_main.cpp).
 - **WiFi EAP vs PSK detection**: iw scan output contains `* Authentication suites: PSK` or `* Authentication suites: IEEE 802.1X`. Parse after whitespace stripping. Enterprise (802.1X/EAP) networks won't work with PSK key_mgmt. Console WiFi setup warns about EAP networks.
 - **WiFi post-connection verification**: child_main.cpp polls WPA state for 20s after spawning wpa_supplicant + dhcpcd. Look for `[wifi] CONNECTED:` (success) or `[wifi] WARNING:` (failure) in console output. Also logs DNS resolver state from /etc/resolv.conf.
