@@ -1,5 +1,8 @@
 #pragma once
 #include <string>
+#ifndef _WIN32
+#include <unistd.h>   // pid_t
+#endif
 
 void init_mount_filesystems();
 bool init_mount_data();
@@ -10,10 +13,12 @@ void init_set_hostname(const std::string& default_name);
 std::string init_parse_boot_mode();
 void init_bring_up_loopback();
 void init_apply_network_config();
+#ifndef _WIN32
 // Daemon PIDs (for supervisor restart monitoring)
 extern pid_t g_udevd_pid;
 extern pid_t g_dbus_pid;
 extern pid_t g_bluetoothd_pid;
+#endif
 
 void init_load_modules();          // Load critical GPU modules + start eudev auto-detection
 void init_start_udevd();           // Start udevd daemon for hardware auto-detection
