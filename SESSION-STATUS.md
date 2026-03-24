@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-24 (Hardware compatibility research + design + plan complete)
+**Last updated**: 2026-03-24 (Phase B HW compat IMPLEMENTED + null content bugfix)
 
 ---
 
@@ -96,19 +96,38 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-24) -- Hardware Compatibility Research + Design + Plan
+## Latest Session (2026-03-24) -- Phase B HW Compat IMPLEMENTED + Bugfix
 
-### Hardware Compatibility Expansion (Phase B + C)
+### Phase B Hardware Compatibility — IMPLEMENTED & BUILT
 
-Comprehensive research and planning session for expanding hardware coverage from ~75% to ~97% (Phase B) and ~99% (Phase C).
+All 9 plan steps executed in a single session. Research → design → plan → implement → build → test → deploy.
 
-| Deliverable | Status |
-|-------------|--------|
-| 7 research documents (4,786 lines) | DONE — research/hardware-compat-*.md |
-| Design spec (Approach B: eudev + Approach C: kernel 6.12) | DONE — docs/superpowers/specs/2026-03-24-hardware-compatibility-design.md |
-| 9-step implementation plan (Phase B: 5-7 sessions) | DONE — docs/superpowers/plans/2026-03-24-hardware-compatibility-plan.md |
-| Spec review (5 critical + 7 important issues found & fixed) | DONE — docs/superpowers/reviews/2026-03-24-hardware-compatibility-review.md |
-| linux-kernel-hardware skill created | DONE — ~/.claude/skills/linux-kernel-hardware.md |
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Kernel config — platform (I2C, HID, IOMMU, ACPI, pinctrl, cpufreq) | DONE (435eb57) |
+| 2 | Kernel config — ethernet + WiFi expansion | DONE (435eb57) |
+| 3 | Kernel config — GPU (amdgpu=m, nouveau=m, Mesa radeonsi/nouveau) | DONE (435eb57) |
+| 4 | Bluetooth (BlueZ, dbus, kernel BT, pairing persistence) | DONE (59cd66b) |
+| 5 | eudev auto-detection (replaces hardcoded 80-module list) | DONE (34c9b99) |
+| 6 | Firmware expansion + sound (Buildroot linux-firmware selections) | DONE (dfb54e6) |
+| 7 | Hardware detection enhancement (BT, touchpad, battery, NICs) | DONE (0cdc530) |
+| 8 | Build + deploy + VM verification | DONE |
+| 9 | Documentation (CLAUDE.md updated with all gotchas) | DONE (fc10c19) |
+
+### Bugfix: Null Content Inference Crash
+
+- **Bug**: 3B model returns `"content": null` from `/completion` → `.get<std::string>()` throws `json::type_error::302`
+- **User saw**: `[Inference error: [json.exception.type_error.302] type must be string, but is null]`
+- **Root cause**: Our code, not llama-server. Missing `.is_null()` check in child_main.cpp line 622
+- **Fix**: Changed to `.is_string()` check + diagnostic logging + hardened TTS endpoint
+- **Commit**: 13709c0
+
+### Build Results
+- **rootfs.squashfs**: 259MB (was 170MB, under 350MB budget ✅)
+- **llamaste.img**: 867MB
+- **bzImage**: 12MB (new built-in configs)
+- **ISO**: 2.1GB → `D:\Llamaste\llamaste.iso`
+- **VM**: Running at http://localhost:8080, 64 tools, inference ready
 
 ### Key Architecture Decisions
 - **eudev + kmod** replaces hardcoded 80-module `init_load_modules()` — auto-detection via modalias
@@ -117,24 +136,22 @@ Comprehensive research and planning session for expanding hardware coverage from
 - **BlueZ + dbus** for Bluetooth HID (~4.5MB), with supervisor restart monitoring
 - **3-tier firmware**: Tier 1 bundled (~50-70MB), Tier 2 downloadable, Tier 3 on-demand
 - **IOMMU_DEFAULT_DMA_LAZY** (NOT PASSTHROUGH — avoids silent memory corruption)
-- **Squashfs size budget**: ~200MB → ~300MB (under 350MB limit)
 
-### Commits
+### All Commits This Session
 | Commit | Description |
 |--------|-------------|
 | a7a4fc5 | docs: hardware compatibility research + design spec + implementation plan |
 | 0d02327 | fix: address spec review findings — 5 critical + 7 important fixes |
-
-### Phase B Implementation Plan (9 Steps)
-1. Kernel config — platform (I2C, HID, IOMMU, ACPI, pinctrl, cpufreq)
-2. Kernel config — ethernet + WiFi expansion
-3. Kernel config — GPU (amdgpu, nouveau, Mesa)
-4. Bluetooth (BlueZ, dbus, kernel BT, pairing)
-5. eudev auto-detection (replace hardcoded modules) — most complex
-6. Firmware expansion + sound
-7. Hardware detection enhancement
-8. Testing + regression
-9. Documentation
+| 435eb57 | feat: kernel config — Bluetooth HID support (BT core + vendor HCI drivers) |
+| dfb54e6 | feat: Buildroot defconfig — kmod, BlueZ, dbus, GPU firmware, Mesa expansion |
+| 34c9b99 | feat: eudev auto-detection replaces hardcoded module loading |
+| 0cdc530 | feat: enhanced hardware detection — Bluetooth, touchpad, battery, network |
+| 59cd66b | feat: BlueZ config + supervisor restart monitoring for dbus/bluetoothd |
+| fc10c19 | docs: update CLAUDE.md with Phase B hardware compatibility gotchas |
+| bc4c46d | fix: add pid_t include to init.h (build fix) |
+| 41ae3f4 | fix: increase sys-a/sys-b partition size 256M → 384M |
+| 24a3aa0 | fix: correct GPU dependency module paths for kernel 6.6.70 |
+| 13709c0 | fix: null content crash in inference response parsing |
 
 ---
 

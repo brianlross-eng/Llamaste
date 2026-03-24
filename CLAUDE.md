@@ -180,6 +180,8 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **PXELINUX for VBox PXE boot**: `apk add syslinux`, copy `pxelinux.0` + `ldlinux.c32` to TFTP root, create `pxelinux.cfg/default` with `KERNEL bzImage`. Set `dhcp-boot=pxelinux.0` in dnsmasq.
 - **Alpine live ISO loopback has no IP**: On Alpine live ISO, the `lo` interface is UP but has no `127.0.0.1` address. All TCP connections to localhost hang. Fix: `ifconfig lo 127.0.0.1 netmask 255.0.0.0 up` before starting any servers.
 - **root=LABEL=LLAMASTE**: Device-agnostic root mounting — works on USB, CD-ROM, and PXE sanboot. Replaces hardcoded `/dev/sdb`.
+- **nlohmann json `.get<std::string>()` on null**: Always check `.is_string()` before `.get<std::string>()`. `.contains("key")` returns true for null values — `"content": null` passes `.contains()` but throws `json::type_error::302` on `.get<>()`. Use `.value("key", "")` for safe defaults or `.is_string()` guard. Fixed in child_main.cpp (13709c0).
+- **3B model empty responses**: Qwen2.5 3B can return null content from `/completion` when confused by large system prompts (64 tools). The agent loop handles this gracefully now (`[No response from inference engine]`), but small models may need reduced tool definitions for better quality.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
