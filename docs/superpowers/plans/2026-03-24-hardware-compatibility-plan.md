@@ -28,7 +28,8 @@ Add the missing platform infrastructure that everything else depends on:
      TEST: USB keyboard/mouse still work (regression check)
 
 1.3  Add IOMMU support (built-in)
-     CONFIG_IOMMU_SUPPORT=y, CONFIG_IOMMU_DEFAULT_PASSTHROUGH=y
+     CONFIG_IOMMU_SUPPORT=y, CONFIG_IOMMU_DEFAULT_DMA_LAZY=y
+     (NOT PASSTHROUGH — avoids silent memory corruption on devices doing DMA)
      CONFIG_INTEL_IOMMU=y, CONFIG_INTEL_IOMMU_DEFAULT_ON=y
      CONFIG_AMD_IOMMU=y, CONFIG_AMD_IOMMU_V2=y
      TEST: Boot in VirtualBox with VT-x/VT-d enabled — no panic
@@ -46,8 +47,16 @@ Add the missing platform infrastructure that everything else depends on:
      CONFIG_HOTPLUG_PCI=y, CONFIG_HOTPLUG_PCI_PCIE=y
      TEST: lspci equivalent works, PCIe devices enumerated
 
+1.5b Add RFKILL + firmware loader fix
+     CONFIG_RFKILL=y                  # Laptop WiFi/BT hardware killswitches
+     # CONFIG_FW_LOADER_USER_HELPER is not set
+     # (CRITICAL: no shell means userspace helper causes 60s timeouts per firmware)
+     TEST: WiFi not blocked by rfkill on laptop with hardware switch
+
 1.6  Add pinctrl core (built-in) + platform drivers (modules)
      CONFIG_PINCTRL=y (built-in)
+     CONFIG_MFD_INTEL_LPSS_PCI=m     # Intel LPSS parent (Kaby Lake+, REQUIRED for I2C)
+     CONFIG_MFD_INTEL_LPSS_ACPI=m    # Intel LPSS ACPI variant
      CONFIG_PINCTRL_INTEL=m, CONFIG_PINCTRL_CANNONLAKE=m
      CONFIG_PINCTRL_TIGERLAKE=m, CONFIG_PINCTRL_ALDERLAKE=m
      CONFIG_PINCTRL_METEORLAKE=m, CONFIG_PINCTRL_SUNRISEPOINT=m
@@ -265,18 +274,29 @@ COMMIT: "feat: GPU support — amdgpu, nouveau, Mesa radeonsi/nouveau/llvmpipe"
 
 4.4  Create init_start_dbus() in init.cpp
      - mkdir -p /run/dbus
-     - fork() + execl("/usr/bin/dbus-daemon", "--system", "--nofork") in child
-     - setsid() in child for signal isolation
+     - fork() + setsid() in child for signal isolation
+     - execl("/usr/bin/dbus-daemon", "--system", "--nofork") in child
+     - Store PID in global g_dbus_pid for restart monitoring
      - Poll for /run/dbus/system_bus_socket (up to 3s)
      - Non-fatal on failure (BT just won't work)
      TEST: dbus socket appears after boot
 
 4.5  Create init_start_bluetoothd() in init.cpp
      - Symlink /var/lib/bluetooth → /data/bluetooth (pairing persistence)
-     - fork() + execl("/usr/libexec/bluetooth/bluetoothd", "-n") in child
-     - setsid() in child
+     - fork() + setsid() in child
+     - execl("/usr/libexec/bluetooth/bluetoothd", "-n") — foreground, no daemonize
+     - Store PID in global g_bluetoothd_pid for restart monitoring
      - Non-fatal on failure
      TEST: bluetoothd running, BT adapter visible
+
+4.5b Add dbus + bluetoothd restart monitoring to supervisor
+     In supervisor_run() main loop (alongside existing child_main restart):
+     - waitpid(g_dbus_pid, WNOHANG) — if exited, respawn dbus-daemon
+     - waitpid(g_bluetoothd_pid, WNOHANG) — if exited, respawn bluetoothd
+     - Max 3 restarts per daemon per 5 minutes (prevent restart storm)
+     - Log restart events
+     This ensures BT keyboard stays working even if dbus/bluetoothd crash
+     TEST: kill -9 bluetoothd → supervisor respawns within 5s
 
 4.6  Add BlueZ config to overlay
      Create br2-external/board/llamaste/overlay/etc/bluetooth/input.conf:
@@ -313,12 +333,16 @@ COMMIT: "feat: Bluetooth HID support — BlueZ, dbus, kernel BT stack, pairing p
      TEST: depmod and modprobe binaries exist in rootfs
 
 5.2  Create init_start_udevd() function in init.cpp
-     - Fork + execl("/sbin/udevd", "udevd", "--daemon")
+     - Fork child with setsid() (same pattern as wpa_supplicant fix)
+     - In child: execl("/sbin/udevd", "udevd") — NO --daemon flag
+       (--daemon double-forks, losing PID tracking — same anti-pattern
+        already fixed for wpa_supplicant per CLAUDE.md)
      - Fallback path: /usr/sbin/udevd
+     - Store PID in global g_udevd_pid for monitoring
      - Wait up to 5s for /run/udev/control socket to appear
      - Log success/failure
      - Called from main.cpp BEFORE module loading
-     TEST: udevd running after boot, /run/udev/control exists
+     TEST: udevd running after boot, /run/udev/control exists, PID tracked
 
 5.3  Create init_load_critical_modules() — stripped-down version
      Keep ONLY modules that must load before udev trigger:
@@ -331,9 +355,8 @@ COMMIT: "feat: Bluetooth HID support — BlueZ, dbus, kernel BT stack, pairing p
      TEST: GPU modules loaded before udevadm trigger
 
 5.4  Create init_udev_trigger_all() — trigger everything except input
-     Fork + exec: udevadm trigger --action=add
-       (subsystem filter: NOT --subsystem-match=input)
-       Specifically: use --subsystem-nomatch=input
+     Fork + exec: udevadm trigger --action=add --subsystem-nomatch=input
+       (MUST use --subsystem-nomatch=input explicitly on the command line)
      Then: udevadm settle --timeout=30
      This auto-loads ALL drivers via modalias matching:
        WiFi, Ethernet, Bluetooth, Sound, I2C, pinctrl, etc.
@@ -652,11 +675,11 @@ COMMIT: "test: kernel 6.12 regression testing complete"
 | **B** | 7 | Hardware detection enhancement | 1 | 4 |
 | **B** | 8 | Testing + regression validation | (same) | 4 |
 | **B** | 9 | Documentation + cleanup | 0.5 | 4.5 |
-| | | **Phase B Total** | | **~4-5 sessions** |
+| | | **Phase B Total** | | **~5-7 sessions** |
 | **C** | C1 | Kernel 6.12 upgrade + migration | 1 | 5.5 |
 | **C** | C2 | New 6.12 features (Xe, WiFi 7, TB, webcam) | 1 | 6.5 |
 | **C** | C3 | Full regression testing | 1 | 7.5 |
-| | | **Phase B + C Total** | | **~7-8 sessions** |
+| | | **Phase B + C Total** | | **~8-10 sessions** |
 
 ## Risk Register
 
