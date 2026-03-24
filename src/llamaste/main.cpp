@@ -191,6 +191,17 @@ int main(int argc, char** argv) {
             hw.cpu_model.c_str(), hw.cpu_cores);
     fprintf(stderr, "[main] RAM: %d MB total, %d MB available\n",
             hw.ram_total_mb, hw.ram_free_mb);
+    if (hw.gpu_detected)
+        fprintf(stderr, "[main] GPU: %s (driver: %s)\n",
+                hw.gpu_name.c_str(), hw.gpu_driver.empty() ? "none" : hw.gpu_driver.c_str());
+    if (hw.bluetooth_detected)
+        fprintf(stderr, "[main] Bluetooth: %s\n", hw.bluetooth_name.c_str());
+    if (hw.touchpad_detected)
+        fprintf(stderr, "[main] Touchpad: detected\n");
+    if (hw.has_battery)
+        fprintf(stderr, "[main] Battery: %d%%\n", hw.battery_percent);
+    fprintf(stderr, "[main] Network: %d WiFi, %d Ethernet interfaces\n",
+            hw.wifi_interfaces, hw.ethernet_interfaces);
 
     if (pid1) {
         init_bring_up_loopback();
