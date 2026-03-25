@@ -182,6 +182,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **root=LABEL=LLAMASTE**: Device-agnostic root mounting — works on USB, CD-ROM, and PXE sanboot. Replaces hardcoded `/dev/sdb`.
 - **nlohmann json `.get<std::string>()` on null**: Always check `.is_string()` before `.get<std::string>()`. `.contains("key")` returns true for null values — `"content": null` passes `.contains()` but throws `json::type_error::302` on `.get<>()`. Use `.value("key", "")` for safe defaults or `.is_string()` guard. Fixed in child_main.cpp (13709c0).
 - **3B model empty responses**: Qwen2.5 3B can return null content from `/completion` when confused by large system prompts (64 tools). The agent loop handles this gracefully now (`[No response from inference engine]`), but small models may need reduced tool definitions for better quality.
+- **CONFIG_INITRAMFS_SOURCE breaks normal boot**: Do NOT set `CONFIG_INITRAMFS_SOURCE` in linux.config — it embeds a PXE-specific busybox initramfs into EVERY bzImage. The kernel runs the embedded `/init` shell script INSTEAD of `init=/opt/llamaste/llamaste`, causing kernel panic (`Comm: sh`, `exitcode=0x00000000`). PXE boot uses a separate `bzImage-pxe` built with its own config. Symptom: `Run /init as init process` in kernel log (should say `Run /opt/llamaste/llamaste`). Fixed in db3473b.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
