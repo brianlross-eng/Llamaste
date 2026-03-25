@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -319,23 +320,44 @@ static int read_temperature() {
 }
 
 static std::string read_ip_address() {
-    // Try common interface names
-    const char* ifaces[] = {"eth0", "enp0s3", "ens33", "wlan0", nullptr};
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) return "unknown";
+    // Scan all network interfaces via getifaddrs() — no hardcoded names.
+    // Priority: wired ethernet > WiFi > anything else (skip loopback).
+    struct ifaddrs* ifa_list = nullptr;
+    if (getifaddrs(&ifa_list) != 0) return "unknown";
 
-    std::string result = "no network";
-    for (int i = 0; ifaces[i]; i++) {
-        struct ifreq ifr = {};
-        strncpy(ifr.ifr_name, ifaces[i], IFNAMSIZ - 1);
-        if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
-            auto* addr = (struct sockaddr_in*)&ifr.ifr_addr;
-            result = inet_ntoa(addr->sin_addr);
-            break;
+    std::string wired_ip, wifi_ip, other_ip;
+    for (struct ifaddrs* ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        if (!(ifa->ifa_flags & IFF_UP)) continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+
+        auto* sa = (struct sockaddr_in*)ifa->ifa_addr;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+
+        // Skip link-local (169.254.x.x)
+        if (strncmp(ip, "169.254.", 8) == 0) continue;
+
+        // Classify by interface name
+        const char* name = ifa->ifa_name;
+        bool is_wifi = (strncmp(name, "wl", 2) == 0);
+        bool is_lo   = (strcmp(name, "lo") == 0);
+
+        if (is_lo) continue;
+        if (is_wifi) {
+            if (wifi_ip.empty()) wifi_ip = ip;
+        } else {
+            if (wired_ip.empty()) wired_ip = ip;
         }
     }
-    close(sock);
-    return result;
+    freeifaddrs(ifa_list);
+
+    // Show all available IPs for discoverability
+    if (!wired_ip.empty() && !wifi_ip.empty())
+        return wired_ip + " / " + wifi_ip;
+    if (!wired_ip.empty()) return wired_ip;
+    if (!wifi_ip.empty()) return wifi_ip;
+    return "no network";
 }
 
 static SystemMetrics gather_metrics() {
