@@ -363,12 +363,11 @@ std::string build_inference_request(
     auto tools_array = json::parse(tools_str, nullptr, false);
     if (!tools_array.is_discarded() && tools_array.is_array() && !tools_array.empty()) {
         request["tools"] = tools_array;
-        // Note: grammar-constrained JSON (response_format / json_schema) is deferred.
-        // llama_inference() uses /completion, not /v1/chat/completions, so
-        // response_format set here is ignored. Also, json_object mode would
-        // force JSON even for text-only responses, breaking the agent loop.
-        // Proper implementation: pass GBNF grammar directly to /completion
-        // when tool calls are expected. See docs/plans/2026-03-12-four-items-design.md.
+        // Grammar-constrained JSON: implemented as retry in llama_inference().
+        // First pass runs without grammar (model chooses text vs tool calls).
+        // If <tool_call> tags detected but JSON is malformed, llama_inference()
+        // retries with a GBNF grammar that constrains output to valid tool call
+        // JSON with known tool names.  See build_tool_call_gbnf() in child_main.cpp.
     }
 
     return request.dump();

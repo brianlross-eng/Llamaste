@@ -197,13 +197,13 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **EVO-X2 kernel panic on boot**: `exitcode=0x00000` — binary exits before main(). Diagnostic ISO built with static test init. Suspect: ORT global constructor or CPU-specific issue. INVESTIGATING.
 - **CONFIG_DRM_AMDGPU=y causes black screen**: Built-in AMDGPU steals display from simpledrm before rootfs mounted (no firmware). Must use =m (module) loaded after squashfs pivot. Currently disabled.
 - **system() silently fails**: `BR2_SYSTEM_BIN_SH_NONE=y` means `system()` returns -1 (no /bin/sh). Always use `fork()/execl()` instead. Fixed in DHCP retry (child_main.cpp).
+- **Grammar-constrained tool call retry**: `llama_inference()` detects malformed `<tool_call>` JSON (common on 3B models) and retries with a GBNF grammar passed to `/completion`'s `grammar` parameter. The grammar enumerates known tool names (model can only call registered tools) and enforces valid JSON structure. First pass has zero overhead; retry adds one extra inference round with lower temperature. See `build_tool_call_gbnf()` in child_main.cpp.
 
 ## Next Steps
 ### Immediate
 1. **EVO-X2 boot diagnostic** — Test static init GRUB entry to isolate kernel vs binary/libs
 2. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
 3. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
-4. **Grammar-constrained tool JSON** — Add JSON schema to inference requests (speed + reliability)
 
 ### Roadmap (Future Phases)
 - **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving

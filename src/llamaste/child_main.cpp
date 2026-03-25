@@ -539,6 +539,68 @@ static std::string build_chatml_prompt(const json& messages) {
     return prompt;
 }
 
+// ---------------------------------------------------------------------------
+// build_tool_call_gbnf — GBNF grammar for Qwen2.5 tool call output
+// ---------------------------------------------------------------------------
+// Constrains output to one or more <tool_call> blocks with valid JSON and
+// known tool names.  Used for retry when the first inference attempt produces
+// malformed tool-call JSON (common on 3B models).
+//
+// llama-server's /completion endpoint accepts a "grammar" parameter — the
+// sampler masks out tokens that would violate the grammar at each step,
+// guaranteeing syntactically valid output with near-zero latency overhead.
+
+static std::string build_tool_call_gbnf(const json& tools_array) {
+    // Extract tool names from the OpenAI-format tools array
+    std::vector<std::string> names;
+    if (tools_array.is_array()) {
+        for (const auto& tool : tools_array) {
+            if (tool.contains("function") && tool["function"].contains("name")
+                && tool["function"]["name"].is_string()) {
+                names.push_back(tool["function"]["name"].get<std::string>());
+            }
+        }
+    }
+    if (names.empty()) return "";  // no tools → no grammar
+
+    // --- Build GBNF grammar ---
+    // Root: one or more tool call blocks (matches Qwen2.5 native format)
+    std::string g;
+    g += R"gbnf(root ::= toolcall (ws toolcall)*
+toolcall ::= "<tool_call>\n" toolobj "\n</tool_call>" ws
+toolobj ::= "{" ws "\"name\"" ws ":" ws toolname ws "," ws "\"arguments\"" ws ":" ws object ws "}"
+)gbnf";
+
+    // Enumerate valid tool names — model can ONLY call tools that exist
+    g += "toolname ::= ";
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i > 0) g += " | ";
+        g += "\"\\\"" + names[i] + "\\\"\"";
+    }
+    g += "\n";
+
+    // Standard JSON value grammar (RFC 8259 subset)
+    g += R"gbnf(object ::= "{" ws "}" | "{" ws members ws "}"
+members ::= pair ("," ws pair)*
+pair ::= string ws ":" ws value
+array ::= "[" ws "]" | "[" ws values ws "]"
+values ::= value ("," ws value)*
+value ::= string | number | object | array | "true" | "false" | "null"
+string ::= "\"" chars "\""
+chars ::= char*
+char ::= [^"\\\x00-\x1f] | "\\" escape
+escape ::= ["\\\/bfnrt] | "u" hex hex hex hex
+hex ::= [0-9a-fA-F]
+number ::= "-"? int frac? exp?
+int ::= "0" | [1-9] [0-9]*
+frac ::= "." [0-9]+
+exp ::= [eE] [+-]? [0-9]+
+ws ::= [ \t\n\r]*
+)gbnf";
+
+    return g;
+}
+
 static std::string llama_inference(const std::string& request_json) {
     fprintf(stderr, "[inference] START request_size=%zu\n", request_json.size());
     if (!g_model_loaded.load()) {
@@ -636,6 +698,65 @@ static std::string llama_inference(const std::string& request_json) {
     // The model emits tool calls in this XML format when it needs to call a tool.
     // Convert to OpenAI tool_calls array format so the agent loop can dispatch them.
     json tool_calls_arr = parse_qwen_tool_calls(content);
+
+    // --- Grammar-constrained retry for malformed tool calls ---
+    // If the model attempted a tool call (emitted <tool_call> tags) but the JSON
+    // inside was malformed, retry with GBNF grammar that forces valid structure.
+    // This primarily helps 3B models which struggle with complex JSON output.
+    if (tool_calls_arr.empty() && content.find("<tool_call>") != std::string::npos) {
+        fprintf(stderr, "[inference] Detected malformed tool call — retrying with GBNF grammar\n");
+
+        json tools_arr = req_obj.value("tools", json::array());
+        std::string grammar = build_tool_call_gbnf(tools_arr);
+
+        if (!grammar.empty()) {
+            // Build retry request — same prompt, lower temperature, grammar constraint
+            json retry_req;
+            retry_req["prompt"]      = prompt;
+            retry_req["n_predict"]   = max_tokens;
+            retry_req["temperature"] = std::max(0.1f, temperature - 0.2f);
+            retry_req["stop"]        = json::array({"<|im_end|>", "<|endoftext|>", "<|im_start|>"});
+            retry_req["stream"]      = false;
+            retry_req["grammar"]     = grammar;
+            std::string retry_str = retry_req.dump();
+
+            fprintf(stderr, "[inference] Grammar retry: grammar_len=%zu temp=%.2f\n",
+                    grammar.size(), std::max(0.1f, temperature - 0.2f));
+
+            httplib::Client retry_cli("127.0.0.1", g_llama_port);
+            retry_cli.set_connection_timeout(5);
+            retry_cli.set_read_timeout(300);
+            retry_cli.set_keep_alive(false);
+            auto retry_result = retry_cli.Post("/completion", retry_str, "application/json");
+
+            if (retry_result && retry_result->status == 200) {
+                auto retry_resp = json::parse(retry_result->body, nullptr, false);
+                if (!retry_resp.is_discarded() && retry_resp.contains("content")
+                    && retry_resp["content"].is_string()) {
+                    std::string retry_content = retry_resp["content"].get<std::string>();
+                    json retry_calls = parse_qwen_tool_calls(retry_content);
+                    if (!retry_calls.empty()) {
+                        fprintf(stderr, "[inference] Grammar retry succeeded: %d tool call(s)\n",
+                                (int)retry_calls.size());
+                        content = retry_content;
+                        tool_calls_arr = retry_calls;
+                        // Update tokens/sec from retry timings
+                        if (retry_resp.contains("timings")) {
+                            auto& rt = retry_resp["timings"];
+                            double pps = rt.value("predicted_per_second", 0.0);
+                            if (pps > 0.0) g_tokens_per_sec.store(pps);
+                        }
+                    } else {
+                        fprintf(stderr, "[inference] Grammar retry: still failed to parse tool calls\n");
+                    }
+                }
+            } else {
+                fprintf(stderr, "[inference] Grammar retry HTTP failed: status=%d\n",
+                        retry_result ? retry_result->status : 0);
+            }
+        }
+    }
+
     bool has_tool_calls = !tool_calls_arr.empty();
 
     json response;
