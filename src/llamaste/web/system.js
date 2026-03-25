@@ -103,7 +103,7 @@
     aboutCard.appendChild(h3);
     var verP = document.createElement('p');
     verP.className = 'text-muted';
-    verP.textContent = 'Llamaste LLM-OS v0.1';
+    verP.textContent = 'Llamaste LLM-OS v' + (data && data.version ? data.version : '?');
     aboutCard.appendChild(verP);
 
     if (data && typeof data.uptime === 'number') {
