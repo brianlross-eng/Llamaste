@@ -45,8 +45,18 @@ echo "=== Building Llamaste ISO ==="
 echo ""
 
 # --- Step 1: Create ISO root directory ---
-ISO_ROOT=$(mktemp -d)
+# NOTE: Do NOT use ISO_ROOT=$(mktemp -d) — command substitution silently
+# returns empty when this script is invoked through Git Bash → WSL pipeline,
+# causing ISO_ROOT="" → grub-mkrescue tries to graft "/" → boot failure.
+ISO_ROOT="/tmp/llamaste-iso-build.$$"
+rm -rf "${ISO_ROOT}"
+mkdir -p "${ISO_ROOT}"
 trap "rm -rf ${ISO_ROOT}" EXIT
+
+if [ -z "${ISO_ROOT}" ] || [ "${ISO_ROOT}" = "/" ]; then
+    echo "ERROR: ISO_ROOT is empty or root — refusing to continue"
+    exit 1
+fi
 
 echo "[iso] Creating ISO directory structure..."
 
@@ -98,6 +108,23 @@ DNS
 # --- Step 2: Copy kernel ---
 echo "[iso] Copying kernel..."
 cp "${IMAGES_DIR}/bzImage" "${ISO_ROOT}/boot/bzImage"
+
+# --- Step 2b: Build and copy initramfs for LABEL= root resolution ---
+# The kernel can't resolve root=LABEL=xxx natively — it needs an initramfs.
+# The PXE initramfs (pxe-initramfs/) handles both normal and PXE boot paths.
+# For ISO live boot, GRUB loads this via 'initrd /boot/initramfs.cpio.gz'.
+# For installed boot, grub.cfg uses root=/dev/sdaX (no initramfs needed).
+# IMPORTANT: Do NOT embed this in bzImage via CONFIG_INITRAMFS_SOURCE —
+# that breaks installed boot (kernel runs /init instead of init=/opt/llamaste/llamaste).
+PXE_INITRAMFS="${BUILD_DIR}/pxe-initramfs"
+if [ -d "${PXE_INITRAMFS}" ]; then
+    echo "[iso] Building initramfs from ${PXE_INITRAMFS}..."
+    (cd "${PXE_INITRAMFS}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${ISO_ROOT}/boot/initramfs.cpio.gz")
+    echo "[iso] Initramfs: $(du -h "${ISO_ROOT}/boot/initramfs.cpio.gz" | cut -f1)"
+else
+    echo "WARNING: pxe-initramfs not found at ${PXE_INITRAMFS}"
+    echo "         ISO live boot with root=LABEL= will fail without initramfs"
+fi
 
 # --- Step 3: Copy GRUB config for live boot ---
 echo "[iso] Copying GRUB live config..."
@@ -233,7 +260,10 @@ touch "${ISO_ROOT}/ventoy.dat"
 echo "[iso] Building hybrid ISO with grub-mkrescue..."
 ISO_OUTPUT="${IMAGES_DIR}/llamaste.iso"
 
-grub-mkrescue -o "${ISO_OUTPUT}" "${ISO_ROOT}" \
+# MUST use system grub-mkrescue, NOT Buildroot's host version!
+# Buildroot's grub-mkrescue at output/host/bin/ lacks i386-pc and x86_64-efi
+# modules, producing a data-only ISO with no boot capability.
+/usr/bin/grub-mkrescue -o "${ISO_OUTPUT}" "${ISO_ROOT}" \
     -- -volid LLAMASTE 2>&1 | while read -r line; do
     # Show progress but filter noise
     case "$line" in
