@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-24 (Phase B HW compat IMPLEMENTED + null content bugfix)
+**Last updated**: 2026-03-25 (v0.2.0C -- desktop mode fixed, dynamic IP, version display)
 
 ---
 
@@ -96,7 +96,30 @@ All sub-phases done: Voice I/O, MCP server, mDNS DNS-SD, proactive notifications
 
 ---
 
-## Latest Session (2026-03-24) -- Phase B HW Compat IMPLEMENTED + Bugfix
+## Latest Session (2026-03-25) -- v0.2.0C: Desktop Mode Fixed + Bare Metal Testing
+
+### Bare Metal Testing (VivoBook)
+- **Boot fix**: Initramfs embedded in bzImage broke normal boot (CONFIG_INITRAMFS_SOURCE). Fixed with ASCII-only initramfs-init.sh loaded via GRUB initrd.
+- **Console WiFi IP**: Never showed on console — hardcoded interface list missed WiFi. Fixed with getifaddrs() dynamic scan showing all IPs.
+- **Desktop mode crash**: cage compositor failed — Mesa iris GL driver missing. Fixed by forcing WLR_RENDERER=pixman (software renderer, universal compat).
+- **Version display**: About card showed hardcoded "v0.1". Fixed to pull from /llamaste/system/info endpoint.
+- **Phase B hardware verified on real hardware**: eudev auto-detection, intel-lpss I2C, touchpad via I2C HID, Bluetooth stack, RTL8821CE WiFi all working.
+
+### Commits
+| Commit | Description |
+|--------|-------------|
+| c775666 | fix: ASCII-only initramfs init script for busybox ash |
+| d41f923 | docs: initramfs boot gotchas |
+| fbedbbf | feat: dynamic IP display on console + version 0.2.0B |
+| b89c5ec | fix: force pixman renderer for desktop mode compositor |
+| 1cbd929 | feat: version 0.2.0C — dynamic version display in web UI |
+
+### Backup
+- `D:\Llamaste\backups\v0.2.0C\` — ISO (2.1GB), IMG (867MB), source zip (9.6MB)
+
+---
+
+## Previous Session (2026-03-24) -- Phase B HW Compat IMPLEMENTED + Bugfix
 
 ### Phase B Hardware Compatibility — IMPLEMENTED & BUILT
 

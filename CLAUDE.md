@@ -4,7 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: v0.2.0a — bare metal SATA + NVMe install + 3B/14B inference CONFIRMED. Dynamic partition discovery. 64 tools, 13 suites.
+- **Phase**: v0.2.0C — Phase B hardware compat + desktop mode fixed. eudev auto-detection, Bluetooth, expanded drivers. 64 tools, 13 suites.
+- **Backup**: `D:\Llamaste\backups\v0.2.0C\` — ISO, IMG, source zip
 - **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM — SATA + NVMe install, boot, 3B (~14 tok/s) + 14B (2.2 tok/s) inference working.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 3B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
@@ -185,6 +186,10 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **CONFIG_INITRAMFS_SOURCE breaks normal boot**: Do NOT set `CONFIG_INITRAMFS_SOURCE` in linux.config — it embeds a PXE-specific busybox initramfs into EVERY bzImage. The kernel runs the embedded `/init` shell script INSTEAD of `init=/opt/llamaste/llamaste`, causing kernel panic (`Comm: sh`, `exitcode=0x00000000`). PXE boot uses a separate `bzImage-pxe` built with its own config. Symptom: `Run /init as init process` in kernel log (should say `Run /opt/llamaste/llamaste`). Fixed in db3473b.
 - **root=LABEL= needs initramfs**: The kernel can't resolve `root=LABEL=xxx` natively. ISO live boot uses GRUB `initrd /boot/initramfs.cpio.gz` to load a busybox initramfs that resolves LABEL= and calls switch_root. Installed boot uses `root=/dev/sdaX` (device path, no initramfs needed). The initramfs is built by `build-iso.sh` from `pxe-initramfs/` directory. Fixed in 50cc261.
 - **Busybox ash rejects Unicode**: Initramfs scripts MUST be pure ASCII. Busybox ash can't parse UTF-8 multi-byte characters (em dashes U+2014, etc.) even in comments/strings — causes `exitcode=0x00000200` (exit code 2 = syntax error). Use `--` instead of em dashes. The canonical initramfs init script is `scripts/initramfs-init.sh` (ASCII-clean). Fixed in c775666.
+- **Mesa iris GL driver fails on VivoBook**: cage crashes with `MESA-LOADER: failed to open iris: Error loading shared library` + `Unable to create the wlroots renderer`. The Buildroot Mesa build doesn't include working iris DRI driver. Fix: force `WLR_RENDERER=pixman` (software renderer). Works on all hardware. GPU-accelerated rendering deferred until Mesa DRI drivers verified.
+- **Console IP display must use getifaddrs()**: Hardcoded interface list (`eth0`, `enp0s3`, `ens33`, `wlan0`) misses interfaces with different names and only shows the first match. Fixed with `getifaddrs()` scan that shows wired + WiFi IPs. Requires `#include <ifaddrs.h>`.
+- **Web UI version was hardcoded**: `index.html` footer and `system.js` About card both had `v0.1` hardcoded. Fixed to pull from `/llamaste/system/info` endpoint `version` field. Never hardcode version in UI — always use version.h via API.
+- **Version is in version.h**: All version references (main.cpp, mcp_server.cpp, CMakeLists.txt, llamaste.mk, web UI) now use LLAMASTE_VERSION from version.h. Bump version.h for releases.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.

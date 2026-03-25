@@ -1,0 +1,26 @@
+Llamaste v0.2.0C Release Backup
+================================
+Date: 2026-03-25
+Git commit: 1cbd929
+
+Contents:
+  llamaste-v0.2.0C.iso  - Bootable ISO (2.1 GB) - flash to USB for live/install
+  llamaste-v0.2.0C.img  - Raw disk image (867 MB) - for QEMU or VDI conversion
+  llamaste-src-v0.2.0C.zip - Full source snapshot
+
+Changes since v0.2.0a:
+  - Phase B hardware compatibility (eudev auto-detection, Bluetooth, expanded drivers)
+  - Squashfs 259MB (was 170MB) - more drivers/firmware/BlueZ
+  - Initramfs boot fix (LABEL= resolution, ASCII-only busybox script)
+  - Dynamic IP display on console (getifaddrs, shows all interfaces)
+  - Null content inference crash fix (json null guard)
+  - Desktop mode fix (force pixman renderer - Mesa iris not available)
+  - Dynamic version display in web UI (pulls from server, not hardcoded)
+  - 64 tools, 13 test suites
+
+Verified on:
+  - ASUS VivoBook X712JA (i5-1035G1, 36GB RAM) - SATA + NVMe install
+  - VirtualBox VM (4GB RAM, EFI64, NAT)
+  - Desktop-Live mode working (pixman renderer)
+  - WiFi auto-connect from saved credentials
+  - 3B model inference (~14 tok/s AVX2)
