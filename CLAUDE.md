@@ -4,8 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: v0.2.0C — Phase B hardware compat + desktop mode fixed. eudev auto-detection, Bluetooth, expanded drivers. 64 tools, 13 suites.
-- **Backup**: `D:\Llamaste\backups\v0.2.0C\` — ISO, IMG, source zip
+- **Phase**: v0.2.1 — GBNF grammar-constrained tool call retry. Phase B hardware compat + desktop mode. eudev auto-detection, Bluetooth, expanded drivers. 64 tools, 13 suites.
+- **Backup**: `D:\Llamaste\backups\v0.2.1\` — ISO, IMG, source zip
 - **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM — SATA + NVMe install, boot, 3B (~14 tok/s) + 14B (2.2 tok/s) inference working.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 3B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).

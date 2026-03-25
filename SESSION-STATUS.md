@@ -1,6 +1,6 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-25 (v0.2.0C -- desktop mode fixed, dynamic IP, version display)
+**Last updated**: 2026-03-25 (v0.2.1 -- GBNF grammar retry for tool calls, version bump)
 
 ---
 
