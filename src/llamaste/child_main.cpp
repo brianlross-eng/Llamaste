@@ -2593,44 +2593,17 @@ int child_main(const SupervisorConfig& config) {
         // when no native GPU driver is present (Xe/i915 firmware not yet loaded).
         setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
 
-        // GPU-aware renderer selection.
-        // If a real GPU driver is loaded (amdgpu/nouveau/i915), wlroots auto-selects
-        // GL/Vulkan. We only force pixman when simpledrm is the only DRM device.
-        // This check looks at /sys/class/drm for card devices with real drivers.
+        // Force pixman (software) renderer. Mesa GL drivers (iris, radeonsi, nouveau)
+        // require matching shared libraries that may be missing or incompatible in our
+        // minimal Buildroot rootfs. On the VivoBook (i5-1035G1), cage crashes with:
+        //   MESA-LOADER: failed to open iris: Error loading shared library
+        //   [cage.c:323] Unable to create the wlroots renderer
+        // pixman is slower but works on ALL hardware — simpledrm, i915, amdgpu, etc.
+        // TODO: Re-enable GPU-accelerated rendering once Mesa GL is verified working
+        // in the Buildroot build (needs mesa3d iris/radeonsi DRI drivers + libdrm).
         if (!getenv("WLR_RENDERER")) {
-            bool has_real_gpu = false;
-            DIR* drm_dir = opendir("/sys/class/drm");
-            if (drm_dir) {
-                struct dirent* ent;
-                while ((ent = readdir(drm_dir))) {
-                    if (strncmp(ent->d_name, "card", 4) != 0) continue;
-                    if (strchr(ent->d_name, '-')) continue; // skip card0-HDMI-A-1 etc.
-                    std::string driver_path = std::string("/sys/class/drm/") +
-                        ent->d_name + "/device/driver";
-                    char link[256] = {};
-                    ssize_t len = readlink(driver_path.c_str(), link, sizeof(link) - 1);
-                    if (len > 0) {
-                        link[len] = '\0';
-                        const char* drv = strrchr(link, '/');
-                        if (drv) drv++; else drv = link;
-                        // simpledrm is software-only; everything else is a real GPU
-                        if (strcmp(drv, "simple-framebuffer") != 0 &&
-                            strcmp(drv, "simpledrm") != 0 &&
-                            strcmp(drv, "vboxvideo") != 0 &&
-                            strcmp(drv, "bochs-drm") != 0) {
-                            has_real_gpu = true;
-                            fprintf(stderr, "[child] Real GPU detected: %s (%s)\n",
-                                    ent->d_name, drv);
-                        }
-                    }
-                }
-                closedir(drm_dir);
-            }
-            if (!has_real_gpu) {
-                fprintf(stderr, "[child] No real GPU — using pixman renderer\n");
-                setenv("WLR_RENDERER", "pixman", 1);
-            }
-            // else: let wlroots auto-select GL/Vulkan
+            fprintf(stderr, "[child] Using pixman renderer (software — universal compat)\n");
+            setenv("WLR_RENDERER", "pixman", 1);
         }
 
         // Point XDG config to /etc so labwc reads /etc/labwc/rc.xml etc.
