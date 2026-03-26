@@ -2743,10 +2743,12 @@ int child_main(const SupervisorConfig& config) {
         if (!getenv("XKB_CONFIG_ROOT"))
             setenv("XKB_CONFIG_ROOT", "/usr/share/X11/xkb", 1);
 
-        // Disable atomic KMS — simpledrm (EFI framebuffer DRM) on bare metal
-        // often doesn't support atomic modesetting. Without this flag wlroots
-        // probes atomic ioctls, gets unexpected results, and segfaults (signal 11).
-        setenv("WLR_DRM_NO_ATOMIC", "1", 1);
+        // NOTE: WLR_DRM_NO_ATOMIC was previously set here because simpledrm on
+        // kernel 6.6 didn't support atomic modesetting (wlroots segfaulted).
+        // Kernel 6.12 improved simpledrm's atomic support, and forcing legacy
+        // mode now causes black screen (legacy page flips rejected by 6.12
+        // simpledrm). Removed — let wlroots use atomic modesetting by default.
+        // If atomic fails on specific hardware, set WLR_DRM_NO_ATOMIC=1 in env.
 
         // PATH for autostart script and child processes
         setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
