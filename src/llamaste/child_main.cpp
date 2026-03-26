@@ -4230,6 +4230,92 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(output, "text/plain");
     }));
 
+    svr.Get("/debug/drm", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        std::string output;
+
+        // /dev/dri/ contents
+        output += "=== DRI Devices (/dev/dri/) ===\n";
+        DIR* d = opendir("/dev/dri");
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string path = std::string("/dev/dri/") + ent->d_name;
+                struct stat st;
+                if (stat(path.c_str(), &st) == 0) {
+                    output += "  " + std::string(ent->d_name) +
+                              " (major=" + std::to_string(major(st.st_rdev)) +
+                              " minor=" + std::to_string(minor(st.st_rdev)) + ")\n";
+                } else {
+                    output += "  " + std::string(ent->d_name) + "\n";
+                }
+            }
+            closedir(d);
+        } else {
+            output += "  /dev/dri/ not found\n";
+        }
+
+        // /sys/class/drm/ contents
+        output += "\n=== DRM Class (/sys/class/drm/) ===\n";
+        d = opendir("/sys/class/drm");
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string name = ent->d_name;
+                output += "  " + name;
+                // Read status if available
+                std::ifstream sf("/sys/class/drm/" + name + "/status");
+                if (sf.is_open()) {
+                    std::string status;
+                    std::getline(sf, status);
+                    output += " status=" + status;
+                }
+                // Read enabled
+                std::ifstream ef("/sys/class/drm/" + name + "/enabled");
+                if (ef.is_open()) {
+                    std::string enabled;
+                    std::getline(ef, enabled);
+                    output += " enabled=" + enabled;
+                }
+                output += "\n";
+            }
+            closedir(d);
+        } else {
+            output += "  /sys/class/drm/ not found\n";
+        }
+
+        // Driver info
+        output += "\n=== DRM Driver ===\n";
+        output += read_file("/sys/class/drm/version");
+
+        // Compositor env
+        output += "\n=== Compositor Environment ===\n";
+        const char* vars[] = {"WLR_RENDERER", "WLR_DRM_NO_ATOMIC",
+                              "WLR_NO_HARDWARE_CURSORS", "WLR_LIBINPUT_NO_DEVICES",
+                              "LIBSEAT_BACKEND", "XDG_RUNTIME_DIR", nullptr};
+        for (int i = 0; vars[i]; i++) {
+            const char* v = getenv(vars[i]);
+            output += std::string("  ") + vars[i] + "=" + (v ? v : "(not set)") + "\n";
+        }
+
+        // Compositor log
+        output += "\n=== Compositor Log (/tmp/compositor.log) ===\n";
+        std::string clog = read_file("/tmp/compositor.log");
+        output += clog.empty() ? "(no log)\n" : clog;
+
+        // Wayland socket
+        output += "\n=== Wayland Socket ===\n";
+        struct stat wst;
+        if (stat("/run/user/0/wayland-0", &wst) == 0) {
+            output += "  /run/user/0/wayland-0 EXISTS\n";
+        } else {
+            output += "  /run/user/0/wayland-0 MISSING\n";
+        }
+
+        res.set_content(output, "text/plain");
+    }));
+
     svr.Get("/debug/audio", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string output;
 
