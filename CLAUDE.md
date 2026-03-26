@@ -4,8 +4,8 @@
 Llamaste is a bootable Linux image where the LLM IS the operating system. A single C++ binary (`llamaste`) combines llama-server + agent loop + system tools + web UI and runs as PID 1. The Linux kernel handles hardware; the LLM handles everything else (shell, file management, system config, networking, help).
 
 ## Current Status
-- **Phase**: v0.2.1 — GBNF grammar-constrained tool call retry. Phase B hardware compat + desktop mode. eudev auto-detection, Bluetooth, expanded drivers. 64 tools, 13 suites.
-- **Backup**: `D:\Llamaste\backups\v0.2.1\` — ISO, IMG, source zip
+- **Phase**: v0.2.2 — Kernel 6.12.78 LTS upgrade with PREEMPT_RT. Desktop mode working on real hardware. CONFIG_SYSFB_SIMPLEFB=y fix. 64 tools, 13 suites.
+- **Backup**: `D:\Llamaste\backups\v0.2.1\` — ISO, IMG, source zip (v0.2.1)
 - **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM — SATA + NVMe install, boot, 3B (~14 tok/s) + 14B (2.2 tok/s) inference working.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 3B Q4_K_M (was 0.028 tok/s, ~500x speedup).
 - **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
@@ -190,28 +190,33 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Console IP display must use getifaddrs()**: Hardcoded interface list (`eth0`, `enp0s3`, `ens33`, `wlan0`) misses interfaces with different names and only shows the first match. Fixed with `getifaddrs()` scan that shows wired + WiFi IPs. Requires `#include <ifaddrs.h>`.
 - **Web UI version was hardcoded**: `index.html` footer and `system.js` About card both had `v0.1` hardcoded. Fixed to pull from `/llamaste/system/info` endpoint `version` field. Never hardcode version in UI — always use version.h via API.
 - **Version is in version.h**: All version references (main.cpp, mcp_server.cpp, CMakeLists.txt, llamaste.mk, web UI) now use LLAMASTE_VERSION from version.h. Bump version.h for releases.
+- **CONFIG_SYSFB_SIMPLEFB=y required for kernel 6.12+**: Kernel 6.12 tightened EFI framebuffer handoff to DRM. Without `CONFIG_SYSFB_SIMPLEFB=y`, sysfb registers legacy "efi-framebuffer" platform device which simpledrm ignores — result: no `/dev/dri/card0`, "Found 0 GPUs", compositor fails. Was implicit on 6.6.70 but must be explicit on 6.12+. This was the desktop mode blocker.
+- **WLR_DRM_NO_ATOMIC removed for kernel 6.12**: simpledrm on kernel 6.12 supports atomic modesetting. The old `WLR_DRM_NO_ATOMIC=1` env var (needed on 6.6) causes wlroots to skip atomic path and fail. Removed in child_main.cpp.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
 - **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
-- **EVO-X2 kernel panic on boot**: `exitcode=0x00000` — binary exits before main(). Diagnostic ISO built with static test init. Suspect: ORT global constructor or CPU-specific issue. INVESTIGATING.
+- **EVO-X2 desktop mode console-only**: Server mode works, desktop mode shows console only (no web UI). Likely AMD GPU/DRM detection issue — shared CPU/GPU/AI chip memory may confuse compositor. Server mode confirmed working on 6.12.
+- **Desktop resolution cosmetic**: simpledrm inherits EFI framebuffer resolution (often 1024x768), not native panel resolution. Needs real GPU driver (i915/iris) or GRUB `set gfxpayload=` tuning for native res.
 - **CONFIG_DRM_AMDGPU=y causes black screen**: Built-in AMDGPU steals display from simpledrm before rootfs mounted (no firmware). Must use =m (module) loaded after squashfs pivot. Currently disabled.
 - **system() silently fails**: `BR2_SYSTEM_BIN_SH_NONE=y` means `system()` returns -1 (no /bin/sh). Always use `fork()/execl()` instead. Fixed in DHCP retry (child_main.cpp).
 - **Grammar-constrained tool call retry**: `llama_inference()` detects malformed `<tool_call>` JSON (common on 3B models) and retries with a GBNF grammar passed to `/completion`'s `grammar` parameter. The grammar enumerates known tool names (model can only call registered tools) and enforces valid JSON structure. First pass has zero overhead; retry adds one extra inference round with lower temperature. See `build_tool_call_gbnf()` in child_main.cpp.
 
 ## Next Steps
 ### Immediate
-1. **EVO-X2 boot diagnostic** — Test static init GRUB entry to isolate kernel vs binary/libs
-2. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
-3. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
+1. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel. Investigate GRUB `set gfxpayload=` or i915 driver
+2. **EVO-X2 desktop mode debug** — Server works, desktop shows console only. Add compositor logging, check DRM detection path
+3. **Merge kernel-6.12-upgrade to master** — 9 commits, all hardware tests pass
+4. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
+5. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
 
 ### Roadmap (Future Phases)
-- **Phase C: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving
-- **Phase D: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
-- **Phase E: Peer skill sharing** — Cluster nodes sync skill manifests on join, auto-transfer missing skills
-- **Phase F: Multi-user auth** — User accounts, roles (admin/user/guest), per-user chat history (v1.1/v2.0)
-- **Peer-to-peer model transfer** — Nodes serve GGUF shards to new cluster members
-- **Office deployment** — Multiple old PCs + DHCP server = distributed AI office assistant
+- **Phase C: Multi-user auth** — User accounts, roles (admin/user/guest), per-user chat history
+- **Phase D: Peer-to-peer model transfer** — Nodes serve GGUF shards to new cluster members
+- **Phase E: Office deployment** — Multiple old PCs + DHCP server = distributed AI office assistant
+- **Phase F: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving
+- **Phase G: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
+- **Phase H: Peer skill sharing** — Cluster nodes sync skill manifests on join, auto-transfer missing skills
 - Desktop mode WiFi connect test
 - Voice quality tuning
 - Real two-VM mDNS test on LAN

@@ -6,14 +6,20 @@
 
 ## Where We Are
 
-### 2026-03-26: Kernel 6.12.78 LTS Upgrade
+### 2026-03-26: v0.2.2 — Kernel 6.12.78 LTS Upgrade — ALL TESTS PASS
 - Upgraded from 6.6.70 to 6.12.78 LTS
 - Enabled PREEMPT_RT for deterministic inference latency
 - Enabled DRM panic (text mode — QR needs Rust)
 - Enabled Intel Xe DRM driver
 - Resolved 16 Kconfig changes (removed/renamed/type-changed options)
 - PREEMPT_RT trade-offs: i915 disabled (simpledrm+pixman fallback), THP disabled
-- Build in progress — testing pending
+- CONFIG_SYSFB_SIMPLEFB=y was the key fix for desktop mode on 6.12+
+- **VivoBook hardware test results**: USB boot ✅, server-live ✅, WiFi ✅, install ✅, model load ✅, server mode ✅, desktop-live ✅
+- **Desktop mode works on real hardware for the FIRST time**
+- EVO-X2: server mode ✅, desktop mode still console-only (separate issue — likely AMD GPU/DRM)
+- Wizard emoji replaced with llama emoji on login/setup pages
+- Known cosmetic: desktop resolution uses EFI framebuffer res (simpledrm), not native panel
+- 9 commits on `kernel-6.12-upgrade` branch
 
 ### Phase 1: COMPLETE
 All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
