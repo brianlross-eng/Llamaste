@@ -25,7 +25,7 @@ Llamaste runs as three layers:
                               |
 +------------------------------------------------------------------+
 |                       Linux kernel                                |
-|  6.6.70, all built-in, no modules                                 |
+|  6.12.78 LTS (PREEMPT_RT), all built-in, no modules                |
 |  DRM/KMS, evdev, virtio, AHCI, NVMe, EFI, ACPI, DHCP            |
 +------------------------------------------------------------------+
 ```

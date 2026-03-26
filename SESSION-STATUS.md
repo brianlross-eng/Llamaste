@@ -1,10 +1,19 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-25 (v0.2.1 -- GBNF grammar retry for tool calls, version bump)
+**Last updated**: 2026-03-26 (v0.2.2 -- Kernel 6.12.78 LTS upgrade with PREEMPT_RT)
 
 ---
 
 ## Where We Are
+
+### 2026-03-26: Kernel 6.12.78 LTS Upgrade
+- Upgraded from 6.6.70 to 6.12.78 LTS
+- Enabled PREEMPT_RT for deterministic inference latency
+- Enabled DRM panic (text mode — QR needs Rust)
+- Enabled Intel Xe DRM driver
+- Resolved 16 Kconfig changes (removed/renamed/type-changed options)
+- PREEMPT_RT trade-offs: i915 disabled (simpledrm+pixman fallback), THP disabled
+- Build in progress — testing pending
 
 ### Phase 1: COMPLETE
 All 12 tasks + ISO/installer done. 5/5 QEMU E2E tests. EFI boot verified.
