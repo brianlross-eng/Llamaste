@@ -197,11 +197,11 @@
 
   // --- Stub actions ---
   function filesUpload() {
-    alert('File upload coming soon.');
+    llamasteAlert('File upload coming soon.');
   }
 
   function filesNewFolder() {
-    alert('New folder coming soon.');
+    llamasteAlert('New folder coming soon.');
   }
 
   // --- Error display ---

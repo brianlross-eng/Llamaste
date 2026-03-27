@@ -210,30 +210,32 @@
     if (regenBtn && !regenBtn._wired) {
       regenBtn._wired = true;
       regenBtn.addEventListener('click', function () {
-        if (!confirm('Generate a new API key? The old key will stop working immediately.')) return;
-        regenBtn.disabled = true;
-        regenBtn.textContent = '…';
-        fetch('/llamaste/mcp/key/regenerate', {
-          method: 'POST',
-          credentials: 'include'
-        })
-          .then(function (r) {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
+        llamasteConfirm('Generate a new API key? The old key will stop working immediately.').then(function (ok) {
+          if (!ok) return;
+          regenBtn.disabled = true;
+          regenBtn.textContent = '…';
+          fetch('/llamaste/mcp/key/regenerate', {
+            method: 'POST',
+            credentials: 'include'
           })
-          .then(function (d) {
-            var key = d.key || '';
-            var keyEl2 = document.getElementById('mcp-api-key');
-            if (keyEl2) keyEl2.textContent = key;
-            updateMcpSnippet(key);
-            regenBtn.disabled = false;
-            regenBtn.textContent = 'Regen';
-          })
-          .catch(function () {
-            regenBtn.disabled = false;
-            regenBtn.textContent = 'Regen';
-            alert('Failed to regenerate key.');
-          });
+            .then(function (r) {
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              return r.json();
+            })
+            .then(function (d) {
+              var key = d.key || '';
+              var keyEl2 = document.getElementById('mcp-api-key');
+              if (keyEl2) keyEl2.textContent = key;
+              updateMcpSnippet(key);
+              regenBtn.disabled = false;
+              regenBtn.textContent = 'Regen';
+            })
+            .catch(function () {
+              regenBtn.disabled = false;
+              regenBtn.textContent = 'Regen';
+              llamasteAlert('Failed to regenerate key.');
+            });
+        });
       });
     }
   }
@@ -317,7 +319,7 @@
             if (availRow) availRow.style.display = '';
             if (availEl) availEl.textContent = 'v' + data.latest_version;
           } else {
-            alert(data.message || 'No updates available');
+            llamasteAlert(data.message || 'No updates available');
           }
         })
         .catch(function () {
@@ -330,22 +332,24 @@
   if (rollbackBtn2 && !rollbackBtn2._wired) {
     rollbackBtn2._wired = true;
     rollbackBtn2.addEventListener('click', function () {
-      if (!confirm('Roll back to the previous version? The system will need to reboot.')) return;
-      rollbackBtn2.disabled = true;
-      fetch('/llamaste/update/rollback', { method: 'POST', credentials: 'include' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          rollbackBtn2.disabled = false;
-          if (data.success) {
-            alert(data.message || 'Rollback prepared. Reboot to activate.');
-          } else {
-            alert('Rollback failed: ' + (data.error || 'unknown error'));
-          }
-        })
-        .catch(function () {
-          rollbackBtn2.disabled = false;
-          alert('Rollback request failed.');
-        });
+      llamasteConfirm('Roll back to the previous version? The system will need to reboot.').then(function (ok) {
+        if (!ok) return;
+        rollbackBtn2.disabled = true;
+        fetch('/llamaste/update/rollback', { method: 'POST', credentials: 'include' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            rollbackBtn2.disabled = false;
+            if (data.success) {
+              llamasteAlert(data.message || 'Rollback prepared. Reboot to activate.');
+            } else {
+              llamasteAlert('Rollback failed: ' + (data.error || 'unknown error'));
+            }
+          })
+          .catch(function () {
+            rollbackBtn2.disabled = false;
+            llamasteAlert('Rollback request failed.');
+          });
+      });
     });
   }
 
@@ -805,20 +809,21 @@
 
   function powerAction(action) {
     var label = action === 'shutdown' ? 'shut down' : 'reboot';
-    if (!confirm('Are you sure you want to ' + label + '?')) return;
-
-    fetch('/llamaste/' + action, { method: 'POST', credentials: 'include' })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function () {
-        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#aaa;font-size:1.2em">' +
-          (action === 'reboot' ? 'Rebooting...' : 'Shutting down...') + '</div>';
-      })
-      .catch(function (e) {
-        alert('Failed: ' + e.message);
-      });
+    llamasteConfirm('Are you sure you want to ' + label + '?').then(function (ok) {
+      if (!ok) return;
+      fetch('/llamaste/' + action, { method: 'POST', credentials: 'include' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function () {
+          document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#aaa;font-size:1.2em">' +
+            (action === 'reboot' ? 'Rebooting...' : 'Shutting down...') + '</div>';
+        })
+        .catch(function (e) {
+          llamasteAlert('Failed: ' + e.message);
+        });
+    });
   }
 
   if (shutdownBtn) shutdownBtn.addEventListener('click', function () { powerAction('shutdown'); });
