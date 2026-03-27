@@ -4231,6 +4231,58 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(output, "text/plain");
     }));
 
+    svr.Get("/debug/dmesg", require_auth([](const httplib::Request& req, httplib::Response& res) {
+        std::string output;
+        std::string filter = req.has_param("filter") ? req.get_param_value("filter") : "";
+
+        // Read kernel log from /dev/kmsg
+        int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            output = "Cannot open /dev/kmsg: " + std::string(strerror(errno)) + "\n";
+            // Fallback: try /proc/kmsg
+            std::ifstream kmsg("/proc/kmsg");
+            if (kmsg.is_open()) {
+                output = "(/proc/kmsg not suitable for non-blocking read)\n";
+            }
+        } else {
+            // Seek to end-N messages (read last ~64KB)
+            lseek(fd, 0, SEEK_DATA);
+            char buf[512];
+            int count = 0;
+            std::vector<std::string> lines;
+            while (count < 2000) {
+                ssize_t n = read(fd, buf, sizeof(buf) - 1);
+                if (n <= 0) break;
+                buf[n] = '\0';
+                // /dev/kmsg format: "priority,seq,timestamp;message\n"
+                char* msg = strchr(buf, ';');
+                if (msg) {
+                    msg++;  // skip ';'
+                    std::string line(msg);
+                    // Strip trailing newline
+                    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                        line.pop_back();
+                    if (filter.empty() || line.find(filter) != std::string::npos) {
+                        lines.push_back(line);
+                    }
+                }
+                count++;
+            }
+            close(fd);
+
+            // Return last 200 matching lines
+            size_t start = lines.size() > 200 ? lines.size() - 200 : 0;
+            for (size_t i = start; i < lines.size(); i++) {
+                output += lines[i] + "\n";
+            }
+            if (lines.empty()) {
+                output = "(no matching messages)\n";
+            }
+        }
+
+        res.set_content(output, "text/plain");
+    }));
+
     svr.Get("/debug/drm", require_auth([read_file](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string output;
 

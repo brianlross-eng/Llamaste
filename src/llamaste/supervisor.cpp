@@ -1,5 +1,6 @@
 #include "supervisor.h"
 #include "init.h"
+#include "version.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -693,7 +694,7 @@ static void console_display_thread(const SupervisorConfig& config) {
             else if (config.boot_mode == "live") mode_label = "LIVE";
 
             char title[64];
-            snprintf(title, sizeof(title), "LLAMASTE  %s", mode_label);
+            snprintf(title, sizeof(title), "LLAMASTE  %s  (v%s)", mode_label, LLAMASTE_VERSION);
             int tlen = (int)strlen(title);
             int pad_left = (W - tlen) / 2;
             int pad_right = W - tlen - pad_left;

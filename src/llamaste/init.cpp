@@ -479,6 +479,34 @@ static std::vector<std::string> discover_partitions() {
 static bool try_mount_data_partition(const char* dev) {
 #ifndef _WIN32
     rlog("[init] mount_data: trying %s\n", dev);
+
+    // Read ext4 superblock magic to verify this is actually ext4
+    {
+        int fd = open(dev, O_RDONLY);
+        if (fd >= 0) {
+            uint8_t sb[2048];
+            ssize_t n = pread(fd, sb, sizeof(sb), 0);
+            close(fd);
+            if (n >= 1082) {
+                uint16_t magic = (uint16_t)sb[1080] | ((uint16_t)sb[1081] << 8);
+                uint32_t features_compat = sb[1116] | (sb[1117]<<8) | (sb[1118]<<16) | (sb[1119]<<24);
+                uint32_t features_incompat = sb[1120] | (sb[1121]<<8) | (sb[1122]<<16) | (sb[1123]<<24);
+                uint32_t features_ro_compat = sb[1124] | (sb[1125]<<8) | (sb[1126]<<16) | (sb[1127]<<24);
+                rlog("[init] mount_data: %s superblock magic=0x%04X (expect 0xEF53)"
+                     " compat=0x%08X incompat=0x%08X ro_compat=0x%08X\n",
+                     dev, magic, features_compat, features_incompat, features_ro_compat);
+                if (magic != 0xEF53) {
+                    rlog("[init] mount_data: %s is NOT ext4 (bad magic), skipping\n", dev);
+                    return false;
+                }
+            } else {
+                rlog("[init] mount_data: %s read only %zd bytes (need 1082)\n", dev, n);
+            }
+        } else {
+            rlog("[init] mount_data: %s open failed: %m (errno=%d)\n", dev, errno);
+        }
+    }
+
     grow_gpt_partition(dev);
 
     if (mount(dev, "/data", "ext4", 0, nullptr) == 0) {
@@ -486,7 +514,24 @@ static bool try_mount_data_partition(const char* dev) {
         grow_ext4_online(dev);
         return true;
     } else {
-        rlog("[init] mount_data: mount %s failed: %m\n", dev);
+        int e = errno;
+        rlog("[init] mount_data: mount %s failed: %m (errno=%d)\n", dev, e);
+
+        // If EIO, try noload (skip journal replay) as diagnostic
+        if (e == EIO) {
+            rlog("[init] mount_data: retrying %s with noload (skip journal)...\n", dev);
+            if (mount(dev, "/data", "ext4", 0, "noload") == 0) {
+                rlog("[init] mount_data: %s mounted with noload! Journal issue.\n", dev);
+                // Remount read-write
+                if (mount(nullptr, "/data", nullptr, MS_REMOUNT, nullptr) == 0) {
+                    rlog("[init] mount_data: remounted /data read-write\n");
+                }
+                grow_ext4_online(dev);
+                return true;
+            } else {
+                rlog("[init] mount_data: noload mount also failed: %m (errno=%d)\n", errno);
+            }
+        }
     }
 #endif
     return false;
