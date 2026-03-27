@@ -532,6 +532,48 @@ static bool try_mount_data_partition(const char* dev) {
                 rlog("[init] mount_data: noload mount also failed: %m (errno=%d)\n", errno);
             }
         }
+
+        // Last resort: recreate ext4 filesystem with mkfs.ext4
+        // This handles reinstall scenarios where old backup GPT persists
+        // but the ext4 superblock was overwritten by dd
+        {
+            const char* mkfs_paths[] = {
+                "/sbin/mkfs.ext4", "/usr/sbin/mkfs.ext4",
+                "/bin/mkfs.ext4", "/usr/bin/mkfs.ext4", nullptr
+            };
+            const char* mkfs = nullptr;
+            for (int i = 0; mkfs_paths[i]; i++) {
+                if (access(mkfs_paths[i], X_OK) == 0) {
+                    mkfs = mkfs_paths[i];
+                    break;
+                }
+            }
+            if (mkfs) {
+                rlog("[init] mount_data: attempting mkfs.ext4 on %s (recreate filesystem)...\n", dev);
+                pid_t pid = fork();
+                if (pid == 0) {
+                    const char* argv[] = {mkfs, "-q", "-F", "-L", "DATA", dev, nullptr};
+                    execv(mkfs, (char* const*)argv);
+                    _exit(127);
+                } else if (pid > 0) {
+                    int status = 0;
+                    waitpid(pid, &status, 0);
+                    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                        rlog("[init] mount_data: mkfs.ext4 succeeded, retrying mount...\n");
+                        if (mount(dev, "/data", "ext4", 0, nullptr) == 0) {
+                            rlog("[init] Mounted %s on /data (after mkfs.ext4 recreate)\n", dev);
+                            return true;
+                        } else {
+                            rlog("[init] mount_data: mount after mkfs.ext4 STILL failed: %m\n");
+                        }
+                    } else {
+                        rlog("[init] mount_data: mkfs.ext4 failed (status=%d)\n", status);
+                    }
+                }
+            } else {
+                rlog("[init] mount_data: mkfs.ext4 not found, cannot recreate filesystem\n");
+            }
+        }
     }
 #endif
     return false;

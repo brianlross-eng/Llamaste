@@ -38,6 +38,9 @@ BR2_TARGET_GRUB2_BUILTIN_MODULES_PCBIOS="boot linux ext2 fat part_gpt normal bio
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_ZSTD=y
 
+# Filesystem tools (mkfs.ext4 for DATA partition formatting)
+BR2_PACKAGE_E2FSPROGS=y
+
 # No BusyBox
 # BR2_PACKAGE_BUSYBOX is not set
 
