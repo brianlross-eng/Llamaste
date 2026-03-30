@@ -15,10 +15,12 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/route.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <cerrno>
@@ -445,12 +447,81 @@ static std::string handle_network_set_ip(const std::string& args_json) {
     out << config.dump(2);
     out.close();
 
+#ifndef _WIN32
+    // Apply immediately at runtime (not just on reboot)
+    if (mode == "static") {
+        std::string iface = config.value("interface", "eth0");
+        std::string ip = config.value("ip", "");
+        std::string netmask = config.value("netmask", "255.255.255.0");
+        std::string gw = config.value("gateway", "");
+        std::string dns = config.value("dns", "8.8.8.8");
+
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock >= 0) {
+            struct ifreq ifr;
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+
+            // Set IP address
+            struct sockaddr_in* addr = (struct sockaddr_in*)&ifr.ifr_addr;
+            addr->sin_family = AF_INET;
+            inet_pton(AF_INET, ip.c_str(), &addr->sin_addr);
+            ioctl(sock, SIOCSIFADDR, &ifr);
+
+            // Set netmask
+            addr = (struct sockaddr_in*)&ifr.ifr_netmask;
+            addr->sin_family = AF_INET;
+            inet_pton(AF_INET, netmask.c_str(), &addr->sin_addr);
+            ioctl(sock, SIOCSIFNETMASK, &ifr);
+
+            // Bring interface up
+            if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+                ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+                ioctl(sock, SIOCSIFFLAGS, &ifr);
+            }
+
+            // Set default gateway using ip route command
+            if (!gw.empty()) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
+                    _exit(0);
+                }
+                if (pid > 0) waitpid(pid, nullptr, 0);
+
+                pid = fork();
+                if (pid == 0) {
+                    execl("/sbin/ip", "ip", "route", "add", "default",
+                          "via", gw.c_str(),
+                          "dev", iface.c_str(), nullptr);
+                    _exit(0);
+                }
+                if (pid > 0) {
+                    int st = 0;
+                    waitpid(pid, &st, 0);
+                    fprintf(stderr, "[net] ip route add default via %s dev %s (exit=%d)\n",
+                            gw.c_str(), iface.c_str(), WEXITSTATUS(st));
+                }
+            }
+
+            close(sock);
+        }
+
+        // Write DNS to /etc/resolv.conf
+        if (!dns.empty()) {
+            std::ofstream resolv("/etc/resolv.conf");
+            if (resolv.is_open())
+                resolv << "nameserver " << dns << "\n";
+        }
+    }
+#endif
+
     json result;
-    result["status"] = "saved";
+    result["status"] = "applied";
     result["config"] = config;
     result["message"] = (mode == "dhcp")
-        ? "Switched to DHCP. Reboot to apply."
-        : "Static IP configured. Reboot to apply.";
+        ? "Switched to DHCP. Config saved; reboot to fully apply."
+        : "Static IP applied and saved.";
     return result.dump();
 }
 

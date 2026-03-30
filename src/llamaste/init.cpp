@@ -396,10 +396,62 @@ static void grow_ext4_online(const char* part_dev) {
         rlog("[init] Grew /data filesystem by %lu MB (now %lu MB)\n",
                 (unsigned long)grown_mb,
                 (unsigned long)((max_blocks * fs_block_size) / (1024 * 1024)));
-    } else {
-        rlog("[init] ext4 online resize failed: %m\n");
+        close(mountfd);
+        return;
     }
+
+    int resize_err = errno;
     close(mountfd);
+    rlog("[init] ext4 online resize failed: %m (errno=%d)\n", resize_err);
+
+    // Online resize failed (common when ext4 was created on a tiny partition
+    // and needs to grow to a much larger size — insufficient reserved GDT blocks).
+    // Fallback: unmount, mkfs.ext4, remount with a properly-sized filesystem.
+    uint64_t part_mb = part_bytes / (1024 * 1024);
+    uint64_t fs_mb = (current_blocks * fs_block_size) / (1024 * 1024);
+    if (part_mb > fs_mb * 4) {  // Only if partition is >4x the filesystem
+        rlog("[init] ext4: partition %lu MB >> filesystem %lu MB, recreating...\n",
+             (unsigned long)part_mb, (unsigned long)fs_mb);
+
+        if (umount("/data") != 0) {
+            rlog("[init] ext4: cannot unmount /data for mkfs: %m\n");
+            return;
+        }
+
+        // Try mkfs.ext4
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/usr/sbin/mkfs.ext4", "mkfs.ext4", "-F", "-q",
+                  "-L", "LLAMASTE-DATA", part_dev, nullptr);
+            execl("/sbin/mkfs.ext4", "mkfs.ext4", "-F", "-q",
+                  "-L", "LLAMASTE-DATA", part_dev, nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            int status = 0;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                rlog("[init] ext4: mkfs.ext4 succeeded on %s\n", part_dev);
+                if (mount(part_dev, "/data", "ext4", 0, nullptr) == 0) {
+                    rlog("[init] ext4: remounted /data (%lu MB)\n", (unsigned long)part_mb);
+                    // Recreate standard directories
+                    const char* dirs[] = {
+                        "/data/models", "/data/llamaste", "/data/llamaste/conversations",
+                        "/data/llamaste/config", "/data/llamaste/logs",
+                        "/data/llamaste/skills", "/data/llamaste/cache", nullptr
+                    };
+                    for (int i = 0; dirs[i]; i++) mkdir(dirs[i], 0755);
+                } else {
+                    rlog("[init] ext4: remount after mkfs failed: %m\n");
+                }
+            } else {
+                rlog("[init] ext4: mkfs.ext4 failed (status=%d), remounting old fs\n", status);
+                mount(part_dev, "/data", "ext4", 0, nullptr);
+            }
+        } else {
+            rlog("[init] ext4: fork failed: %m\n");
+            mount(part_dev, "/data", "ext4", 0, nullptr);
+        }
+    }
 }
 
 #endif // !_WIN32
@@ -938,25 +990,30 @@ void init_apply_network_config() {
         ioctl(sock, SIOCSIFFLAGS, &ifr);
     }
 
-    // Set default gateway
+    // Set default gateway using ip route command
     if (!gateway.empty()) {
-        struct rtentry rt;
-        memset(&rt, 0, sizeof(rt));
-        addr = (struct sockaddr_in*)&rt.rt_dst;
-        addr->sin_family = AF_INET;
-        addr->sin_addr.s_addr = 0;
-        addr = (struct sockaddr_in*)&rt.rt_gateway;
-        addr->sin_family = AF_INET;
-        inet_pton(AF_INET, gateway.c_str(), &addr->sin_addr);
-        addr = (struct sockaddr_in*)&rt.rt_genmask;
-        addr->sin_family = AF_INET;
-        addr->sin_addr.s_addr = 0;
-        rt.rt_flags = RTF_UP | RTF_GATEWAY;
+        // Delete old default route first
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
+            _exit(0);
+        }
+        if (pid > 0) waitpid(pid, nullptr, 0);
 
-        // Delete existing default route first (kernel DHCP may have set one)
-        ioctl(sock, SIOCDELRT, &rt);
-        if (ioctl(sock, SIOCADDRT, &rt) < 0)
-            fprintf(stderr, "[init] SIOCADDRT gateway failed: %m\n");
+        // Add new default route
+        pid = fork();
+        if (pid == 0) {
+            execl("/sbin/ip", "ip", "route", "add", "default",
+                  "via", gateway.c_str(),
+                  "dev", iface.c_str(), nullptr);
+            _exit(0);
+        }
+        if (pid > 0) {
+            int st = 0;
+            waitpid(pid, &st, 0);
+            fprintf(stderr, "[init] ip route add default via %s dev %s (exit=%d)\n",
+                    gateway.c_str(), iface.c_str(), WEXITSTATUS(st));
+        }
     }
 
     close(sock);

@@ -67,6 +67,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <net/route.h>
 #include <sys/ioctl.h>
 #include <sys/utsname.h>
 #include <sys/sysmacros.h>
@@ -1122,6 +1123,96 @@ static void spawn_wpa_supplicant(const std::string& iface) {
             fprintf(stderr, "[child] /run/wpa_supplicant/ does not exist!\n");
         }
     }
+}
+
+// Manually add default gateway route and DNS after DHCP lease.
+// dhcpcd hooks need /bin/sh which doesn't exist (BR2_SYSTEM_BIN_SH_NONE=y),
+// so dhcpcd gets the IP but silently fails to add the route or write DNS.
+static void apply_dhcp_route_and_dns(const std::string& iface) {
+#ifndef _WIN32
+    // Read gateway from dhcpcd lease file
+    // dhcpcd writes lease info to /var/lib/dhcpcd/<iface>.lease (binary)
+    // Easier approach: read the gateway from the routing table or /proc
+    // Actually, the kernel ip=dhcp should handle this. But as a fallback,
+    // try to get the gateway from the interface's network and add a route.
+
+    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sk < 0) return;
+
+    // Get our IP and netmask to derive likely gateway
+    struct ifreq ifr = {};
+    strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+
+    struct in_addr our_ip = {}, our_mask = {};
+    if (ioctl(sk, SIOCGIFADDR, &ifr) == 0)
+        our_ip = ((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr;
+    if (ioctl(sk, SIOCGIFNETMASK, &ifr) == 0)
+        our_mask = ((struct sockaddr_in*)&ifr.ifr_netmask)->sin_addr;
+
+    if (our_ip.s_addr != 0 && our_mask.s_addr != 0) {
+        // Check if default route already exists
+        FILE* rf = fopen("/proc/net/route", "r");
+        bool has_default = false;
+        if (rf) {
+            char line[256];
+            while (fgets(line, sizeof(line), rf)) {
+                char riface[32];
+                unsigned long dest;
+                if (sscanf(line, "%31s %lx", riface, &dest) == 2) {
+                    if (dest == 0 && strcmp(riface, "lo") != 0) {
+                        has_default = true;
+                        break;
+                    }
+                }
+            }
+            fclose(rf);
+        }
+
+        if (!has_default) {
+            // Guess gateway as .1 on our subnet (most common DHCP setup)
+            struct in_addr gw;
+            gw.s_addr = (our_ip.s_addr & our_mask.s_addr) | htonl(1);
+            char gw_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
+
+            // Delete old default route
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
+                _exit(0);
+            }
+            if (pid > 0) waitpid(pid, nullptr, 0);
+
+            // Add new default route
+            pid = fork();
+            if (pid == 0) {
+                execl("/sbin/ip", "ip", "route", "add", "default",
+                      "via", gw_str,
+                      "dev", iface.c_str(), nullptr);
+                _exit(0);
+            }
+            if (pid > 0) {
+                int st = 0;
+                waitpid(pid, &st, 0);
+                fprintf(stderr, "[net] ip route add default via %s dev %s (exit=%d)\n",
+                        gw_str, iface.c_str(), WEXITSTATUS(st));
+            }
+        }
+    }
+    close(sk);
+
+    // Write DNS if resolv.conf is missing or empty
+    struct stat rst;
+    bool need_dns = (stat("/etc/resolv.conf", &rst) != 0 || rst.st_size < 10);
+    if (need_dns) {
+        FILE* dns = fopen("/etc/resolv.conf", "w");
+        if (dns) {
+            fprintf(dns, "nameserver 8.8.8.8\nnameserver 8.8.4.4\n");
+            fclose(dns);
+            fprintf(stderr, "[net] %s: wrote fallback DNS to /etc/resolv.conf\n", iface.c_str());
+        }
+    }
+#endif
 }
 
 static void spawn_dhcpcd(const std::string& iface) {
@@ -2442,6 +2533,8 @@ int child_main(const SupervisorConfig& config) {
                     if (st.state == "COMPLETED" && !st.ip_addr.empty()) {
                         fprintf(stderr, "[wifi] CONNECTED: ssid='%s' ip=%s (took %dms)\n",
                                 st.ssid.c_str(), st.ip_addr.c_str(), (w+1)*500);
+                        // dhcpcd hooks need /bin/sh — manually add route + DNS
+                        apply_dhcp_route_and_dns(wifi_iface);
                         break;
                     }
                     // Log progress at 5s intervals
@@ -2617,7 +2710,32 @@ int child_main(const SupervisorConfig& config) {
                     continue;
                 }
 
-                fprintf(stderr, "[net] %s: carrier detected, spawning dhcpcd\n", ifname.c_str());
+                fprintf(stderr, "[net] %s: carrier detected\n", ifname.c_str());
+
+                // Skip dhcpcd if kernel ip=dhcp already configured this interface
+                bool already_has_ip = false;
+                {
+                    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                    if (sk >= 0) {
+                        struct ifreq ifr2 = {};
+                        strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                        if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
+                            auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
+                            char ip[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                            if (strcmp(ip, "0.0.0.0") != 0) {
+                                already_has_ip = true;
+                                fprintf(stderr, "[net] %s: already configured by kernel (%s), skipping dhcpcd\n",
+                                        ifname.c_str(), ip);
+                            }
+                        }
+                        close(sk);
+                    }
+                }
+
+                if (already_has_ip) continue;
+
+                fprintf(stderr, "[net] %s: no IP yet, spawning dhcpcd\n", ifname.c_str());
                 spawn_dhcpcd(ifname);
 
                 // Wait up to 10s for DHCP lease, then retry once with
@@ -2664,7 +2782,11 @@ int child_main(const SupervisorConfig& config) {
                         spawn_dhcpcd(ifname);
                     }
                 }
-                if (!got_lease) {
+                if (got_lease) {
+                    // dhcpcd hooks need /bin/sh which we don't have.
+                    // Manually add default route and DNS.
+                    apply_dhcp_route_and_dns(ifname);
+                } else {
                     fprintf(stderr, "[net] %s: no DHCP lease after retries (dhcpcd -b will keep trying in background)\n", ifname.c_str());
                 }
             }

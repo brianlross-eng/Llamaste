@@ -33,7 +33,11 @@
       "WebFetch(domain:instantdomainsearch.com)",
       "WebFetch(domain:www.lazarus.org)",
       "Skill(claude-md-management:revise-claude-md)",
-      "Skill(claude-md-management:revise-claude-md:*)"
+      "Skill(claude-md-management:revise-claude-md:*)",
+      "mcp__context-mode__ctx_execute_file",
+      "mcp__context-mode__ctx_search",
+      "mcp__context-mode__ctx_execute",
+      "mcp__context-mode__ctx_batch_execute"
     ]
   }
 }

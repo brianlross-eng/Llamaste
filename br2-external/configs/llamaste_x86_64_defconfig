@@ -197,3 +197,4 @@ BR2_PACKAGE_DEJAVU=y
 # Browser for desktop: cog (WPE WebKit, Wayland-native)
 BR2_PACKAGE_COG=y
 BR2_PACKAGE_WPEWEBKIT=y
+BR2_PACKAGE_IPROUTE2=y

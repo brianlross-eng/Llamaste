@@ -1,10 +1,38 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-26 (v0.2.2 -- Kernel 6.12.78 LTS upgrade with PREEMPT_RT)
+**Last updated**: 2026-03-27 (v0.2.2 -- DATA partition resize fix, console version, desktop modals)
 
 ---
 
 ## Where We Are
+
+### 2026-03-27: v0.2.2 — DATA Partition Resize Fix, Console Version, Desktop Modals
+
+#### DATA Partition Resize Regression — FIXED
+- **Root cause**: No e2fsprogs in build — installer silently skipped mkfs.ext4. On reinstall, dd overwrote ext4 superblock but old backup GPT persisted at end of disk. Mount failed with EIO.
+- **Fix**: Added `BR2_PACKAGE_E2FSPROGS=y` to defconfig + mkfs.ext4 fallback in init.cpp that recreates filesystem if mount fails.
+
+#### Console Banner Version Display
+- supervisor.cpp now shows "LLAMASTE SERVER (v0.2.2)" or "LLAMASTE DESKTOP (v0.2.2)" in console title.
+
+#### Desktop Shutdown/Reboot Fix
+- `window.confirm()` silently fails in cog/WPE kiosk browser (returns false/undefined).
+- Replaced with custom in-page modal dialogs for shutdown/reboot confirmation.
+
+#### Wizard Emoji to Llama Emoji
+- setup.html and login.html now use llama emoji instead of wizard.
+
+#### Squashfs Caching Gotcha
+- Multiple builds failed to include updated binary — Buildroot didn't regenerate rootfs.squashfs.
+- Must `rm -f images/rootfs.squashfs images/llamaste.img` AND `rm -f .stamp_images_rootfs` before `make`.
+
+#### EVO-X2 Kernel Panic on v0.2.2
+- v0.2.2 (kernel 6.12) causes kernel panic on EVO-X2 with penguin logo visible (CONFIG_LOGO=y framebuffer console).
+- Server mode worked on v0.2.1 (kernel 6.6). Regression — needs serial console debug at home.
+
+#### Roadmap Reorder
+- Skills phases (self-learning F, marketplace G, peer sharing H) moved to end of roadmap.
+- Multi-user auth (C), peer model transfer (D), office deployment (E) have higher priority.
 
 ### 2026-03-26: v0.2.2 — Kernel 6.12.78 LTS Upgrade — ALL TESTS PASS
 - Upgraded from 6.6.70 to 6.12.78 LTS

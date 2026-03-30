@@ -1022,6 +1022,10 @@ static void install_worker(const std::string& device) {
                 strerror(errno));
     }
 
+    // Step 7 removed: initramfs now handles root device discovery at boot.
+    // No ESP patching needed — grub.cfg + initramfs.cpio.gz on ESP scan
+    // all block devices for the squashfs root partition (NVMe, SATA, virtio).
+
     g_install_progress.percent = 100;
     g_install_progress.set_status("Installation complete! Remove the installation media and reboot.");
     g_install_progress.success = true;

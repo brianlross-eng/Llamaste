@@ -192,11 +192,16 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Version is in version.h**: All version references (main.cpp, mcp_server.cpp, CMakeLists.txt, llamaste.mk, web UI) now use LLAMASTE_VERSION from version.h. Bump version.h for releases.
 - **CONFIG_SYSFB_SIMPLEFB=y required for kernel 6.12+**: Kernel 6.12 tightened EFI framebuffer handoff to DRM. Without `CONFIG_SYSFB_SIMPLEFB=y`, sysfb registers legacy "efi-framebuffer" platform device which simpledrm ignores — result: no `/dev/dri/card0`, "Found 0 GPUs", compositor fails. Was implicit on 6.6.70 but must be explicit on 6.12+. This was the desktop mode blocker.
 - **WLR_DRM_NO_ATOMIC removed for kernel 6.12**: simpledrm on kernel 6.12 supports atomic modesetting. The old `WLR_DRM_NO_ATOMIC=1` env var (needed on 6.6) causes wlroots to skip atomic path and fail. Removed in child_main.cpp.
+- **BR2_PACKAGE_E2FSPROGS=y required**: Without e2fsprogs, installer silently skips mkfs.ext4. On reinstall, dd overwrites ext4 superblock but old backup GPT persists at end of disk → mount fails with EIO. Fix: e2fsprogs in defconfig + mkfs.ext4 fallback in init.cpp that recreates the filesystem if mount fails.
+- **Installed grub.cfg rootdev patching**: The baked-in grub.cfg hardcodes `/dev/sda3`/`/dev/sda4`. On NVMe, these should be `/dev/nvme0n1p3`/`p4`. The installer (Step 7 in `install_worker()`) now mounts ESP (partition 2) and patches both `/grub/grub.cfg` and `/EFI/BOOT/grub.cfg` with the correct device path. Also `rootwait` added to kernel cmdline for NVMe probe timing.
+- **Squashfs caching — must force regeneration**: Buildroot doesn't always regenerate rootfs.squashfs when the llamaste binary changes. Must `rm -f images/rootfs.squashfs images/llamaste.img` AND `rm -f .stamp_images_rootfs` before `make`. Multiple builds shipped stale binary without this step.
+- **window.confirm()/alert() broken in cog/WPE**: Kiosk browser silently returns false/undefined for native confirm/alert dialogs. Replace with custom in-page modal dialogs. Fixed in commit 8c88c3d for shutdown/reboot.
 
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
 - **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
-- **EVO-X2 desktop mode console-only**: Server mode works, desktop mode shows console only (no web UI). Likely AMD GPU/DRM detection issue — shared CPU/GPU/AI chip memory may confuse compositor. Server mode confirmed working on 6.12.
+- **EVO-X2 desktop mode console-only**: Server mode works, desktop mode shows console only (no web UI). Likely AMD GPU/DRM detection issue — shared CPU/GPU/AI chip memory may confuse compositor.
+- **EVO-X2 kernel panic on kernel 6.12**: v0.2.2 (kernel 6.12) causes kernel panic on EVO-X2 when booting from NVMe after install. USB live boot works fine (even desktop-live). Root cause: grub.cfg hardcoded `/dev/sda3`/`/dev/sda4` (wrong for NVMe = `/dev/nvme0n1p3`) + missing `rootwait`. Fix: installer now patches grub.cfg on ESP post-install with correct device path, and `rootwait` added to kernel cmdline.
 - **Desktop resolution cosmetic**: simpledrm inherits EFI framebuffer resolution (often 1024x768), not native panel resolution. Needs real GPU driver (i915/iris) or GRUB `set gfxpayload=` tuning for native res.
 - **CONFIG_DRM_AMDGPU=y causes black screen**: Built-in AMDGPU steals display from simpledrm before rootfs mounted (no firmware). Must use =m (module) loaded after squashfs pivot. Currently disabled.
 - **system() silently fails**: `BR2_SYSTEM_BIN_SH_NONE=y` means `system()` returns -1 (no /bin/sh). Always use `fork()/execl()` instead. Fixed in DHCP retry (child_main.cpp).
@@ -204,9 +209,9 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ## Next Steps
 ### Immediate
-1. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel. Investigate GRUB `set gfxpayload=` or i915 driver
-2. **EVO-X2 desktop mode debug** — Server works, desktop shows console only. Add compositor logging, check DRM detection path
-3. **Merge kernel-6.12-upgrade to master** — 9 commits, all hardware tests pass
+1. **EVO-X2 kernel panic on 6.12** — Debug with serial console. Penguin logo = framebuffer works, crash after. Compare 6.6 vs 6.12 init path
+2. **Merge kernel-6.12-upgrade to master** — 12+ commits ready, VivoBook tests all pass
+3. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel. Investigate GRUB `set gfxpayload=` or i915 driver
 4. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
 5. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
 
@@ -217,6 +222,8 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Phase F: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving
 - **Phase G: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
 - **Phase H: Peer skill sharing** — Cluster nodes sync skill manifests on join, auto-transfer missing skills
+
+*Skills phases (F,G,H) at end of roadmap -- multi-user auth, peer transfer, and office deployment have higher priority.*
 - Desktop mode WiFi connect test
 - Voice quality tuning
 - Real two-VM mDNS test on LAN

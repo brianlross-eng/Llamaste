@@ -5,175 +5,137 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs devtmpfs /dev
 
-# Parse kernel cmdline for root= parameter
+# Parse kernel cmdline
 CMDLINE=$(cat /proc/cmdline)
 ROOT=""
 ROOTFSTYPE=""
 INIT="/opt/llamaste/llamaste"
 MODE=""
+SLOT="A"
 for param in $CMDLINE; do
     case "$param" in
         root=*)    ROOT="${param#root=}" ;;
         rootfstype=*) ROOTFSTYPE="${param#rootfstype=}" ;;
         init=*)    INIT="${param#init=}" ;;
         llamaste.mode=*) MODE="${param#llamaste.mode=}" ;;
+        llamaste.slot=*) SLOT="${param#llamaste.slot=}" ;;
     esac
 done
 
+# Determine target partition number from slot
+if [ "$SLOT" = "B" ]; then
+    PARTNUM=4
+else
+    PARTNUM=3
+fi
+
+mkdir -p /mnt/root
+
 # =========================================================================
-# PATH A: Normal boot (USB/installed) -- root= is set by GRUB
+# PATH A: Live boot (root=LABEL=...) -- scan by label
 # =========================================================================
-if [ -n "$ROOT" ]; then
-    echo "[initramfs] Normal boot: root=$ROOT rootfstype=$ROOTFSTYPE init=$INIT"
-    mkdir -p /mnt/root
+# Note: use case/esac, NOT grep — busybox initramfs may not have grep
+IS_LABEL=""
+case "$ROOT" in LABEL=*) IS_LABEL=yes ;; esac
+if [ -n "$IS_LABEL" ]; then
+    LABEL="${ROOT#LABEL=}"
+    echo "[initramfs] Live boot: resolving LABEL=$LABEL ..."
 
-    case "$ROOT" in
-        LABEL=*)
-            LABEL="${ROOT#LABEL=}"
-            echo "[initramfs] Resolving LABEL=$LABEL ..."
-
-            # Retry loop -- USB devices may take 3-8s to enumerate
-            FOUND=""
-            for attempt in 1 2 3 4 5; do
-                echo "[initramfs] Scan attempt $attempt/5 ..."
-                echo "[initramfs] Block devices:"
-                ls /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null || echo "  (none)"
-
-                for dev in /dev/sr0 /dev/sdb /dev/sdb1 /dev/sda /dev/sda1 /dev/nvme0n1 /dev/nvme0n1p1; do
-                    [ -b "$dev" ] || continue
-                    echo "[initramfs]   Trying $dev ..."
-                    if mount -t "${ROOTFSTYPE:-auto}" -o ro "$dev" /mnt/root 2>/dev/null; then
-                        # Verify this is the right device by checking for marker file
-                        if [ -f /mnt/root/llamaste-live-iso ] || [ -f /mnt/root/opt/llamaste/llamaste ]; then
-                            echo "[initramfs]   FOUND: $dev has Llamaste!"
-                            FOUND="$dev"
-                            umount /mnt/root
-                            break
-                        else
-                            echo "[initramfs]   $dev mounted but wrong filesystem -- skipping"
-                            umount /mnt/root
-                        fi
-                    fi
-                done
-
-                [ -n "$FOUND" ] && break
-                echo "[initramfs] Not found yet, waiting 2s..."
-                sleep 2
-            done
-
-            if [ -n "$FOUND" ]; then
-                ROOT="$FOUND"
-            else
-                echo "[initramfs] ERROR: Could not find Llamaste filesystem after 5 attempts"
-                echo "[initramfs] Available block devices:"
-                ls -la /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null
-                echo "[initramfs] Dropping to shell for debugging..."
-                exec /bin/sh
+    FOUND=""
+    for attempt in 1 2 3 4 5; do
+        echo "[initramfs] Scan attempt $attempt/5 ..."
+        for dev in /dev/sr0 /dev/sdb /dev/sdb1 /dev/sda /dev/sda1 /dev/nvme0n1 /dev/nvme0n1p1; do
+            [ -b "$dev" ] || continue
+            if mount -t "${ROOTFSTYPE:-auto}" -o ro "$dev" /mnt/root 2>/dev/null; then
+                if [ -f /mnt/root/llamaste-live-iso ]; then
+                    echo "[initramfs] FOUND live media: $dev"
+                    FOUND="$dev"
+                    umount /mnt/root
+                    break
+                fi
+                umount /mnt/root
             fi
-            ;;
-    esac
+        done
+        [ -n "$FOUND" ] && break
+        echo "[initramfs] Not found yet, waiting 2s..."
+        sleep 2
+    done
 
-    echo "[initramfs] Mounting $ROOT ..."
-    MOPT=""
-    [ -n "$ROOTFSTYPE" ] && MOPT="-t $ROOTFSTYPE"
-    mount $MOPT -o ro "$ROOT" /mnt/root
+    if [ -z "$FOUND" ]; then
+        echo "[initramfs] ERROR: Could not find Llamaste live media"
+        exec /bin/sh
+    fi
 
+    mount -t "${ROOTFSTYPE:-auto}" -o ro "$FOUND" /mnt/root
     if [ $? -ne 0 ]; then
-        echo "[initramfs] ERROR: Failed to mount $ROOT"
-        echo "[initramfs] Dropping to shell..."
+        echo "[initramfs] ERROR: Failed to mount $FOUND"
         exec /bin/sh
     fi
 
-    # Verify init binary exists
-    if [ ! -f "/mnt/root$INIT" ]; then
-        echo "[initramfs] ERROR: $INIT not found on $ROOT"
-        echo "[initramfs] Contents of /mnt/root/opt/llamaste/:"
-        ls -la /mnt/root/opt/llamaste/ 2>/dev/null || echo "  (directory missing)"
-        echo "[initramfs] Dropping to shell..."
-        exec /bin/sh
-    fi
-
-    echo "[initramfs] Root mounted. Switching to $INIT on $ROOT ..."
+    echo "[initramfs] Live media mounted. Switching root..."
     umount /proc 2>/dev/null
     umount /sys 2>/dev/null
     exec switch_root /mnt/root "$INIT"
-
-    # If switch_root fails, we get here
     echo "[initramfs] ERROR: switch_root failed!"
+    exec /bin/sh
+fi
+
+# =========================================================================
+# PATH B: Installed boot -- find squashfs root partition
+# Try specified root= device first, then scan all partitions.
+# This handles SATA (/dev/sda3), NVMe (/dev/nvme0n1p3), virtio, etc.
+# =========================================================================
+echo "[initramfs] Installed boot: slot=$SLOT partnum=$PARTNUM root=$ROOT"
+
+# Build list of candidate devices: specified root first, then common patterns
+CANDIDATES="$ROOT"
+for disk in /dev/nvme0n1 /dev/nvme1n1 /dev/sda /dev/sdb /dev/vda; do
+    if [ -b "$disk" ]; then
+        case "$disk" in
+            /dev/nvme*|/dev/mmcblk*) CANDIDATES="$CANDIDATES ${disk}p${PARTNUM}" ;;
+            *)                       CANDIDATES="$CANDIDATES ${disk}${PARTNUM}" ;;
+        esac
+    fi
+done
+
+echo "[initramfs] Candidates: $CANDIDATES"
+
+# Wait up to 5s for devices to appear (NVMe probe time)
+FOUND=""
+for attempt in 1 2 3 4 5; do
+    for dev in $CANDIDATES; do
+        [ -b "$dev" ] || continue
+        echo "[initramfs] Trying $dev ..."
+        if mount -t squashfs -o ro "$dev" /mnt/root 2>/dev/null; then
+            if [ -f "/mnt/root$INIT" ]; then
+                echo "[initramfs] FOUND root: $dev"
+                FOUND="$dev"
+                break 2
+            fi
+            echo "[initramfs] $dev is squashfs but no $INIT -- wrong partition"
+            umount /mnt/root
+        fi
+    done
+    echo "[initramfs] Not found yet, waiting 1s... ($attempt/5)"
+    sleep 1
+done
+
+if [ -z "$FOUND" ]; then
+    echo "[initramfs] ERROR: No root filesystem found!"
+    echo "[initramfs] Block devices:"
+    ls /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null
+    echo "[initramfs] Dropping to shell..."
     mount -t proc proc /proc
     mount -t sysfs sys /sys
     exec /bin/sh
 fi
 
-# =========================================================================
-# PATH B: PXE boot -- no root= parameter, download squashfs via HTTP
-# =========================================================================
-echo "=== Llamaste PXE Boot (initramfs) ==="
-
-echo "[pxe] Configuring network..."
-echo "[pxe] Waiting for USB ethernet (up to 15s)..."
-
-ETH=""
-TRIES=0
-while [ -z "$ETH" ] && [ "$TRIES" -lt 15 ]; do
-    for name in $(ls /sys/class/net/ 2>/dev/null); do
-        [ "$name" = "lo" ] && continue
-        [ -d "/sys/class/net/$name/phy80211" ] && continue
-        [ ! -d "/sys/class/net/$name/device" ] && continue
-        ETH="$name"
-        break
-    done
-    if [ -z "$ETH" ]; then
-        TRIES=$((TRIES + 1))
-        echo "[pxe] No ethernet yet... ($TRIES/15)"
-        sleep 1
-    fi
-done
-
-if [ -z "$ETH" ]; then
-    echo "[pxe] ERROR: No physical wired ethernet found after 15s!"
-    echo "[pxe] Interfaces:"
-    ls -la /sys/class/net/
-    for name in $(ls /sys/class/net/); do
-        echo "  $name: device=$(ls /sys/class/net/$name/device 2>/dev/null && echo YES || echo NO)"
-    done
-    exec /bin/sh
-fi
-
-echo "[pxe] Using interface: $ETH"
-ip link set lo up
-ip link set "$ETH" up
-sleep 2
-
-echo "[pxe] Setting static IP 10.0.50.50/24..."
-ip addr add 10.0.50.50/24 dev "$ETH"
-ip route add default via 10.0.50.1
-ip addr show "$ETH"
-
-echo "[pxe] Downloading rootfs.squashfs..."
-wget -q http://10.0.50.1/rootfs.squashfs -O /tmp/rootfs.squashfs
-if [ $? -ne 0 ]; then
-    echo "[pxe] Retry..."
-    sleep 2
-    wget http://10.0.50.1/rootfs.squashfs -O /tmp/rootfs.squashfs
-fi
-
-if [ ! -s /tmp/rootfs.squashfs ]; then
-    echo "[pxe] ERROR: Download failed!"
-    exec /bin/sh
-fi
-
-echo "[pxe] Downloaded. Mounting squashfs..."
-mkdir -p /mnt/root
-losetup /dev/loop0 /tmp/rootfs.squashfs
-mount -t squashfs /dev/loop0 /mnt/root
-
-if [ $? -ne 0 ]; then
-    echo "[pxe] ERROR: Mount failed!"
-    exec /bin/sh
-fi
-
-echo "[pxe] Switching root..."
+echo "[initramfs] Root mounted at $FOUND. Switching to $INIT ..."
 umount /proc 2>/dev/null
 umount /sys 2>/dev/null
-exec switch_root /mnt/root /opt/llamaste/llamaste
+exec switch_root /mnt/root "$INIT"
+
+echo "[initramfs] ERROR: switch_root failed!"
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+exec /bin/sh

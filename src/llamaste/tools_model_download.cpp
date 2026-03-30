@@ -302,6 +302,9 @@ static std::string http_get(const std::string& url, long timeout_seconds = 15) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    } else {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
 
     CURLcode res = curl_easy_perform(curl);
@@ -492,6 +495,9 @@ static std::string download_single_file(const std::string& repo_id,
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    } else {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
     fprintf(stderr, "[download] Starting download: %s\n", url.c_str());
 

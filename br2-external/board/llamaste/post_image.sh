@@ -79,6 +79,16 @@ if [ -f "${BINARIES_DIR}/bzImage" ]; then
     cp "${BINARIES_DIR}/bzImage" "${BINARIES_DIR}/efi-part/bzImage"
 fi
 
+# Build initramfs for installed boot (device-agnostic root partition discovery)
+PXE_INITRAMFS="${BUILD_DIR}/../../pxe-initramfs"
+if [ -d "${PXE_INITRAMFS}" ]; then
+    echo "[post-image] Building initramfs for installed boot..."
+    (cd "${PXE_INITRAMFS}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BINARIES_DIR}/efi-part/initramfs.cpio.gz")
+    echo "[post-image] Initramfs: $(du -h "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" | cut -f1)"
+else
+    echo "[post-image] WARNING: pxe-initramfs not found, installed boot may fail on NVMe"
+fi
+
 if [ ! -d "${BINARIES_DIR}/efi-part/EFI" ]; then
     echo "[post-image] WARNING: efi-part/EFI not found"
     mkdir -p "${BINARIES_DIR}/efi-part/EFI/BOOT"
@@ -105,6 +115,10 @@ mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/EFI" "::/"
 mcopy -s -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/grub" "::/"
 if [ -f "${BINARIES_DIR}/efi-part/bzImage" ]; then
     mcopy -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/bzImage" "::/"
+fi
+if [ -f "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" ]; then
+    mcopy -i "${VFAT_IMG}" "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" "::/"
+    echo "[post-image] Initramfs added to ESP"
 fi
 
 # Build the data ext4 from data-overlay/
