@@ -1169,11 +1169,61 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
         }
 
         if (!has_default) {
-            // Guess gateway as .1 on our subnet (most common DHCP setup)
-            struct in_addr gw;
-            gw.s_addr = (our_ip.s_addr & our_mask.s_addr) | htonl(1);
-            char gw_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
+            // Read actual gateway from dhcpcd lease info (not guess .1)
+            std::string gw_str;
+
+            // Try dhcpcd's info file first (plain text key=value)
+            {
+                std::string info_path = "/var/lib/dhcpcd/" + iface + ".info";
+                FILE* info = fopen(info_path.c_str(), "r");
+                if (info) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), info)) {
+                        if (strncmp(line, "routers=", 8) == 0) {
+                            gw_str = std::string(line + 8);
+                            // Trim newline and take first router only
+                            gw_str.erase(gw_str.find_last_not_of("\r\n") + 1);
+                            auto sp = gw_str.find(' ');
+                            if (sp != std::string::npos) gw_str = gw_str.substr(0, sp);
+                            break;
+                        }
+                    }
+                    fclose(info);
+                }
+            }
+
+            // Fallback: read from /proc/net/route (kernel routing table)
+            if (gw_str.empty()) {
+                FILE* rt2 = fopen("/proc/net/route", "r");
+                if (rt2) {
+                    char rtline[256], riface[32];
+                    unsigned long dest2, gw_hex;
+                    while (fgets(rtline, sizeof(rtline), rt2)) {
+                        if (sscanf(rtline, "%31s %lx %lx", riface, &dest2, &gw_hex) == 3
+                            && dest2 == 0 && gw_hex != 0
+                            && strcmp(riface, iface.c_str()) == 0) {
+                            struct in_addr gw_addr;
+                            gw_addr.s_addr = (uint32_t)gw_hex;
+                            char buf[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &gw_addr, buf, sizeof(buf));
+                            gw_str = buf;
+                            break;
+                        }
+                    }
+                    fclose(rt2);
+                }
+            }
+
+            // Last resort: guess .1 on subnet
+            if (gw_str.empty()) {
+                struct in_addr gw;
+                gw.s_addr = (our_ip.s_addr & our_mask.s_addr) | htonl(1);
+                char buf[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &gw, buf, sizeof(buf));
+                gw_str = buf;
+                fprintf(stderr, "[net] %s: no gateway in lease/route, guessing %s\n",
+                        iface.c_str(), gw_str.c_str());
+            }
 
             // Delete old default route
             pid_t pid = fork();
@@ -1187,7 +1237,7 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
             pid = fork();
             if (pid == 0) {
                 execl("/sbin/ip", "ip", "route", "add", "default",
-                      "via", gw_str,
+                      "via", gw_str.c_str(),
                       "dev", iface.c_str(), nullptr);
                 _exit(0);
             }
@@ -1195,7 +1245,7 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
                 int st = 0;
                 waitpid(pid, &st, 0);
                 fprintf(stderr, "[net] ip route add default via %s dev %s (exit=%d)\n",
-                        gw_str, iface.c_str(), WEXITSTATUS(st));
+                        gw_str.c_str(), iface.c_str(), WEXITSTATUS(st));
             }
         }
     }

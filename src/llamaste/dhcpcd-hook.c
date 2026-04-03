@@ -26,6 +26,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 static int set_ip_address(const char* ifname, const char* ip, const char* mask) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -67,35 +68,30 @@ static int set_ip_address(const char* ifname, const char* ip, const char* mask) 
 }
 
 static int add_default_route(const char* ifname, const char* gateway) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return -1;
-
-    struct rtentry rt;
-    memset(&rt, 0, sizeof(rt));
-
-    struct sockaddr_in* dst = (struct sockaddr_in*)&rt.rt_dst;
-    dst->sin_family = AF_INET;
-    dst->sin_addr.s_addr = INADDR_ANY;
-
-    struct sockaddr_in* mask = (struct sockaddr_in*)&rt.rt_genmask;
-    mask->sin_family = AF_INET;
-    mask->sin_addr.s_addr = INADDR_ANY;
-
-    struct sockaddr_in* gw = (struct sockaddr_in*)&rt.rt_gateway;
-    gw->sin_family = AF_INET;
-    inet_pton(AF_INET, gateway, &gw->sin_addr);
-
-    rt.rt_flags = RTF_UP | RTF_GATEWAY;
-    rt.rt_dev = (char*)ifname;
-
-    if (ioctl(fd, SIOCADDRT, &rt) < 0 && errno != EEXIST) {
-        fprintf(stderr, "[dhcpcd-hook] SIOCADDRT %s via %s: %s\n", ifname, gateway, strerror(errno));
-        close(fd);
-        return -1;
+    // Delete old default route first
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/sbin/ip", "ip", "route", "del", "default", (char*)NULL);
+        _exit(0);
     }
+    if (pid > 0) waitpid(pid, NULL, 0);
 
-    close(fd);
-    return 0;
+    // Add new default route via ip command (SIOCADDRT is unreliable)
+    pid = fork();
+    if (pid == 0) {
+        execl("/sbin/ip", "ip", "route", "add", "default",
+              "via", gateway, "dev", ifname, (char*)NULL);
+        _exit(1);
+    }
+    if (pid > 0) {
+        int st = 0;
+        waitpid(pid, &st, 0);
+        int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        fprintf(stderr, "[dhcpcd-hook] ip route add default via %s dev %s (exit=%d)\n",
+                gateway, ifname, rc);
+        return rc == 0 ? 0 : -1;
+    }
+    return -1;
 }
 
 static void write_resolv_conf(const char* dns_servers) {

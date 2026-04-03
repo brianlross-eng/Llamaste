@@ -938,6 +938,102 @@ void init_apply_network_config() {
                 fprintf(stderr, "[init] Wrote /etc/resolv.conf (fallback: 8.8.8.8)\n");
             }
         }
+
+        // Apply default gateway from kernel DHCP.
+        // Kernel ip=dhcp sets IP/netmask but may not add the default route.
+        // Check /proc/net/route first — if no default route, read gateway
+        // from /proc/net/ipconfig (kernel DHCP result).
+        {
+            bool has_default = false;
+            FILE* rt = fopen("/proc/net/route", "r");
+            if (rt) {
+                char line[256], riface[32];
+                unsigned long dest;
+                while (fgets(line, sizeof(line), rt)) {
+                    if (sscanf(line, "%31s %lx", riface, &dest) == 2 && dest == 0
+                        && strcmp(riface, "lo") != 0) {
+                        has_default = true;
+                        break;
+                    }
+                }
+                fclose(rt);
+            }
+
+            if (!has_default) {
+                // Read gateway from /proc/net/ipconfig (kernel writes this after ip=dhcp)
+                std::string gw;
+                std::ifstream ipc("/proc/net/ipconfig");
+                if (ipc.is_open()) {
+                    std::string iline;
+                    while (std::getline(ipc, iline)) {
+                        // Format: "Gateway  : 192.168.137.180"
+                        if (iline.find("Gateway") != std::string::npos) {
+                            auto colon = iline.rfind(':');
+                            if (colon != std::string::npos) {
+                                gw = iline.substr(colon + 1);
+                                gw.erase(0, gw.find_first_not_of(" \t"));
+                                gw.erase(gw.find_last_not_of(" \t\r\n") + 1);
+                                if (gw == "0.0.0.0" || gw.empty()) gw.clear();
+                            }
+                        }
+                    }
+                }
+
+                if (!gw.empty()) {
+                    // Find the interface that has an IP (not lo)
+                    FILE* rrf = fopen("/proc/net/route", "r");
+                    std::string iface;
+                    if (rrf) {
+                        char line[256], riface[32]; unsigned long dest;
+                        while (fgets(line, sizeof(line), rrf)) {
+                            if (sscanf(line, "%31s %lx", riface, &dest) == 2
+                                && dest != 0 && strcmp(riface, "lo") != 0) {
+                                iface = riface; break;
+                            }
+                        }
+                        fclose(rrf);
+                    }
+                    if (iface.empty()) iface = "eno1"; // fallback
+
+                    // Use SIOCADDRT ioctl directly — no external binary needed
+                    struct in_addr gw_addr = {};
+                    if (inet_pton(AF_INET, gw.c_str(), &gw_addr) == 1) {
+                        int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sk >= 0) {
+                            // Delete any existing default route first
+                            struct rtentry drt = {};
+                            ((struct sockaddr_in*)&drt.rt_dst)->sin_family = AF_INET;
+                            ((struct sockaddr_in*)&drt.rt_dst)->sin_addr.s_addr = 0;
+                            ((struct sockaddr_in*)&drt.rt_genmask)->sin_family = AF_INET;
+                            ((struct sockaddr_in*)&drt.rt_genmask)->sin_addr.s_addr = 0;
+                            drt.rt_flags = RTF_UP | RTF_GATEWAY;
+                            ioctl(sk, SIOCDELRT, &drt); // ignore error
+
+                            // Add new default route
+                            struct rtentry art = {};
+                            ((struct sockaddr_in*)&art.rt_gateway)->sin_family = AF_INET;
+                            ((struct sockaddr_in*)&art.rt_gateway)->sin_addr = gw_addr;
+                            ((struct sockaddr_in*)&art.rt_dst)->sin_family = AF_INET;
+                            ((struct sockaddr_in*)&art.rt_dst)->sin_addr.s_addr = 0;
+                            ((struct sockaddr_in*)&art.rt_genmask)->sin_family = AF_INET;
+                            ((struct sockaddr_in*)&art.rt_genmask)->sin_addr.s_addr = 0;
+                            art.rt_flags = RTF_UP | RTF_GATEWAY;
+                            char devbuf[IFNAMSIZ] = {};
+                            strncpy(devbuf, iface.c_str(), IFNAMSIZ - 1);
+                            art.rt_dev = devbuf;
+
+                            int ret = ioctl(sk, SIOCADDRT, &art);
+                            fprintf(stderr, "[init] SIOCADDRT default via %s dev %s: %s\n",
+                                    gw.c_str(), iface.c_str(),
+                                    ret == 0 ? "OK" : strerror(errno));
+                            close(sk);
+                        }
+                    }
+                } else {
+                    fprintf(stderr, "[init] WARNING: No gateway found in /proc/net/ipconfig\n");
+                }
+            }
+        }
         return;
     }
 
