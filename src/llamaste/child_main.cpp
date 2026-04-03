@@ -26,6 +26,7 @@
 #include "mcp_server.h"
 #include "updater.h"
 #include "version.h"
+#include "netlink_route.h"
 #include "wifi.h"
 #include "tools_model_download.h"
 #include "json.hpp"
@@ -1225,28 +1226,14 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
                         iface.c_str(), gw_str.c_str());
             }
 
-            // Delete old default route
-            pid_t pid = fork();
-            if (pid == 0) {
-                execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
-                _exit(0);
+            // Add default route via netlink (replaces fork/exec ip route)
+            netlink_dump_routes("pre-dhcp-gw");
+            netlink_del_default_route();
+            int nlret = netlink_add_default_route(gw_str.c_str(), iface.c_str());
+            if (nlret != 0) {
+                fprintf(stderr, "[net] netlink gateway failed on %s\n", iface.c_str());
             }
-            if (pid > 0) waitpid(pid, nullptr, 0);
-
-            // Add new default route
-            pid = fork();
-            if (pid == 0) {
-                execl("/sbin/ip", "ip", "route", "add", "default",
-                      "via", gw_str.c_str(),
-                      "dev", iface.c_str(), nullptr);
-                _exit(0);
-            }
-            if (pid > 0) {
-                int st = 0;
-                waitpid(pid, &st, 0);
-                fprintf(stderr, "[net] ip route add default via %s dev %s (exit=%d)\n",
-                        gw_str.c_str(), iface.c_str(), WEXITSTATUS(st));
-            }
+            netlink_dump_routes("post-dhcp-gw");
         }
     }
     close(sk);
@@ -2783,7 +2770,13 @@ int child_main(const SupervisorConfig& config) {
                     }
                 }
 
-                if (already_has_ip) continue;
+                if (already_has_ip) {
+                    // Kernel set the IP via ip=dhcp, but the default route
+                    // may be missing. Dump routes and ensure gateway exists.
+                    netlink_dump_routes("kernel-dhcp-check");
+                    apply_dhcp_route_and_dns(ifname);
+                    continue;
+                }
 
                 fprintf(stderr, "[net] %s: no IP yet, spawning dhcpcd\n", ifname.c_str());
                 spawn_dhcpcd(ifname);

@@ -24,6 +24,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "netlink_route.h"
 #include <linux/fs.h>
 #include <linux/blkpg.h>
 #include <linux/loop.h>
@@ -995,40 +996,41 @@ void init_apply_network_config() {
                     }
                     if (iface.empty()) iface = "eno1"; // fallback
 
-                    // Use SIOCADDRT ioctl directly — no external binary needed
-                    struct in_addr gw_addr = {};
-                    if (inet_pton(AF_INET, gw.c_str(), &gw_addr) == 1) {
-                        int sk = socket(AF_INET, SOCK_DGRAM, 0);
-                        if (sk >= 0) {
-                            // Delete any existing default route first
-                            struct rtentry drt = {};
-                            ((struct sockaddr_in*)&drt.rt_dst)->sin_family = AF_INET;
-                            ((struct sockaddr_in*)&drt.rt_dst)->sin_addr.s_addr = 0;
-                            ((struct sockaddr_in*)&drt.rt_genmask)->sin_family = AF_INET;
-                            ((struct sockaddr_in*)&drt.rt_genmask)->sin_addr.s_addr = 0;
-                            drt.rt_flags = RTF_UP | RTF_GATEWAY;
-                            ioctl(sk, SIOCDELRT, &drt); // ignore error
+                    // Dump routes BEFORE adding gateway (diagnostic)
+                    netlink_dump_routes("pre-gw");
 
-                            // Add new default route
-                            struct rtentry art = {};
-                            ((struct sockaddr_in*)&art.rt_gateway)->sin_family = AF_INET;
-                            ((struct sockaddr_in*)&art.rt_gateway)->sin_addr = gw_addr;
-                            ((struct sockaddr_in*)&art.rt_dst)->sin_family = AF_INET;
-                            ((struct sockaddr_in*)&art.rt_dst)->sin_addr.s_addr = 0;
-                            ((struct sockaddr_in*)&art.rt_genmask)->sin_family = AF_INET;
-                            ((struct sockaddr_in*)&art.rt_genmask)->sin_addr.s_addr = 0;
-                            art.rt_flags = RTF_UP | RTF_GATEWAY;
-                            char devbuf[IFNAMSIZ] = {};
-                            strncpy(devbuf, iface.c_str(), IFNAMSIZ - 1);
-                            art.rt_dev = devbuf;
-
-                            int ret = ioctl(sk, SIOCADDRT, &art);
-                            fprintf(stderr, "[init] SIOCADDRT default via %s dev %s: %s\n",
-                                    gw.c_str(), iface.c_str(),
-                                    ret == 0 ? "OK" : strerror(errno));
-                            close(sk);
+                    // Use netlink RTM_NEWROUTE — the modern API that ip(8) uses internally.
+                    // Previous approaches (SIOCADDRT ioctl, fork/exec ip route) both
+                    // silently failed on real hardware.
+                    netlink_del_default_route();
+                    int ret = netlink_add_default_route(gw.c_str(), iface.c_str());
+                    if (ret != 0) {
+                        fprintf(stderr, "[init] NETLINK gateway failed, trying SIOCADDRT fallback\n");
+                        struct in_addr gw_addr = {};
+                        if (inet_pton(AF_INET, gw.c_str(), &gw_addr) == 1) {
+                            int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                            if (sk >= 0) {
+                                struct rtentry art = {};
+                                ((struct sockaddr_in*)&art.rt_gateway)->sin_family = AF_INET;
+                                ((struct sockaddr_in*)&art.rt_gateway)->sin_addr = gw_addr;
+                                ((struct sockaddr_in*)&art.rt_dst)->sin_family = AF_INET;
+                                ((struct sockaddr_in*)&art.rt_dst)->sin_addr.s_addr = 0;
+                                ((struct sockaddr_in*)&art.rt_genmask)->sin_family = AF_INET;
+                                ((struct sockaddr_in*)&art.rt_genmask)->sin_addr.s_addr = 0;
+                                art.rt_flags = RTF_UP | RTF_GATEWAY;
+                                char devbuf[IFNAMSIZ] = {};
+                                strncpy(devbuf, iface.c_str(), IFNAMSIZ - 1);
+                                art.rt_dev = devbuf;
+                                int r2 = ioctl(sk, SIOCADDRT, &art);
+                                fprintf(stderr, "[init] SIOCADDRT fallback: %s\n",
+                                        r2 == 0 ? "OK" : strerror(errno));
+                                close(sk);
+                            }
                         }
                     }
+
+                    // Dump routes AFTER adding gateway (diagnostic)
+                    netlink_dump_routes("post-gw");
                 } else {
                     fprintf(stderr, "[init] WARNING: No gateway found in /proc/net/ipconfig\n");
                 }
@@ -1086,30 +1088,15 @@ void init_apply_network_config() {
         ioctl(sock, SIOCSIFFLAGS, &ifr);
     }
 
-    // Set default gateway using ip route command
+    // Set default gateway via netlink
     if (!gateway.empty()) {
-        // Delete old default route first
-        pid_t pid = fork();
-        if (pid == 0) {
-            execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
-            _exit(0);
+        netlink_dump_routes("pre-static-gw");
+        netlink_del_default_route();
+        int ret = netlink_add_default_route(gateway.c_str(), iface.c_str());
+        if (ret != 0) {
+            fprintf(stderr, "[init] netlink gateway failed for static config\n");
         }
-        if (pid > 0) waitpid(pid, nullptr, 0);
-
-        // Add new default route
-        pid = fork();
-        if (pid == 0) {
-            execl("/sbin/ip", "ip", "route", "add", "default",
-                  "via", gateway.c_str(),
-                  "dev", iface.c_str(), nullptr);
-            _exit(0);
-        }
-        if (pid > 0) {
-            int st = 0;
-            waitpid(pid, &st, 0);
-            fprintf(stderr, "[init] ip route add default via %s dev %s (exit=%d)\n",
-                    gateway.c_str(), iface.c_str(), WEXITSTATUS(st));
-        }
+        netlink_dump_routes("post-static-gw");
     }
 
     close(sock);

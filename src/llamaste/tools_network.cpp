@@ -18,6 +18,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "netlink_route.h"
 #include <netdb.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -480,27 +481,12 @@ static std::string handle_network_set_ip(const std::string& args_json) {
                 ioctl(sock, SIOCSIFFLAGS, &ifr);
             }
 
-            // Set default gateway using ip route command
+            // Set default gateway via netlink
             if (!gw.empty()) {
-                pid_t pid = fork();
-                if (pid == 0) {
-                    execl("/sbin/ip", "ip", "route", "del", "default", nullptr);
-                    _exit(0);
-                }
-                if (pid > 0) waitpid(pid, nullptr, 0);
-
-                pid = fork();
-                if (pid == 0) {
-                    execl("/sbin/ip", "ip", "route", "add", "default",
-                          "via", gw.c_str(),
-                          "dev", iface.c_str(), nullptr);
-                    _exit(0);
-                }
-                if (pid > 0) {
-                    int st = 0;
-                    waitpid(pid, &st, 0);
-                    fprintf(stderr, "[net] ip route add default via %s dev %s (exit=%d)\n",
-                            gw.c_str(), iface.c_str(), WEXITSTATUS(st));
+                netlink_del_default_route();
+                int nlret = netlink_add_default_route(gw.c_str(), iface.c_str());
+                if (nlret != 0) {
+                    fprintf(stderr, "[net] netlink gateway failed for set_ip\n");
                 }
             }
 
