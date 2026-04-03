@@ -302,6 +302,8 @@ static std::string http_get(const std::string& url, long timeout_seconds = 15) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
     } else {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -495,6 +497,8 @@ static std::string download_single_file(const std::string& repo_id,
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
     } else {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -558,6 +562,119 @@ static std::string download_single_file(const std::string& repo_id,
     out["speed_human"] = format_bytes((uint64_t)speed) + "/s";
     return out.dump(2);
 }
+// Download a single file from a direct URL (not HuggingFace) to /data/models/.
+// Same logic as download_single_file() but takes a full URL instead of repo_id.
+static std::string download_single_file_direct(const std::string& url,
+                                                const std::string& filename) {
+    std::string dest_path = std::string("/data/models/") + filename;
+    std::string part_path = dest_path + ".part";
+
+    // Check if already downloaded
+    if (access(dest_path.c_str(), R_OK) == 0) {
+        json out;
+        out["status"] = "already_exists";
+        out["path"] = dest_path;
+        return out.dump(2);
+    }
+
+    mkdir("/data/models", 0755);
+
+    uint64_t existing_size = 0;
+    struct stat st;
+    if (stat(part_path.c_str(), &st) == 0) {
+        existing_size = st.st_size;
+    }
+
+    FILE* fp = fopen(part_path.c_str(), existing_size > 0 ? "ab" : "wb");
+    if (!fp) {
+        return R"json({"status":"error","error":"Cannot write to /data/models/"})json";
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        fclose(fp);
+        return R"json({"status":"error","error":"Failed to initialize download"})json";
+    }
+
+    DownloadProgress progress = {};
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
+    } else {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+    fprintf(stderr, "[download-direct] Starting download: %s\n", url.c_str());
+
+    if (existing_size > 0) {
+        curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)existing_size);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+
+    curl_off_t speed_t = 0;
+    curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD_T, &speed_t);
+    double speed = static_cast<double>(speed_t);
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_easy_cleanup(curl);
+    fclose(fp);
+
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[download-direct] curl error %d: %s\n", (int)res, curl_easy_strerror(res));
+        json out;
+        out["status"] = "error";
+        out["curl_code"] = (int)res;
+        out["error"] = curl_easy_strerror(res);
+        out["partial_file"] = part_path;
+        out["downloaded_bytes"] = progress.downloaded_bytes + existing_size;
+        out["message"] = "Download failed. The partial file is saved — retry will resume.";
+        return out.dump(2);
+    }
+
+    if (http_code >= 400) {
+        unlink(part_path.c_str());
+        json out;
+        out["status"] = "error";
+        out["http_code"] = http_code;
+        out["error"] = "HTTP error " + std::to_string(http_code);
+        return out.dump(2);
+    }
+
+    if (rename(part_path.c_str(), dest_path.c_str()) != 0) {
+        json out;
+        out["status"] = "error";
+        out["error"] = "Failed to rename downloaded file: " + std::string(strerror(errno));
+        return out.dump(2);
+    }
+
+    struct stat final_st;
+    stat(dest_path.c_str(), &final_st);
+
+    json out;
+    out["status"] = "success";
+    out["path"] = dest_path;
+    out["filename"] = filename;
+    out["size_bytes"] = (uint64_t)final_st.st_size;
+    out["size_human"] = format_bytes(final_st.st_size);
+    out["speed_human"] = format_bytes((uint64_t)speed) + "/s";
+    return out.dump(2);
+}
 #endif // HAVE_LIBCURL
 
 static std::string handle_model_download(const std::string& args_json) {
@@ -566,11 +683,36 @@ static std::string handle_model_download(const std::string& args_json) {
         return R"json({"error":"Invalid JSON arguments"})json";
     }
 
+    // Fix 1: Direct URL download — bypass HuggingFace entirely
+    std::string direct_url = args.value("url", "");
+    if (!direct_url.empty()) {
+        std::string filename = args.value("filename", "");
+        if (filename.empty()) {
+            // Extract filename from URL (last path component)
+            auto slash = direct_url.rfind('/');
+            if (slash != std::string::npos)
+                filename = direct_url.substr(slash + 1);
+        }
+        if (filename.empty() || !validate_gguf_filename(filename)) {
+            return R"json({"error":"Cannot determine filename from URL. Provide 'filename' parameter."})json";
+        }
+#ifdef HAVE_LIBCURL
+        std::string result = download_single_file_direct(direct_url, filename);
+        json r = json::parse(result, nullptr, false);
+        if (r.value("status", "") == "success") {
+            r["message"] = "Model downloaded from direct URL. Restart to load it.";
+        }
+        return r.dump(2);
+#else
+        return R"json({"status":"error","error":"Download requires libcurl. Not available in host builds."})json";
+#endif
+    }
+
     std::string repo_id = args.value("repo_id", "");
     std::string filename = args.value("filename", "");
 
     if (repo_id.empty() || filename.empty()) {
-        return R"json({"error":"Required parameters: repo_id, filename"})json";
+        return R"json({"error":"Required parameters: repo_id and filename, OR url"})json";
     }
     if (!validate_repo_id(repo_id)) {
         return R"json({"error":"Invalid repo_id format"})json";
@@ -680,10 +822,11 @@ static std::vector<std::string> find_usb_partitions() {
         char name[64] = {};
         if (sscanf(line.c_str(), " %*d %*d %*d %63s", name) == 1) {
             std::string dev(name);
-            // Skip sda (system disk), loop devices, ram devices
-            if (dev.find("sda") == 0) continue;
+            // Skip loop devices, ram devices, NVMe (system disk on NVMe machines)
+            // Note: do NOT skip sda — on NVMe systems, sda IS the USB drive
             if (dev.find("loop") == 0) continue;
             if (dev.find("ram") == 0) continue;
+            if (dev.find("nvme") == 0) continue;
             // Only partitions (sdb1, sdc1, etc.) not whole disks
             if (dev.size() >= 4 && dev.back() >= '1' && dev.back() <= '9') {
                 partitions.push_back("/dev/" + dev);
@@ -1019,12 +1162,14 @@ void register_model_download_tools(ToolRegistry& reg) {
 
     reg.register_tool({
         .name = "model.download",
-        .description = "Download a GGUF model file from Hugging Face to /data/models/. "
-                       "Supports resume for interrupted downloads. Use model.files first to see available files.",
+        .description = "Download a GGUF model file to /data/models/. "
+                       "Supports HuggingFace (repo_id+filename) or direct URL download. "
+                       "Supports resume for interrupted downloads.",
         .parameters = R"json({"type":"object","properties":{
             "repo_id":{"type":"string","description":"HF repo, e.g. 'Qwen/Qwen2.5-3B-Instruct-GGUF'"},
-            "filename":{"type":"string","description":"GGUF filename, e.g. 'qwen2.5-3b-instruct-q4_k_m.gguf'"}
-        },"required":["repo_id","filename"]})json",
+            "filename":{"type":"string","description":"GGUF filename, e.g. 'qwen2.5-3b-instruct-q4_k_m.gguf'"},
+            "url":{"type":"string","description":"Direct download URL (bypasses HuggingFace). If provided, repo_id is not required."}
+        },"required":[]})json",
         .handler = handle_model_download
     });
 
