@@ -208,12 +208,24 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Grammar-constrained tool call retry**: `llama_inference()` detects malformed `<tool_call>` JSON (common on 3B models) and retries with a GBNF grammar passed to `/completion`'s `grammar` parameter. The grammar enumerates known tool names (model can only call registered tools) and enforces valid JSON structure. First pass has zero overhead; retry adds one extra inference round with lower temperature. See `build_tool_call_gbnf()` in child_main.cpp.
 
 ## Next Steps
-### Immediate
-1. **EVO-X2 kernel panic on 6.12** — Debug with serial console. Penguin logo = framebuffer works, crash after. Compare 6.6 vs 6.12 init path
-2. **Merge kernel-6.12-upgrade to master** — 12+ commits ready, VivoBook tests all pass
-3. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel. Investigate GRUB `set gfxpayload=` or i915 driver
-4. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode (cog/WPE lacks getUserMedia)
-5. **Console cleanup** — Reduce fprintf(stderr) noise in child_main.cpp
+### PRIORITY 1: Hardware Optimization
+72B at 1.7 tok/s on Core Ultra 9 275HX (24 cores, AVX-512, 64GB RAM) is unacceptable. Target: 5-8+ tok/s.
+1. **Hardware utilization audit** — Investigate:
+   - Thread count tuning (llama.cpp n_threads vs n_threads_batch)
+   - AVX-512 dispatch — verify GGML_NATIVE=ON enables AVX-512 (not just AVX2)
+   - P-core vs E-core topology — pin inference to P-cores only (Arrow Lake-HX has hybrid arch)
+   - Memory bandwidth — RAM speed, channels, interleaving
+   - KV cache configuration — batch size, context length impact
+   - llama.cpp build flags — GGML_AVX512, GGML_AVX512_VBMI, GGML_AVX512_VNNI
+   - NPU/iGPU offload potential (Intel Arc iGPU on 275HX)
+2. **Benchmark endpoint** — `/llamaste/benchmark` runs standardized inference test, reports tok/s, thread config, CPU features
+3. **Auto-tune thread count** — Detect P-core/E-core topology, pin inference to P-cores
+4. **CPU feature detection** — Report AVX2/AVX-512/AMX at boot, warn if underutilized
+
+### Secondary
+5. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel
+6. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode
+7. **EVO-X2 issues** — amdgpu fatal error, missing firmware, WiFi driver not binding, internet connectivity
 
 ### Roadmap (Future Phases)
 - **Phase C: Multi-user auth** — User accounts, roles (admin/user/guest), per-user chat history
@@ -222,11 +234,6 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 - **Phase F: Self-learning skills** — `/data/skills/` loader, LLM writes own skill files, self-improving
 - **Phase G: Skill marketplace** — Remote skill repo, `skill.search`, `skill.install`
 - **Phase H: Peer skill sharing** — Cluster nodes sync skill manifests on join, auto-transfer missing skills
-
-*Skills phases (F,G,H) at end of roadmap -- multi-user auth, peer transfer, and office deployment have higher priority.*
-- Desktop mode WiFi connect test
-- Voice quality tuning
-- Real two-VM mDNS test on LAN
 
 ## User Preferences
 - **No questions asked** — make decisions autonomously, don't ask for confirmation. Just do things.
