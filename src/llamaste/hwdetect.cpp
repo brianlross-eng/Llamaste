@@ -53,6 +53,13 @@ HardwareInfo detect_hardware() {
     }
     hw.cpu_cores = core_count > 0 ? core_count : 1;
 
+    // CPU topology detection (P-core/E-core, physical vs logical)
+    hw.topology = detect_cpu_topology();
+    hw.physical_cores = hw.topology.physical_cores;
+    // Override AVX flags with topology detection (more reliable)
+    if (hw.topology.cpu_features.find("AVX2") != std::string::npos) hw.has_avx2 = true;
+    if (hw.topology.cpu_features.find("AVX-512") != std::string::npos) hw.has_avx512 = true;
+
     // RAM from /proc/meminfo
     hw.ram_total_mb = read_meminfo_kb("MemTotal") / 1024;
     hw.ram_free_mb = read_meminfo_kb("MemAvailable") / 1024;

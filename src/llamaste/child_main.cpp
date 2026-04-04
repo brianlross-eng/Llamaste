@@ -171,11 +171,19 @@ static std::atomic<bool> g_upgrade_downloading{false};
 // The watchdog is now kept alive by a dedicated kicker thread in the supervisor,
 // so slow inference with multiple threads won't trigger the softdog.
 int compute_thread_count(int cpu_cores) {
-    return cpu_cores < 1 ? 1 : cpu_cores;
+    // Use topology-aware recommendation if available
+    if (g_hwinfo.topology.recommended_threads > 0)
+        return g_hwinfo.topology.recommended_threads;
+    // Fallback: physical cores (estimate as half of logical for HT)
+    int phys = g_hwinfo.physical_cores > 0 ? g_hwinfo.physical_cores : cpu_cores;
+    return phys < 1 ? 1 : phys;
 }
 
-// Batch thread count: use all cores
+// Batch thread count: all P-core threads (HT helps compute-bound prompt processing)
 int compute_batch_thread_count(int cpu_cores) {
+    if (g_hwinfo.topology.recommended_batch_threads > 0)
+        return g_hwinfo.topology.recommended_batch_threads;
+    // Fallback: all logical cores
     return cpu_cores < 1 ? 1 : cpu_cores;
 }
 
@@ -866,9 +874,20 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         args.push_back("-c"); args.push_back(c_str.c_str());
         args.push_back("-t"); args.push_back(t_str.c_str());
         args.push_back("-tb"); args.push_back(tb_str.c_str());
-        // Note: --mlock, -fa (Flash Attention), and --cache-reuse removed.
-        // -fa caused the decode step to hang indefinitely after prefill.
-        // Note: llama_inference() uses /completion endpoint with manual chatml.
+        // Flash attention: re-enabled — previous hang was likely a version-specific bug.
+        // Flash attention reduces memory usage and improves speed. Safe on all hardware.
+        args.push_back("-fa");
+
+        // CPU pinning: on hybrid CPUs (Intel Alder Lake+), pin to P-cores only.
+        // E-cores are 2-3x slower and drag barrier sync, causing massive slowdowns.
+        // On homogeneous CPUs this is a no-op (p_core_range is empty).
+        std::string cpu_range = g_hwinfo.topology.p_core_range;
+        if (!cpu_range.empty()) {
+            args.push_back("--cpu-range"); args.push_back(cpu_range.c_str());
+            args.push_back("--cpu-strict"); args.push_back("1");
+            fprintf(stderr, "[child] Hybrid CPU: pinning to P-cores: %s\n", cpu_range.c_str());
+        }
+
         // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
         // args.push_back("--log-disable");
 
@@ -1544,6 +1563,17 @@ static json gather_system_info(const SupervisorConfig& config) {
     // Hardware details (from startup detection)
     info["cpu_model"] = g_hwinfo.cpu_model;
     info["cpu_cores"] = g_hwinfo.cpu_cores;
+    info["cpu_physical_cores"] = g_hwinfo.physical_cores;
+    info["cpu_features"] = g_hwinfo.topology.cpu_features;
+    info["cpu_hybrid"] = g_hwinfo.topology.is_hybrid;
+    if (g_hwinfo.topology.is_hybrid) {
+        info["cpu_p_cores"] = g_hwinfo.topology.p_cores;
+        info["cpu_e_cores"] = g_hwinfo.topology.e_cores;
+        info["cpu_p_threads"] = g_hwinfo.topology.p_threads;
+        info["cpu_pinned_range"] = g_hwinfo.topology.p_core_range;
+    }
+    info["inference_threads"] = g_hwinfo.topology.recommended_threads;
+    info["inference_batch_threads"] = g_hwinfo.topology.recommended_batch_threads;
     info["gpu_name"] = g_hwinfo.gpu_detected ? g_hwinfo.gpu_name : "";
     info["gpu_detected"] = g_hwinfo.gpu_detected;
     info["has_avx2"] = g_hwinfo.has_avx2;
@@ -2008,8 +2038,14 @@ int child_main(const SupervisorConfig& config) {
 
     // Detect hardware
     g_hwinfo = detect_hardware();
-    fprintf(stderr, "[child] CPU: %s (%d cores), RAM: %d MB\n",
-            g_hwinfo.cpu_model.c_str(), g_hwinfo.cpu_cores, g_hwinfo.ram_total_mb);
+    fprintf(stderr, "[child] CPU: %s (%d logical, %d physical), RAM: %d MB, Features: %s\n",
+            g_hwinfo.cpu_model.c_str(), g_hwinfo.cpu_cores, g_hwinfo.physical_cores,
+            g_hwinfo.ram_total_mb, g_hwinfo.topology.cpu_features.c_str());
+    if (g_hwinfo.topology.is_hybrid) {
+        fprintf(stderr, "[child] Hybrid CPU: %d P-cores (%d threads), %d E-cores | pinning to: %s\n",
+                g_hwinfo.topology.p_cores, g_hwinfo.topology.p_threads,
+                g_hwinfo.topology.e_cores, g_hwinfo.topology.p_core_range.c_str());
+    }
 
     // Start llama-server if a model is available
 #ifndef _WIN32
