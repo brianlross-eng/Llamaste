@@ -2764,22 +2764,29 @@ int child_main(const SupervisorConfig& config) {
                 }
                 close(sock);
 
-                // Wait for carrier detection after UP (USB ethernet needs ~1s)
-                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
-                // Check carrier (cable plugged in)
+                // Wait for carrier detection after UP.
+                // RTL8125B (EVO-X2) link negotiation takes 3-5s after IFF_UP.
+                // USB ethernet (RTL8153B) needs ~1s. Retry up to 10s.
                 char cpath[256];
                 snprintf(cpath, sizeof(cpath), "/sys/class/net/%s/carrier", ifname.c_str());
-                FILE* cf = fopen(cpath, "r");
-                if (!cf) {
-                    fprintf(stderr, "[net] %s: cannot read carrier: %m\n", ifname.c_str());
-                    continue;
-                }
                 int carrier = 0;
-                fscanf(cf, "%d", &carrier);
-                fclose(cf);
+                for (int attempt = 0; attempt < 10; attempt++) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    FILE* cf = fopen(cpath, "r");
+                    if (!cf) break;
+                    carrier = 0;
+                    fscanf(cf, "%d", &carrier);
+                    fclose(cf);
+                    if (carrier == 1) {
+                        fprintf(stderr, "[net] %s: carrier detected after %ds\n",
+                                ifname.c_str(), attempt + 1);
+                        break;
+                    }
+                    if (attempt == 0)
+                        fprintf(stderr, "[net] %s: waiting for carrier...\n", ifname.c_str());
+                }
                 if (carrier != 1) {
-                    fprintf(stderr, "[net] %s: no carrier (cable not plugged in)\n", ifname.c_str());
+                    fprintf(stderr, "[net] %s: no carrier after 10s (cable not plugged in?)\n", ifname.c_str());
                     continue;
                 }
 
