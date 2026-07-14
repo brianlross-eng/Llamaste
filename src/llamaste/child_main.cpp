@@ -1924,16 +1924,18 @@ static void do_auto_upgrade_check(const ClusterCapacity& cap) {
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
+        // Enforce strict TLS verification — curl may silently fall back
+        // to unverified if no CA bundle is configured.
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
         if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
             curl_easy_setopt(curl, CURLOPT_CAINFO,
                              "/etc/ssl/certs/ca-certificates.crt");
         } else {
-            fprintf(stderr, "[model-dl] WARNING: CA bundle not found at "
-                    "/etc/ssl/certs/ca-certificates.crt — TLS may fail\n");
+            fprintf(stderr, "[cluster] WARNING: CA bundle not found at "
+                    "/etc/ssl/certs/ca-certificates.crt — "
+                    "HTTPS downloads will fail (enforcing strict TLS)\n");
         }
-        // Always enforce TLS verification — never silently accept invalid certs
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
         if (existing > 0)
             curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
                              (curl_off_t)existing);
