@@ -26,6 +26,16 @@ LLAMA_SERVER_CONF_OPTS = \
 	-DLLAMA_BUILD_EXAMPLES=OFF \
 	-DLLAMA_BUILD_SERVER=ON
 
+# GPU backend notes:
+# - Vulkan (ON): portable; works on AMD, Intel, NVIDIA GPUs. Requires
+#   vulkan-loader (BR2_PACKAGE_VULKAN_LOADER=y) and Mesa Vulkan drivers.
+# - HIP/ROCm (ON): AMD GPU compute via HSA/KFD (/dev/kfd). Requires ROCm
+#   stack (not packaged in Buildroot; silently skipped if not found).
+# - CUDA (OFF): requires proprietary NVIDIA driver + CUDA toolkit, not
+#   available in Buildroot. NVIDIA GPUs should use the Vulkan backend.
+# - BLAS (ON): CPU fallback via OpenBLAS (BR2_PACKAGE_OPENBLAS=y).
+#   Provides ~2-4x CPU throughput improvement without GPU acceleration.
+
 define LLAMA_SERVER_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/bin/llama-server \
 		$(TARGET_DIR)/opt/llamaste/llama-server
