@@ -74,7 +74,11 @@ static int add_default_route(const char* ifname, const char* gateway) {
         execl("/sbin/ip", "ip", "route", "del", "default", (char*)NULL);
         _exit(0);
     }
-    if (pid > 0) waitpid(pid, NULL, 0);
+    if (pid > 0) {
+        alarm(5);  // timeout: don't block dhcpcd hook indefinitely
+        waitpid(pid, NULL, 0);
+        alarm(0);
+    }
 
     // Add new default route via ip command (SIOCADDRT is unreliable)
     pid = fork();
