@@ -897,6 +897,27 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         fprintf(stderr, "[child] Hybrid CPU: pinning to P-cores: %s\n", cpu_range.c_str());
     }
 
+    // GPU layer offloading: use Vulkan to push layers to GPU.
+    // On unified memory (iGPU/APU/Strix Halo), offload all layers since
+    // GPU and CPU share the same physical RAM.  On discrete GPUs, compute
+    // how many layers fit in VRAM (~1.2GB/layer for 7B Q4_K_M).
+    std::string ngl_str;
+    if (g_hwinfo.gpu_detected && g_hwinfo.gpu_vram_mb > 0) {
+        // Discrete GPU: layers = VRAM / 1.2GB per layer, minimum 1
+        int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
+        ngl_str = std::to_string(ngl);
+        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+        fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
+                ngl, g_hwinfo.gpu_name.c_str(),
+                (unsigned long long)g_hwinfo.gpu_vram_mb);
+    } else if (g_hwinfo.gpu_detected && g_hwinfo.gpu_is_unified) {
+        // Unified memory (iGPU/APU): offload everything — GPU shares RAM
+        ngl_str = "99";
+        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+        fprintf(stderr, "[child] GPU offload: all layers to %s (unified memory)\n",
+                g_hwinfo.gpu_name.c_str());
+    }
+
     // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
     // args.push_back("--log-disable");
 
