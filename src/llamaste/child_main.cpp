@@ -118,6 +118,9 @@ static WiFiManager g_wifi;
 // Desktop compositor PID (set by compositor launch thread)
 #ifndef _WIN32
 static std::atomic<pid_t> g_cage_pid{0};
+
+// Stderr tee thread — joinable so we can clean up on shutdown.
+static std::thread g_tee_thread;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1969,18 +1972,28 @@ int child_main(const SupervisorConfig& config) {
                 close(pipefd[1]);
                 int read_end = pipefd[0];
                 int orig_console = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
-                std::thread([read_end, log_fd, orig_console]() {
+                g_tee_thread = std::thread([read_end, log_fd, orig_console]() {
                     char buf[512];
                     while (true) {
                         ssize_t n = read(read_end, buf, sizeof(buf));
                         if (n <= 0) break;
-                        write(log_fd, buf, n);
-                        if (orig_console >= 0) write(orig_console, buf, n);
+                        ssize_t written = write(log_fd, buf, n);
+                        if (written < 0) {
+                            fprintf(stderr, "[child-tee] log write: %s\n",
+                                    strerror(errno));
+                        }
+                        if (orig_console >= 0) {
+                            ssize_t cw = write(orig_console, buf, n);
+                            if (cw < 0) {
+                                fprintf(stderr, "[child-tee] console write: %s\n",
+                                        strerror(errno));
+                            }
+                        }
                     }
                     close(read_end);
                     close(log_fd);
                     if (orig_console >= 0) close(orig_console);
-                }).detach();
+                });
             } else {
                 close(log_fd);
             }
@@ -4849,6 +4862,26 @@ int child_main(const SupervisorConfig& config) {
             }
             kill(llama_pid, SIGKILL);  // force if still alive
             g_llama_pid.store(0);
+        }
+    }
+#endif
+
+    // Join stderr tee thread so it flushes and closes cleanly.
+    // Closing the pipe write-end (dup2'd to STDERR_FILENO) causes read()
+    // to return 0, which exits the thread.
+#ifndef _WIN32
+    close(STDERR_FILENO);  // unblock tee thread
+    if (g_tee_thread.joinable()) {
+        // Wait up to 2s for the thread to finish; detach if stuck.
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (g_tee_thread.joinable() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (g_tee_thread.joinable()) {
+            g_tee_thread.detach();  // stuck — give up and proceed
+        } else {
+            g_tee_thread.join();
         }
     }
 #endif
