@@ -404,11 +404,26 @@ static std::string http_post_localhost(const char* path, const std::string& body
         "Host: localhost\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
-        "\r\n"
-        "%s",
-        path, body.size(), body.c_str());
+        "\r\n",
+        path, body.size());
 
+    // Check for truncation — silent truncation would corrupt the request
+    if (reqlen < 0 || (size_t)reqlen >= sizeof(req)) {
+        fprintf(stderr, "[supervisor] http_post_localhost: header truncated "
+                "(path=%s, body=%zu bytes)\n", path, body.size());
+        close(sock);
+        return "request too large";
+    }
+
+    // Write headers, then body separately — avoids formatting user-supplied
+    // body into the snprintf buffer where it could be truncated.
     if (write(sock, req, reqlen) < 0) { close(sock); return "write error"; }
+    if (!body.empty()) {
+        if (write(sock, body.c_str(), body.size()) < 0) {
+            close(sock);
+            return "write error";
+        }
+    }
 
     std::string resp;
     char buf[256];
