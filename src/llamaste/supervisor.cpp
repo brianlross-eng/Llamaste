@@ -134,7 +134,7 @@ static void start_stderr_tee() {
                         O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 
     int read_fd = pipefd[0];
-    std::thread([read_fd, original_console, log_file]() {
+    g_tee_thread = std::thread([read_fd, original_console, log_file]() {
         char buf[512];
         std::string partial;
         while (true) {
@@ -142,11 +142,20 @@ static void start_stderr_tee() {
             if (n <= 0) break;
             buf[n] = '\0';
             // Pass through to original console
-            if (original_console >= 0)
-                write(original_console, buf, n);
+            if (original_console >= 0) {
+                ssize_t written = write(original_console, buf, n);
+                if (written < 0) {
+                    fprintf(stderr, "[tee] console write error: %s\n", strerror(errno));
+                }
+            }
             // Write to persistent log file
-            if (log_file >= 0)
-                write(log_file, buf, n);
+            if (log_file >= 0) {
+                ssize_t written = write(log_file, buf, n);
+                if (written < 0) {
+                    fprintf(stderr, "[tee] log write error: %s (path=%s)\n",
+                            strerror(errno), DEBUG_LOG_PATH);
+                }
+            }
             // Split into lines and add to in-memory ring buffer
             partial += buf;
             size_t pos;
@@ -157,7 +166,7 @@ static void start_stderr_tee() {
         }
         if (original_console >= 0) close(original_console);
         if (log_file >= 0) close(log_file);
-    }).detach();
+    });
 }
 
 static void supervisor_sigchld(int) {
@@ -924,6 +933,9 @@ static void console_display_thread(const SupervisorConfig& config) {
 // (b) Signal handlers run in the main thread where g_child_exited is checked
 //
 static int g_watchdog_fd = -1;  // set before kicker thread starts
+
+// Stderr tee thread — joinable so we can clean up on shutdown.
+static std::thread g_tee_thread;
 
 static void watchdog_kicker_thread() {
     // Block ALL signals — signals must only run in the main thread.
@@ -1775,6 +1787,26 @@ static void supervisor_preflight_wifi(const SupervisorConfig& config) {
     if (g_watchdog_fd >= 0) {
         write(g_watchdog_fd, "V", 1);
         close(g_watchdog_fd);
+    }
+
+    // Join tee thread so it flushes and closes cleanly.
+    // Closing the pipe write-end (via dup2 above) causes read() to
+    // return 0, which exits the thread. We join with a 2s timeout
+    // to avoid hanging on a stuck read().
+    close(STDERR_FILENO);  // close write-end to unblock tee thread
+    if (g_tee_thread.joinable()) {
+        // Simple deadline: poll joinable, then detach if stuck
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (g_tee_thread.joinable() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (g_tee_thread.joinable()) {
+            // Thread didn't exit in time — detach and proceed
+            g_tee_thread.detach();
+        } else {
+            g_tee_thread.join();
+        }
     }
 
     sync();
