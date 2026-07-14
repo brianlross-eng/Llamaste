@@ -2072,10 +2072,10 @@ int child_main(const SupervisorConfig& config) {
     // /cdrom.  Check for the /cdrom/llamaste-live-iso marker file.
     // (Previous approach of /run/llamaste-live failed because init_mount_filesystems()
     // mounts a fresh tmpfs on /run after re-exec, destroying the marker.)
-    bool g_is_live_iso = (access("/cdrom/llamaste-live-iso", F_OK) == 0);
+    bool is_live_iso = (access("/cdrom/llamaste-live-iso", F_OK) == 0);
     fprintf(stderr, "[child] Live ISO check: /cdrom/llamaste-live-iso %s\n",
-            g_is_live_iso ? "EXISTS — installer enabled" : "NOT FOUND");
-    if (g_is_live_iso) {
+            is_live_iso ? "EXISTS — installer enabled" : "NOT FOUND");
+    if (is_live_iso) {
         register_install_tools(g_tools);
         fprintf(stderr, "[child] Installer routes: /install/disks, /install/start, /install/progress\n");
     }
@@ -4089,7 +4089,7 @@ int child_main(const SupervisorConfig& config) {
     ));
 
     // --- Installer routes (any mode when booted from live ISO) ---
-    if (g_is_live_iso) {
+    if (is_live_iso) {
         svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {
             std::string result = g_tools.dispatch("install.detect_disks", "{}");
             res.set_content(result, "application/json");
