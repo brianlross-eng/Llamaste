@@ -16,6 +16,7 @@
 #include <sys/sysinfo.h>
 #include <unistd.h>
 #include <sys/reboot.h>
+#include <csignal>
 
 using json = nlohmann::json;
 
@@ -261,10 +262,9 @@ static std::string handle_system_shutdown(const std::string& args_json) {
     // Sync filesystems before shutdown
     sync();
 
-    // As PID 1, we can call reboot() with the right magic
-    // RB_POWER_OFF = 0x4321fedc
-    int ret = reboot(RB_POWER_OFF);
-    if (ret != 0) {
+    // Send SIGTERM to supervisor (PID 1) which handles graceful shutdown
+    // We can't call reboot() directly — this runs in the child, not PID 1
+    if (kill(1, SIGTERM) != 0) {
         return json_error("shutdown failed: " + std::string(strerror(errno)));
     }
 
@@ -283,10 +283,9 @@ static std::string handle_system_reboot(const std::string& args_json) {
     // Sync filesystems before reboot
     sync();
 
-    // As PID 1, we can call reboot()
-    // RB_AUTOBOOT = 0x01234567
-    int ret = reboot(RB_AUTOBOOT);
-    if (ret != 0) {
+    // Send SIGUSR1 to supervisor (PID 1) which handles graceful reboot
+    // We can't call reboot() directly — this runs in the child, not PID 1
+    if (kill(1, SIGUSR1) != 0) {
         return json_error("reboot failed: " + std::string(strerror(errno)));
     }
 
