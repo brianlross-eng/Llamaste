@@ -32,10 +32,9 @@
 #include "json.hpp"
 
 // httplib must be included in exactly one translation unit with implementation.
-// Explicitly ensure OpenSSL support is NOT enabled (we don't need it for Phase 1).
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-#undef CPPHTTPLIB_OPENSSL_SUPPORT
-#endif
+// OpenSSL support is controlled by the build system (CPPHTTPLIB_OPENSSL_SUPPORT
+// defined in CMakeLists.txt when OpenSSL is found). When enabled, httplib
+// handles HTTPS URLs and TLS connections.
 #include "httplib.h"
 
 #include <cstdio>
