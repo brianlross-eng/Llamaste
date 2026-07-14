@@ -88,8 +88,10 @@ static int add_default_route(const char* ifname, const char* gateway) {
         _exit(1);
     }
     if (pid > 0) {
+        alarm(5);  // timeout: don't block dhcpcd hook indefinitely
         int st = 0;
         waitpid(pid, &st, 0);
+        alarm(0);
         int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
         fprintf(stderr, "[dhcpcd-hook] ip route add default via %s dev %s (exit=%d)\n",
                 gateway, ifname, rc);
