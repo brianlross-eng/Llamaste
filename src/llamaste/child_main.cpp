@@ -2006,6 +2006,7 @@ int child_main(const SupervisorConfig& config) {
                 int read_end = pipefd[0];
                 int orig_console = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
                 g_tee_thread = std::thread([read_end, log_fd, orig_console]() {
+                    try {
                     char buf[512];
                     while (true) {
                         ssize_t n = read(read_end, buf, sizeof(buf));
@@ -2026,6 +2027,11 @@ int child_main(const SupervisorConfig& config) {
                     close(read_end);
                     close(log_fd);
                     if (orig_console >= 0) close(orig_console);
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[child] tee thread exception: %s\n", e.what());
+                    } catch (...) {
+                        fprintf(stderr, "[child] tee thread unknown exception\n");
+                    }
                 });
             } else {
                 close(log_fd);
@@ -2384,6 +2390,7 @@ int child_main(const SupervisorConfig& config) {
 
     // Cluster heartbeat: re-announce service and expire stale peers every 30s
     std::thread cluster_heartbeat_thread([&mdns]() {
+        try {
         while (g_running.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
             if (!g_running.load()) break;
@@ -2477,6 +2484,11 @@ int child_main(const SupervisorConfig& config) {
                 auto cap = g_cluster.analyze_capacity();
                 do_auto_upgrade_check(cap);
             }
+        }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[child] cluster_heartbeat thread exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[child] cluster_heartbeat thread unknown exception\n");
         }
     });
     cluster_heartbeat_thread.detach();
@@ -2975,11 +2987,17 @@ int child_main(const SupervisorConfig& config) {
 
     // Start session expiry thread (runs every 60 seconds)
     std::thread session_expiry_thread([]() {
+        try {
         while (g_running) {
             g_auth.expire_sessions();
             for (int i = 0; i < 120 && g_running; i++) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
+        }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[child] session_expiry thread exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[child] session_expiry thread unknown exception\n");
         }
     });
     session_expiry_thread.detach();
@@ -3076,6 +3094,7 @@ int child_main(const SupervisorConfig& config) {
         // Without XKB data files, xkb_keymap_new_from_names() returns NULL and wlroots
         // segfaults (SIGSEGV) on the first key press. XKB_CONFIG_ROOT env is also set above.
         std::thread([]() {
+            try {
             // Helper: run udevadm settle then trigger --action=add for input devices.
             // IMPORTANT: must use --action=add (not the default "change") because
             // libinput only reacts to ADD events to register new input devices.
@@ -3297,6 +3316,11 @@ int child_main(const SupervisorConfig& config) {
                     execl("/usr/bin/weston", "weston", "--shell=kiosk",
                           "--continue-without-input", nullptr);
                 });
+            }
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[child] compositor thread exception: %s\n", e.what());
+            } catch (...) {
+                fprintf(stderr, "[child] compositor thread unknown exception\n");
             }
         }).detach();
     }
@@ -4253,7 +4277,15 @@ int child_main(const SupervisorConfig& config) {
 
             // Run election in background to avoid blocking HTTP response
             // (topology callback may try to restart llama-server, taking 120s+)
-            std::thread([](){ g_cluster.run_election(); }).detach();
+            std::thread([](){
+                try {
+                    g_cluster.run_election();
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[child] election thread exception: %s\n", e.what());
+                } catch (...) {
+                    fprintf(stderr, "[child] election thread unknown exception\n");
+                }
+            }).detach();
 
             // Small delay to let election start
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -4839,11 +4871,17 @@ int child_main(const SupervisorConfig& config) {
     // --- Shutdown hook: stop server when signal received ---
     // Run a background thread that watches g_running and stops the server
     std::thread shutdown_watcher([&svr]() {
+        try {
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
         fprintf(stderr, "[child] Stopping HTTP server...\n");
         svr.stop();
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[child] shutdown_watcher thread exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[child] shutdown_watcher thread unknown exception\n");
+        }
     });
     shutdown_watcher.detach();
 
@@ -4858,9 +4896,15 @@ int child_main(const SupervisorConfig& config) {
     // Mark boot as successful after a short delay (post-update health check)
     // mark_boot_success() is a no-op if boot_counter is not set in grubenv
     std::thread boot_success_thread([]() {
+        try {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         mark_boot_success();
         fprintf(stderr, "[update] Boot health check complete\n");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[child] boot_success thread exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[child] boot_success thread unknown exception\n");
+        }
     });
     boot_success_thread.detach();
 
