@@ -162,6 +162,14 @@ static void start_stderr_tee() {
             }
             // Split into lines and add to in-memory ring buffer
             partial += buf;
+            // Cap unbounded growth: if a misbehaving process produces
+            // newline-free output (crash dump, binary garbage), flush with
+            // a truncation marker before partial balloons to OOM territory.
+            static constexpr size_t MAX_PARTIAL = 65536;  // 64 KB
+            if (__builtin_expect(partial.size() > MAX_PARTIAL, 0)) {
+                log_append(partial + "\xe2\x80\xa6[line truncated]");
+                partial.clear();
+            }
             size_t pos;
             while ((pos = partial.find('\n')) != std::string::npos) {
                 log_append(partial.substr(0, pos));
