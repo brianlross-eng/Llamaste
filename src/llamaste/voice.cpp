@@ -238,6 +238,39 @@ VoicePipeline::~VoicePipeline() {
 
 bool VoicePipeline::init(const VoiceConfig& config) {
     std::lock_guard<std::mutex> lock(config_mutex_);
+
+    // Clean up previous allocations if re-initializing (F6).
+    // stop() joins the voice thread and closes ALSA; then we free
+    // whisper, espeak-ng, flite, and sherpa-onnx resources before
+    // re-allocating below.
+    stop();
+#ifdef HAVE_WHISPER
+    if (impl_->whisper_ctx) {
+        whisper_free(impl_->whisper_ctx);
+        impl_->whisper_ctx = nullptr;
+    }
+#endif
+#ifdef HAVE_ESPEAK_NG
+    if (impl_->espeak_initialized) {
+        espeak_Terminate();
+        impl_->espeak_initialized = false;
+    }
+#endif
+#ifdef HAVE_FLITE
+    if (impl_->flite_voice) {
+        delete_voice(impl_->flite_voice);
+        impl_->flite_voice = nullptr;
+        impl_->flite_initialized = false;
+    }
+#endif
+#ifdef HAVE_SHERPA_ONNX
+    if (impl_->sherpa_tts) {
+        SherpaOnnxDestroyOfflineTts(impl_->sherpa_tts);
+        impl_->sherpa_tts = nullptr;
+        impl_->sherpa_initialized = false;
+    }
+#endif
+
     config_ = config;
 
     if (!config_.enabled) {
