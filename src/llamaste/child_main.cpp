@@ -3372,9 +3372,10 @@ int child_main(const SupervisorConfig& config) {
     // --- Static file routes ---
     // Root route: serve main UI, login page, or setup page based on auth state
     svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
-        // Desktop mode: skip auth/setup gates — go straight to the main UI.
-        // cog only accesses localhost so trust is implicit.
-        if (g_boot_mode == "desktop") {
+        // Desktop mode: skip auth/setup gates only for localhost (cog).
+        // Remote clients in desktop mode must still pass through setup/login gates.
+        if (g_boot_mode == "desktop" &&
+            (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1")) {
 #ifdef LLAMASTE_HAS_EMBED
             extern const unsigned char WEB_INDEX_HTML[];
             extern const unsigned int WEB_INDEX_HTML_LEN;
