@@ -194,6 +194,10 @@ struct VoicePipeline::Impl {
     std::thread voice_thread;
     std::atomic<bool> running{false};
 
+    // Mutex to serialize all TTS synthesis (espeak-ng is not thread-safe;
+    // sherpa-onnx path also unguarded against concurrent use).
+    std::mutex speak_mutex_;
+
     // Audio buffer for accumulating speech segments
     std::vector<float> speech_buffer;
 
@@ -531,6 +535,10 @@ std::string VoicePipeline::transcribe(const std::vector<float>& samples) {
 
 std::vector<int16_t> VoicePipeline::speak(const std::string& text, int* out_sample_rate) {
     if (text.empty()) return {};
+
+    // Serialize all TTS synthesis: espeak-ng is not thread-safe (global
+    // callback, global state) and sherpa-onnx path also unguarded.
+    std::lock_guard<std::mutex> lock(impl_->speak_mutex_);
 
     state_.store(VoiceState::SPEAKING);
     fprintf(stderr, "[voice] TTS: synthesizing %zu chars via %s\n",
