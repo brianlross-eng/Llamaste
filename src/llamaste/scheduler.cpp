@@ -306,8 +306,10 @@ time_t Scheduler::compute_next_cron(const std::string& expr, time_t after) const
         // Sets value only if it's a specific integer.
         if (field == "*") return true;
         char* end = nullptr;
+        errno = 0;
         long v = strtol(field.c_str(), &end, 10);
         if (end == field.c_str()) return true;  // Parse failure -> treat as *
+        if (errno == ERANGE || v == LONG_MAX || v == LONG_MIN) return true;
         value = static_cast<int>(v);
         return false;
     };
@@ -659,8 +661,9 @@ void Scheduler::check_alerts() {
         std::string temp_str = read_sysfs_line("/sys/class/thermal/thermal_zone0/temp");
         if (!temp_str.empty()) {
             char* end = nullptr;
+            errno = 0;
             long milli_c = strtol(temp_str.c_str(), &end, 10);
-            if (end != temp_str.c_str()) {
+            if (end != temp_str.c_str() && errno != ERANGE) {
                 int temp_c = static_cast<int>(milli_c / 1000);
                 if (temp_c >= cfg.temp_threshold_c) {
                     if (now - last_temp_alert_ >= cfg.cooldown_seconds) {

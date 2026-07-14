@@ -907,7 +907,17 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         }
 
         args.push_back(nullptr);
-        execv("/opt/llamaste/llama-server", const_cast<char**>(args.data()));
+
+        // Build non-const argv for execv — avoids const_cast UB.
+        // strdup each arg; execv doesn't return on success, and on
+        // failure we free before _exit.
+        std::vector<char*> argv;
+        for (const char* a : args) {
+            argv.push_back(strdup(a));
+        }
+        execv("/opt/llamaste/llama-server", argv.data());
+        // execv failed — free copies before exit
+        for (char* a : argv) free(a);
         fprintf(stderr, "[child] execv llama-server failed: %s\n", strerror(errno));
         _exit(127);
     }
@@ -1914,9 +1924,16 @@ static void do_auto_upgrade_check(const ClusterCapacity& cap) {
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
-        if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
+        if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
             curl_easy_setopt(curl, CURLOPT_CAINFO,
                              "/etc/ssl/certs/ca-certificates.crt");
+        } else {
+            fprintf(stderr, "[model-dl] WARNING: CA bundle not found at "
+                    "/etc/ssl/certs/ca-certificates.crt — TLS may fail\n");
+        }
+        // Always enforce TLS verification — never silently accept invalid certs
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
         if (existing > 0)
             curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
                              (curl_off_t)existing);
@@ -2747,15 +2764,13 @@ int child_main(const SupervisorConfig& config) {
         // regulatory.db during kernel init before squashfs pivot and cached
         // the failure.  Force a retry now that /lib/firmware/ is available.
         {
-            const char* reload_argv[] = { "/usr/sbin/iw", "reg", "reload", nullptr };
             pid_t rpid = fork();
-            if (rpid == 0) { execv(reload_argv[0], const_cast<char**>(reload_argv)); _exit(127); }
+            if (rpid == 0) { execl("/usr/sbin/iw", "iw", "reg", "reload", (char*)nullptr); _exit(127); }
             if (rpid > 0) waitpid(rpid, nullptr, 0);
             usleep(300000);
 
-            const char* set_argv[] = { "/usr/sbin/iw", "reg", "set", "US", nullptr };
             pid_t spid = fork();
-            if (spid == 0) { execv(set_argv[0], const_cast<char**>(set_argv)); _exit(127); }
+            if (spid == 0) { execl("/usr/sbin/iw", "iw", "reg", "set", "US", (char*)nullptr); _exit(127); }
             if (spid > 0) waitpid(spid, nullptr, 0);
             fprintf(stderr, "[wifi] regulatory: reload + set US\n");
         }
@@ -3245,9 +3260,10 @@ int child_main(const SupervisorConfig& config) {
     // 10 MB is enough for audio uploads while keeping memory bounded.
     svr.set_payload_max_length(10 * 1024 * 1024);
 
-    // CORS headers for development
+    // CORS headers — same-origin only (no wildcard). Combined with
+    // cleartext cookies, wildcard CORS enables CSRF from any website.
+    // The web UI is served from the same origin, so no CORS is needed.
     svr.set_default_headers({
-        {"Access-Control-Allow-Origin", "*"},
         {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
         {"Access-Control-Allow-Headers", "Content-Type, Authorization"},
     });
