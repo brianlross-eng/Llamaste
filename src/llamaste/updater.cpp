@@ -409,23 +409,76 @@ std::string install_update(const std::string& path) {
     int part_num = inactive_partition_num(active);
     std::string target_slot = inactive_slot(active);
 
-    // Find the block device — try common patterns
+    // Find the block device — discover root device from /proc/mounts
     std::string block_dev;
-    const char* candidates[] = {
-        "/dev/sda", "/dev/vda", "/dev/nvme0n1p"
-    };
-    for (const char* base : candidates) {
-        std::string dev = std::string(base);
-        // nvme uses pN directly, sda/vda use N
-        if (dev.find("nvme") != std::string::npos) {
-            dev += std::to_string(part_num);
-        } else {
-            dev += std::to_string(part_num);
+    std::string root_device;
+    std::ifstream mounts("/proc/mounts");
+    if (mounts) {
+        std::string line;
+        while (std::getline(mounts, line)) {
+            // /proc/mounts: device mountpoint fstype options ...
+            size_t space1 = line.find(' ');
+            if (space1 == std::string::npos) continue;
+            size_t space2 = line.find(' ', space1 + 1);
+            std::string mountpoint = line.substr(space1 + 1, space2 - space1 - 1);
+            if (mountpoint == "/") {
+                root_device = line.substr(0, space1);
+                break;
+            }
         }
-        struct stat st;
-        if (stat(dev.c_str(), &st) == 0) {
-            block_dev = dev;
-            break;
+    }
+
+    // Build partition path from root device name.
+    // Strip trailing partition number (e.g. nvme0n1p1 → nvme0n1, sda1 → sda)
+    // NVMe: "nvme0n1p1" → base="nvme0n1", partition suffix = "p2"
+    // SATA/VirtIO: "sda1" → base="sda", partition suffix = "2"
+    if (!root_device.empty()) {
+        // root_device may be "/dev/sda1" or "/dev/nvme0n1p1"
+        std::string name = (root_device.find("/dev/") == 0)
+                            ? root_device.substr(5)
+                            : root_device;
+        bool is_nvme = (name.find("nvme") == 0);
+        bool is_mmc = (name.find("mmcblk") == 0);
+
+        // Find the trailing digits (partition number)
+        size_t digit_start = std::string::npos;
+        for (size_t i = name.size(); i > 0; i--) {
+            if (isdigit(static_cast<unsigned char>(name[i - 1]))) {
+                digit_start = i - 1;
+                while (digit_start > 0 &&
+                       isdigit(static_cast<unsigned char>(name[digit_start - 1])))
+                    digit_start--;
+                break;
+            }
+        }
+
+        if (digit_start != std::string::npos) {
+            std::string base_name = name.substr(0, digit_start);
+            if (is_nvme || is_mmc) {
+                block_dev = "/dev/" + base_name + "p" + std::to_string(part_num);
+            } else {
+                block_dev = "/dev/" + base_name + std::to_string(part_num);
+            }
+        }
+    }
+
+    // Fallback: try common candidates if /proc/mounts didn't give a root device
+    if (block_dev.empty()) {
+        const char* candidates[] = {
+            "/dev/sda", "/dev/vda", "/dev/nvme0n1p"
+        };
+        for (const char* base : candidates) {
+            std::string dev = std::string(base);
+            if (dev.find("nvme") != std::string::npos) {
+                dev += std::to_string(part_num);
+            } else {
+                dev += std::to_string(part_num);
+            }
+            struct stat st;
+            if (stat(dev.c_str(), &st) == 0) {
+                block_dev = dev;
+                break;
+            }
         }
     }
     if (block_dev.empty()) {
