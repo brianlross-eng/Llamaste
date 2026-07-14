@@ -24,6 +24,12 @@ using json = nlohmann::json;
 #include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/random.h>   // getrandom() syscall
+#ifndef GRND_NONBLOCK
+#define GRND_NONBLOCK 1
+#endif
+#endif
 #define mkdir_p(path, mode) mkdir(path, mode)
 #endif
 
@@ -38,13 +44,48 @@ std::string AuthManager::generate_token(int bytes) {
     srand((unsigned)time(nullptr));
     for (int i = 0; i < bytes; i++) buf[i] = rand() & 0xff;
 #else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) {
-        // Fallback: use time-based seed (weak, but better than nothing)
-        srand((unsigned)time(nullptr));
-        for (int i = 0; i < bytes; i++) buf[i] = rand() & 0xff;
-    } else {
-        read(fd, buf, bytes);
+    // Prefer getrandom() syscall — blocks until entropy pool is ready.
+    // Falls back to /dev/urandom with proper read() checking.
+    bool filled = false;
+
+#ifdef __linux__
+    // getrandom() with no flags blocks until the kernel CSPRNG is seeded.
+    // This is the preferred path — no file descriptor needed.
+    ssize_t gr = getrandom(buf, (size_t)bytes, 0);
+    if (gr == (ssize_t)bytes) {
+        filled = true;
+    }
+#endif
+
+    if (!filled) {
+        // Fallback: /dev/urandom with retry and read() checking.
+        // Block until /dev/urandom is available — the system cannot
+        // securely generate tokens without a working entropy source.
+        int fd = -1;
+        while (fd < 0) {
+            fd = open("/dev/urandom", O_RDONLY);
+            if (fd < 0) {
+                // If urandom isn't available yet, sleep and retry.
+                // We MUST NOT fall through to predictable rand().
+                usleep(100000);  // 100ms
+            }
+        }
+
+        // Read with partial-read loop — read() may return fewer bytes
+        // than requested, especially on early boot.
+        size_t total = 0;
+        while (total < (size_t)bytes) {
+            ssize_t n = read(fd, buf + total, (size_t)bytes - total);
+            if (n < 0) {
+                if (errno == EINTR) continue;  // signal, retry
+                // Fatal: /dev/urandom read error — this shouldn't happen
+                // on a working system, but if it does, abort generation
+                // rather than filling with zeroes or predictable data.
+                close(fd);
+                return "";
+            }
+            total += (size_t)n;
+        }
         close(fd);
     }
 #endif
