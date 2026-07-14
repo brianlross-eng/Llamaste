@@ -605,8 +605,7 @@ static bool try_mount_data_partition(const char* dev) {
                 rlog("[init] mount_data: attempting mkfs.ext4 on %s (recreate filesystem)...\n", dev);
                 pid_t pid = fork();
                 if (pid == 0) {
-                    const char* argv[] = {mkfs, "-q", "-F", "-L", "DATA", dev, nullptr};
-                    execv(mkfs, (char* const*)argv);
+                    execl(mkfs, mkfs, "-q", "-F", "-L", "DATA", dev, (char*)nullptr);
                     _exit(127);
                 } else if (pid > 0) {
                     int status = 0;
@@ -776,10 +775,20 @@ void init_setup_audio() {
     }
 
     // Unmute Master and set to 80%
-    auto run_amixer = [](const char* amixer_path, const char* const argv[]) {
+    auto run_amixer = [](const char* amixer_path, const char* const* cargs) {
+        // Build mutable argv for POSIX execv (requires char* const*) by
+        // duplicating each argument — avoids const_cast undefined behaviour.
+        int n = 0;
+        while (cargs[n]) n++;
+        std::vector<char*> argv(n + 1);
+        for (int i = 0; i < n; i++) {
+            argv[i] = strdup(cargs[i]);
+        }
+        argv[n] = nullptr;
+
         pid_t pid = fork();
         if (pid == 0) {
-            execv(amixer_path, const_cast<char* const*>(argv));
+            execv(amixer_path, argv.data());
             _exit(127);
         }
         if (pid > 0) {
