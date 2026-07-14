@@ -710,7 +710,6 @@ void VoicePipeline::play_audio(const int16_t* samples, size_t count,
 
 void VoicePipeline::start() {
 #if defined(HAVE_ALSA) && defined(HAVE_WHISPER)
-    if (impl_->running.load()) return;
     if (!impl_->whisper_ctx) {
         fprintf(stderr, "[voice] Cannot start: whisper not loaded\n");
         return;
@@ -762,11 +761,21 @@ void VoicePipeline::start() {
 
     snd_pcm_prepare(impl_->capture_handle);
 
+    // Atomically check-and-set running to prevent TOCTOU race:
+    // two concurrent start() calls could both see running==false,
+    // both open ALSA, both create threads — leaking the first.
+    bool expected = false;
+    if (!impl_->running.compare_exchange_strong(expected, true)) {
+        // Another call beat us — clean up and return
+        snd_pcm_close(impl_->capture_handle);
+        impl_->capture_handle = nullptr;
+        return;
+    }
+
     fprintf(stderr, "[voice] ALSA capture opened: %s @ %uHz, period=%lu frames\n",
             device.c_str(), rate, (unsigned long)period_frames);
 
     // Start the listening thread
-    impl_->running.store(true);
     impl_->voice_thread = std::thread(&VoicePipeline::voice_thread_fn, this);
 
     fprintf(stderr, "[voice] Always-listening thread started\n");
