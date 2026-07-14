@@ -198,6 +198,10 @@ int compute_batch_thread_count(int cpu_cores) {
 // at 8192 context. Qwen2.5 1.5B KV cache for 8192 ctx ≈ 75MB — very manageable.
 // Use 8192 for machines with ≥2GB free RAM (1.5B model is ~950MB loaded).
 int compute_context_size(int free_ram_mb) {
+    // Guard against negative or near-zero free RAM (e.g. from
+    // compositor reserve subtracting from a small total).  Returning
+    // 2048 on a RAM-starved system is a guaranteed OOM.
+    if (free_ram_mb < 256) return 512;
     if (free_ram_mb >= 2048) return 8192;
     if (free_ram_mb >= 1024) return 4096;
     if (free_ram_mb >= 512)  return 2048;
