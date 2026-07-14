@@ -1485,6 +1485,70 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     // wpa_supplicant not yet running — child_main will start it with the saved config.
 }
 
+// Quick ethernet pre-flight: scan for wired interfaces and spawn dhcpcd.
+// Headless servers should not wait 6s for nonexistent WiFi — start DHCP
+// on any wired interface immediately so they get network access right away.
+static void supervisor_preflight_ethernet() {
+#ifndef _WIN32
+    DIR* nd = opendir("/sys/class/net");
+    if (!nd) return;
+    struct dirent* ne;
+    bool found = false;
+    while ((ne = readdir(nd))) {
+        if (ne->d_name[0] == '.') continue;
+        const std::string ifname = ne->d_name;
+        if (ifname == "lo") continue;
+        // Skip known tunnel/virtual interfaces
+        if (ifname == "sit0" || ifname == "tunl0" || ifname == "ip6tnl0" ||
+            ifname == "gre0" || ifname == "ip_vti0" || ifname == "ip6_vti0")
+            continue;
+
+        // Check type is ARPHRD_ETHER (1) — skip tunnels, loopback, etc.
+        char tpath[256];
+        snprintf(tpath, sizeof(tpath), "/sys/class/net/%s/type", ifname.c_str());
+        FILE* tf = fopen(tpath, "r");
+        if (tf) {
+            int iftype = 0;
+            fscanf(tf, "%d", &iftype);
+            fclose(tf);
+            if (iftype != 1) continue;
+        }
+
+        // Skip WiFi interfaces
+        char wpath[256];
+        snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/phy80211", ifname.c_str());
+        if (access(wpath, F_OK) == 0) continue;
+
+        // Bring interface UP via ioctl
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock >= 0) {
+            struct ifreq ifr = {};
+            strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+            if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+                ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+                ioctl(sock, SIOCSIFFLAGS, &ifr);
+            }
+            close(sock);
+        }
+
+        // Spawn dhcpcd in background on this interface
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/sbin/dhcpcd", "dhcpcd", "-b", ifname.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+        if (pid > 0) {
+            fprintf(stderr, "[supervisor] ethernet pre-flight: dhcpcd spawned on %s\n",
+                    ifname.c_str());
+            found = true;
+        }
+    }
+    closedir(nd);
+    if (found)
+        fprintf(stderr, "[supervisor] ethernet pre-flight: DHCP started on wired interfaces\n");
+#endif
+}
+
 static void supervisor_preflight_wifi(const SupervisorConfig& config) {
     if (config.boot_mode == "desktop") return;
 
@@ -1551,9 +1615,11 @@ static void supervisor_preflight_wifi(const SupervisorConfig& config) {
     // Tee supervisor stderr to in-memory log buffer (for 'D' debug view on console)
     start_stderr_tee();
 
-    // First-boot WiFi setup: run before display thread so the terminal is clean.
-    // Shows SSID/PSK prompts if server mode + WiFi hardware + no saved networks.
+    // First-boot ethernet + WiFi setup: run before display thread so the
+    // terminal is clean. Start wired DHCP immediately so headless servers
+    // don't wait 6s for nonexistent WiFi.
 #ifndef _WIN32
+    supervisor_preflight_ethernet();
     supervisor_preflight_wifi(config);
 #endif
 
