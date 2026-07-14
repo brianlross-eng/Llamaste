@@ -122,6 +122,10 @@ static void start_stderr_tee() {
     int pipefd[2];
     if (pipe(pipefd) != 0) return;
 
+    // Save original stderr before the dup2 so error fprintf in the tee
+    // thread doesn't feed back into the pipe (stderr feedback loop fix).
+    int orig_stderr = dup(STDERR_FILENO);
+
     // Redirect stderr to write-end
     dup2(pipefd[1], STDERR_FILENO);
     close(pipefd[1]);
@@ -134,7 +138,7 @@ static void start_stderr_tee() {
                         O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 
     int read_fd = pipefd[0];
-    g_tee_thread = std::thread([read_fd, original_console, log_file]() {
+    g_tee_thread = std::thread([read_fd, original_console, log_file, orig_stderr]() {
         char buf[512];
         std::string partial;
         while (true) {
@@ -145,14 +149,14 @@ static void start_stderr_tee() {
             if (original_console >= 0) {
                 ssize_t written = write(original_console, buf, n);
                 if (written < 0) {
-                    fprintf(stderr, "[tee] console write error: %s\n", strerror(errno));
+                    dprintf(orig_stderr, "[tee] console write error: %s\n", strerror(errno));
                 }
             }
             // Write to persistent log file
             if (log_file >= 0) {
                 ssize_t written = write(log_file, buf, n);
                 if (written < 0) {
-                    fprintf(stderr, "[tee] log write error: %s (path=%s)\n",
+                    dprintf(orig_stderr, "[tee] log write error: %s (path=%s)\n",
                             strerror(errno), DEBUG_LOG_PATH);
                 }
             }
@@ -166,6 +170,7 @@ static void start_stderr_tee() {
         }
         if (original_console >= 0) close(original_console);
         if (log_file >= 0) close(log_file);
+        if (orig_stderr >= 0) close(orig_stderr);
     });
 }
 

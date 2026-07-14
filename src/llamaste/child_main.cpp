@@ -2000,13 +2000,17 @@ int child_main(const SupervisorConfig& config) {
         int log_fd = open("/tmp/child.log",
                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (log_fd >= 0) {
+            // Save original stderr before the dup2 so error fprintf in
+            // the tee thread doesn't feed back into the pipe.
+            int orig_stderr = dup(STDERR_FILENO);
+
             int pipefd[2];
             if (pipe2(pipefd, O_CLOEXEC) == 0) {
                 dup2(pipefd[1], STDERR_FILENO);
                 close(pipefd[1]);
                 int read_end = pipefd[0];
                 int orig_console = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
-                g_tee_thread = std::thread([read_end, log_fd, orig_console]() {
+                g_tee_thread = std::thread([read_end, log_fd, orig_console, orig_stderr]() {
                     try {
                     char buf[512];
                     while (true) {
@@ -2014,13 +2018,13 @@ int child_main(const SupervisorConfig& config) {
                         if (n <= 0) break;
                         ssize_t written = write(log_fd, buf, n);
                         if (written < 0) {
-                            fprintf(stderr, "[child-tee] log write: %s\n",
+                            dprintf(orig_stderr, "[child-tee] log write: %s\n",
                                     strerror(errno));
                         }
                         if (orig_console >= 0) {
                             ssize_t cw = write(orig_console, buf, n);
                             if (cw < 0) {
-                                fprintf(stderr, "[child-tee] console write: %s\n",
+                                dprintf(orig_stderr, "[child-tee] console write: %s\n",
                                         strerror(errno));
                             }
                         }
@@ -2028,14 +2032,16 @@ int child_main(const SupervisorConfig& config) {
                     close(read_end);
                     close(log_fd);
                     if (orig_console >= 0) close(orig_console);
+                    if (orig_stderr >= 0) close(orig_stderr);
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[child] tee thread exception: %s\n", e.what());
+                        dprintf(orig_stderr, "[child] tee thread exception: %s\n", e.what());
                     } catch (...) {
-                        fprintf(stderr, "[child] tee thread unknown exception\n");
+                        dprintf(orig_stderr, "[child] tee thread unknown exception\n");
                     }
                 });
             } else {
                 close(log_fd);
+                if (orig_stderr >= 0) close(orig_stderr);
             }
         }
     }
