@@ -2526,6 +2526,203 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
+    // --- Wired ethernet auto-DHCP (PRIMARY) ---
+    // User requirement: ethernet is the primary network interface.
+    // WiFi is fallback — only used if wired ethernet fails to obtain an IP.
+    // Scan for non-WiFi, non-loopback interfaces with carrier (cable plugged in)
+    // and run dhcpcd on them.
+    bool ethernet_got_ip = false;
+#ifndef _WIN32
+
+    // Scan for non-WiFi, non-loopback interfaces with carrier (cable plugged in)
+    // and run dhcpcd on them.  This enables connectivity over ethernet dongles,
+    // built-in NICs, etc. without manual configuration.
+    {
+        fprintf(stderr, "[net] Scanning for wired ethernet interfaces...\n");
+        DIR* nd = opendir("/sys/class/net");
+        if (nd) {
+            struct dirent* ne;
+            while ((ne = readdir(nd))) {
+                if (ne->d_name[0] == '.') continue;
+                const std::string ifname = ne->d_name;
+                // Skip loopback, WiFi, and tunnel/virtual interfaces
+                if (ifname == "lo") continue;
+                // Skip known tunnel/virtual interfaces (sit0 = IPv6-in-IPv4,
+                // tunl0 = IPIP, ip6tnl0 = IPv6 tunnel, gre0 = GRE)
+                if (ifname == "sit0" || ifname == "tunl0" ||
+                    ifname == "ip6tnl0" || ifname == "gre0" ||
+                    ifname == "ip_vti0" || ifname == "ip6_vti0") {
+                    continue;
+                }
+                // Skip any interface with type != 1 (ARPHRD_ETHER)
+                // This filters out tunnels (776/SIT, 768/IPIP), loopback (772), etc.
+                char tpath[256];
+                snprintf(tpath, sizeof(tpath), "/sys/class/net/%s/type", ifname.c_str());
+                FILE* tf = fopen(tpath, "r");
+                if (tf) {
+                    int iftype = 0;
+                    fscanf(tf, "%d", &iftype);
+                    fclose(tf);
+                    if (iftype != 1) { // 1 = ARPHRD_ETHER (real ethernet)
+                        fprintf(stderr, "[net] %s: not ethernet (type=%d), skipping\n",
+                                ifname.c_str(), iftype);
+                        continue;
+                    }
+                }
+                char wpath[256];
+                snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/phy80211", ifname.c_str());
+                if (access(wpath, F_OK) == 0) {
+                    fprintf(stderr, "[net] %s: WiFi interface, skipping\n", ifname.c_str());
+                    continue;
+                }
+
+                fprintf(stderr, "[net] %s: found wired interface\n", ifname.c_str());
+
+                // Bring interface UP first (carrier can only be read when UP)
+                // Can't use system() — no /bin/sh. Use ioctl directly.
+                int sock = socket(AF_INET, SOCK_DGRAM, 0);
+                if (sock < 0) {
+                    fprintf(stderr, "[net] %s: socket() failed: %m\n", ifname.c_str());
+                    continue;
+                }
+                struct ifreq ifr = {};
+                strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+                    if (!(ifr.ifr_flags & IFF_UP)) {
+                        ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+                        if (ioctl(sock, SIOCSIFFLAGS, &ifr) == 0) {
+                            fprintf(stderr, "[net] %s: brought UP\n", ifname.c_str());
+                        } else {
+                            fprintf(stderr, "[net] %s: SIOCSIFFLAGS UP failed: %m\n", ifname.c_str());
+                        }
+                    }
+                }
+                close(sock);
+
+                // Wait for carrier detection after UP.
+                // RTL8125B (EVO-X2) link negotiation takes 3-5s after IFF_UP.
+                // USB ethernet (RTL8153B) needs ~1s. Retry up to 10s.
+                char cpath[256];
+                snprintf(cpath, sizeof(cpath), "/sys/class/net/%s/carrier", ifname.c_str());
+                int carrier = 0;
+                for (int attempt = 0; attempt < 10; attempt++) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    FILE* cf = fopen(cpath, "r");
+                    if (!cf) break;
+                    carrier = 0;
+                    fscanf(cf, "%d", &carrier);
+                    fclose(cf);
+                    if (carrier == 1) {
+                        fprintf(stderr, "[net] %s: carrier detected after %ds\n",
+                                ifname.c_str(), attempt + 1);
+                        break;
+                    }
+                    if (attempt == 0)
+                        fprintf(stderr, "[net] %s: waiting for carrier...\n", ifname.c_str());
+                }
+                if (carrier != 1) {
+                    fprintf(stderr, "[net] %s: no carrier after 10s (cable not plugged in?)\n", ifname.c_str());
+                    continue;
+                }
+
+                fprintf(stderr, "[net] %s: carrier detected\n", ifname.c_str());
+
+                // Skip dhcpcd if kernel ip=dhcp already configured this interface
+                bool already_has_ip = false;
+                {
+                    int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                    if (sk >= 0) {
+                        struct ifreq ifr2 = {};
+                        strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                        if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
+                            auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
+                            char ip[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                            if (strcmp(ip, "0.0.0.0") != 0) {
+                                already_has_ip = true;
+                                fprintf(stderr, "[net] %s: already configured by kernel (%s), skipping dhcpcd\n",
+                                        ifname.c_str(), ip);
+                            }
+                        }
+                        close(sk);
+                    }
+                }
+
+                if (already_has_ip) {
+                    // Kernel set the IP via ip=dhcp, but the default route
+                    // may be missing. Dump routes and ensure gateway exists.
+                    netlink_dump_routes("kernel-dhcp-check");
+                    apply_dhcp_route_and_dns(ifname);
+                    continue;
+                }
+
+                fprintf(stderr, "[net] %s: no IP yet, spawning dhcpcd\n", ifname.c_str());
+                spawn_dhcpcd(ifname);
+
+                // Wait up to 10s for DHCP lease, then retry once with
+                // a fresh dhcpcd spawn (handles cold DHCP servers like
+                // Windows ICS that are slow on first-seen MAC addresses)
+                bool got_lease = false;
+                for (int attempt = 0; attempt < 2 && !got_lease; attempt++) {
+                    int wait_iters = (attempt == 0) ? 20 : 30;  // 10s first, 15s retry
+                    for (int w = 0; w < wait_iters; w++) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        int sk = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sk >= 0) {
+                            struct ifreq ifr2 = {};
+                            strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+                            if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
+                                auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
+                                char ip[INET_ADDRSTRLEN];
+                                inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                                if (strcmp(ip, "0.0.0.0") != 0) {
+                                    fprintf(stderr, "[net] %s: DHCP lease obtained: %s (attempt %d, %dms)\n",
+                                            ifname.c_str(), ip, attempt + 1, (w + 1) * 500);
+                                    close(sk);
+                                    ethernet_got_ip = true;
+                                    got_lease = true;
+                                    break;
+                                }
+                            }
+                            close(sk);
+                        }
+                    }
+                    if (!got_lease && attempt == 0) {
+                        fprintf(stderr, "[net] %s: no DHCP lease after 10s, retrying...\n", ifname.c_str());
+                        // Kill stale dhcpcd and respawn fresh
+                        // NOTE: system() doesn't work — no /bin/sh (BR2_SYSTEM_BIN_SH_NONE)
+                        // Use fork/exec directly
+                        pid_t kpid = fork();
+                        if (kpid == 0) {
+                            execl("/sbin/dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
+                            _exit(1);
+                        } else if (kpid > 0) {
+                            int kst = 0;
+                            waitpid(kpid, &kst, 0);
+                        }
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        spawn_dhcpcd(ifname);
+                    }
+                }
+                if (got_lease) {
+                    // dhcpcd hooks need /bin/sh which we don't have.
+                    // Manually add default route and DNS.
+                    apply_dhcp_route_and_dns(ifname);
+                } else {
+                    fprintf(stderr, "[net] %s: no DHCP lease after retries (dhcpcd -b will keep trying in background)\n", ifname.c_str());
+                }
+            }
+            closedir(nd);
+        } else {
+            fprintf(stderr, "[net] cannot open /sys/class/net: %m\n");
+        }
+    }
+#endif
+
+    // --- WiFi fallback ---
+    // Only attempt WiFi if wired ethernet did NOT obtain an IP.
+    // Ethernet is primary, WiFi is secondary per user requirement.
+    if (!ethernet_got_ip) {
     // Initialize WiFi and start wpa_supplicant + dhcpcd if hardware found.
     // In desktop mode, supervisor_preflight_wifi() skips entirely (can't use
     // tty1 — compositor owns the display), so modules may still be probing
@@ -2697,191 +2894,9 @@ int child_main(const SupervisorConfig& config) {
         }
     }
     } // end outer wifi block
-
-    // --- Wired ethernet auto-DHCP ---
-    // Scan for non-WiFi, non-loopback interfaces with carrier (cable plugged in)
-    // and run dhcpcd on them.  This enables connectivity over ethernet dongles,
-    // built-in NICs, etc. without manual configuration.
-    {
-        fprintf(stderr, "[net] Scanning for wired ethernet interfaces...\n");
-        DIR* nd = opendir("/sys/class/net");
-        if (nd) {
-            struct dirent* ne;
-            while ((ne = readdir(nd))) {
-                if (ne->d_name[0] == '.') continue;
-                const std::string ifname = ne->d_name;
-                // Skip loopback, WiFi, and tunnel/virtual interfaces
-                if (ifname == "lo") continue;
-                // Skip known tunnel/virtual interfaces (sit0 = IPv6-in-IPv4,
-                // tunl0 = IPIP, ip6tnl0 = IPv6 tunnel, gre0 = GRE)
-                if (ifname == "sit0" || ifname == "tunl0" ||
-                    ifname == "ip6tnl0" || ifname == "gre0" ||
-                    ifname == "ip_vti0" || ifname == "ip6_vti0") {
-                    continue;
-                }
-                // Skip any interface with type != 1 (ARPHRD_ETHER)
-                // This filters out tunnels (776/SIT, 768/IPIP), loopback (772), etc.
-                char tpath[256];
-                snprintf(tpath, sizeof(tpath), "/sys/class/net/%s/type", ifname.c_str());
-                FILE* tf = fopen(tpath, "r");
-                if (tf) {
-                    int iftype = 0;
-                    fscanf(tf, "%d", &iftype);
-                    fclose(tf);
-                    if (iftype != 1) { // 1 = ARPHRD_ETHER (real ethernet)
-                        fprintf(stderr, "[net] %s: not ethernet (type=%d), skipping\n",
-                                ifname.c_str(), iftype);
-                        continue;
-                    }
-                }
-                char wpath[256];
-                snprintf(wpath, sizeof(wpath), "/sys/class/net/%s/phy80211", ifname.c_str());
-                if (access(wpath, F_OK) == 0) {
-                    fprintf(stderr, "[net] %s: WiFi interface, skipping\n", ifname.c_str());
-                    continue;
-                }
-
-                fprintf(stderr, "[net] %s: found wired interface\n", ifname.c_str());
-
-                // Bring interface UP first (carrier can only be read when UP)
-                // Can't use system() — no /bin/sh. Use ioctl directly.
-                int sock = socket(AF_INET, SOCK_DGRAM, 0);
-                if (sock < 0) {
-                    fprintf(stderr, "[net] %s: socket() failed: %m\n", ifname.c_str());
-                    continue;
-                }
-                struct ifreq ifr = {};
-                strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
-                if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
-                    if (!(ifr.ifr_flags & IFF_UP)) {
-                        ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
-                        if (ioctl(sock, SIOCSIFFLAGS, &ifr) == 0) {
-                            fprintf(stderr, "[net] %s: brought UP\n", ifname.c_str());
-                        } else {
-                            fprintf(stderr, "[net] %s: SIOCSIFFLAGS UP failed: %m\n", ifname.c_str());
-                        }
-                    }
-                }
-                close(sock);
-
-                // Wait for carrier detection after UP.
-                // RTL8125B (EVO-X2) link negotiation takes 3-5s after IFF_UP.
-                // USB ethernet (RTL8153B) needs ~1s. Retry up to 10s.
-                char cpath[256];
-                snprintf(cpath, sizeof(cpath), "/sys/class/net/%s/carrier", ifname.c_str());
-                int carrier = 0;
-                for (int attempt = 0; attempt < 10; attempt++) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    FILE* cf = fopen(cpath, "r");
-                    if (!cf) break;
-                    carrier = 0;
-                    fscanf(cf, "%d", &carrier);
-                    fclose(cf);
-                    if (carrier == 1) {
-                        fprintf(stderr, "[net] %s: carrier detected after %ds\n",
-                                ifname.c_str(), attempt + 1);
-                        break;
-                    }
-                    if (attempt == 0)
-                        fprintf(stderr, "[net] %s: waiting for carrier...\n", ifname.c_str());
-                }
-                if (carrier != 1) {
-                    fprintf(stderr, "[net] %s: no carrier after 10s (cable not plugged in?)\n", ifname.c_str());
-                    continue;
-                }
-
-                fprintf(stderr, "[net] %s: carrier detected\n", ifname.c_str());
-
-                // Skip dhcpcd if kernel ip=dhcp already configured this interface
-                bool already_has_ip = false;
-                {
-                    int sk = socket(AF_INET, SOCK_DGRAM, 0);
-                    if (sk >= 0) {
-                        struct ifreq ifr2 = {};
-                        strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
-                        if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
-                            auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
-                            char ip[INET_ADDRSTRLEN];
-                            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
-                            if (strcmp(ip, "0.0.0.0") != 0) {
-                                already_has_ip = true;
-                                fprintf(stderr, "[net] %s: already configured by kernel (%s), skipping dhcpcd\n",
-                                        ifname.c_str(), ip);
-                            }
-                        }
-                        close(sk);
-                    }
-                }
-
-                if (already_has_ip) {
-                    // Kernel set the IP via ip=dhcp, but the default route
-                    // may be missing. Dump routes and ensure gateway exists.
-                    netlink_dump_routes("kernel-dhcp-check");
-                    apply_dhcp_route_and_dns(ifname);
-                    continue;
-                }
-
-                fprintf(stderr, "[net] %s: no IP yet, spawning dhcpcd\n", ifname.c_str());
-                spawn_dhcpcd(ifname);
-
-                // Wait up to 10s for DHCP lease, then retry once with
-                // a fresh dhcpcd spawn (handles cold DHCP servers like
-                // Windows ICS that are slow on first-seen MAC addresses)
-                bool got_lease = false;
-                for (int attempt = 0; attempt < 2 && !got_lease; attempt++) {
-                    int wait_iters = (attempt == 0) ? 20 : 30;  // 10s first, 15s retry
-                    for (int w = 0; w < wait_iters; w++) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                        int sk = socket(AF_INET, SOCK_DGRAM, 0);
-                        if (sk >= 0) {
-                            struct ifreq ifr2 = {};
-                            strncpy(ifr2.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
-                            if (ioctl(sk, SIOCGIFADDR, &ifr2) == 0) {
-                                auto* sa = reinterpret_cast<struct sockaddr_in*>(&ifr2.ifr_addr);
-                                char ip[INET_ADDRSTRLEN];
-                                inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
-                                if (strcmp(ip, "0.0.0.0") != 0) {
-                                    fprintf(stderr, "[net] %s: DHCP lease obtained: %s (attempt %d, %dms)\n",
-                                            ifname.c_str(), ip, attempt + 1, (w + 1) * 500);
-                                    close(sk);
-                                    got_lease = true;
-                                    break;
-                                }
-                            }
-                            close(sk);
-                        }
-                    }
-                    if (!got_lease && attempt == 0) {
-                        fprintf(stderr, "[net] %s: no DHCP lease after 10s, retrying...\n", ifname.c_str());
-                        // Kill stale dhcpcd and respawn fresh
-                        // NOTE: system() doesn't work — no /bin/sh (BR2_SYSTEM_BIN_SH_NONE)
-                        // Use fork/exec directly
-                        pid_t kpid = fork();
-                        if (kpid == 0) {
-                            execl("/sbin/dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
-                            _exit(1);
-                        } else if (kpid > 0) {
-                            int kst = 0;
-                            waitpid(kpid, &kst, 0);
-                        }
-                        std::this_thread::sleep_for(std::chrono::seconds(2));
-                        spawn_dhcpcd(ifname);
-                    }
-                }
-                if (got_lease) {
-                    // dhcpcd hooks need /bin/sh which we don't have.
-                    // Manually add default route and DNS.
-                    apply_dhcp_route_and_dns(ifname);
-                } else {
-                    fprintf(stderr, "[net] %s: no DHCP lease after retries (dhcpcd -b will keep trying in background)\n", ifname.c_str());
-                }
-            }
-            closedir(nd);
-        } else {
-            fprintf(stderr, "[net] cannot open /sys/class/net: %m\n");
-        }
+    } else {
+        fprintf(stderr, "[net] Ethernet obtained IP — skipping WiFi fallback\n");
     }
-#endif
 
     // Start session expiry thread (runs every 60 seconds)
     std::thread session_expiry_thread([]() {
