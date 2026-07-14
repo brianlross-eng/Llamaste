@@ -1294,14 +1294,16 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
 
 static void spawn_dhcpcd(const std::string& iface) {
     // Buildroot installs dhcpcd to /sbin/dhcpcd (not /usr/sbin/)
-    char* const argv[] = {
-        const_cast<char*>("dhcpcd"),
-        const_cast<char*>("-b"),            // background — retries until it gets a lease
-        const_cast<char*>(iface.c_str()),
-        nullptr
-    };
+    std::vector<const char*> cargs = {"dhcpcd", "-b", iface.c_str(), nullptr};
 
-    pid_t pid = safe_spawn("dhcpcd", argv);
+    std::vector<char*> argv;
+    for (const char* a : cargs) {
+        argv.push_back(strdup(a));
+    }
+
+    pid_t pid = safe_spawn("dhcpcd", argv.data());
+    // Free strdup'd strings (safe after posix_spawn — kernel copies args)
+    for (char* a : argv) free(a);
     if (pid < 0) {
         return;
     }
