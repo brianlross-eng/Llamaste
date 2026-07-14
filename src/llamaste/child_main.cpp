@@ -2058,7 +2058,8 @@ int child_main(const SupervisorConfig& config) {
 
         // Estimate free RAM after model load
         int free_ram_estimate = g_hwinfo.ram_free_mb - 512;  // reserve for system
-        if (config.boot_mode == "desktop") free_ram_estimate -= 500;  // reserve for compositor
+        // Reserve for compositor (cage + cog together use ~100 MB; 128 MB provides headroom)
+        if (config.boot_mode == "desktop") free_ram_estimate -= 128;
 
         if (spawn_llama_server(config.model_path, config.cpu_cores, free_ram_estimate)) {
             auto load_start = std::chrono::steady_clock::now();
