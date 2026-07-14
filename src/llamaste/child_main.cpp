@@ -74,6 +74,8 @@
 #include <sys/sysmacros.h>
 #endif
 
+#include <spawn.h>
+
 #ifdef HAVE_LIBCURL
 #include <curl/curl.h>
 #endif
@@ -830,6 +832,26 @@ static std::string llama_inference(const std::string& request_json) {
 // llama-server process lifecycle
 // ---------------------------------------------------------------------------
 
+// Thread-safe process spawn using posix_spawnp — avoids fork() deadlocks in
+// multi-threaded HTTP server contexts.  fork() in a threaded process only
+// duplicates the calling thread; other threads' mutexes remain locked, causing
+// deadlocks if the child touches heap or locked resources before exec().
+//
+// Returns child PID on success, -1 on error.
+// file_actions and attrp are optional; pass nullptr to use defaults.
+static pid_t safe_spawn(const char* path, char* const argv[],
+                        posix_spawn_file_actions_t* file_actions = nullptr,
+                        posix_spawnattr_t* attrp = nullptr) {
+    pid_t pid = -1;
+    int ret = posix_spawnp(&pid, path, file_actions, attrp, argv, environ);
+    if (ret != 0) {
+        fprintf(stderr, "[child] safe_spawn('%s') failed: %s\n",
+                path, strerror(ret));
+        return -1;
+    }
+    return pid;
+}
+
 static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
                                 int free_ram_mb, const std::string& rpc_endpoints = "",
                                 const std::string& tensor_split = "") {
@@ -847,79 +869,73 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
     fprintf(stderr, "[child] Spawning llama-server: model=%s threads=%d batch=%d ctx=%d port=%d\n",
             model_path.c_str(), threads, batch_threads, context, g_llama_port);
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "[child] Failed to fork llama-server: %s\n", strerror(errno));
-        return false;
+    // Build args vector for variable-length command
+    // Build before spawn since args reference stack strings (port_str, c_str, etc.)
+    std::vector<const char*> cargs;
+    cargs.push_back("llama-server");
+    cargs.push_back("-m"); cargs.push_back(model_path.c_str());
+    cargs.push_back("--host"); cargs.push_back("127.0.0.1");
+    cargs.push_back("--port"); cargs.push_back(port_str.c_str());
+    cargs.push_back("--no-webui");
+    cargs.push_back("-c"); cargs.push_back(c_str.c_str());
+    cargs.push_back("-t"); cargs.push_back(t_str.c_str());
+    cargs.push_back("-tb"); cargs.push_back(tb_str.c_str());
+    // Flash attention: re-enabled — previous hang was likely a version-specific bug.
+    // Flash attention reduces memory usage and improves speed. Safe on all hardware.
+    cargs.push_back("-fa");
+
+    // CPU pinning: on hybrid CPUs (Intel Alder Lake+), pin to P-cores only.
+    // E-cores are 2-3x slower and drag barrier sync, causing massive slowdowns.
+    // On homogeneous CPUs this is a no-op (p_core_range is empty).
+    std::string cpu_range = g_hwinfo.topology.p_core_range;
+    if (!cpu_range.empty()) {
+        cargs.push_back("--cpu-range"); cargs.push_back(cpu_range.c_str());
+        cargs.push_back("--cpu-strict"); cargs.push_back("1");
+        fprintf(stderr, "[child] Hybrid CPU: pinning to P-cores: %s\n", cpu_range.c_str());
     }
 
-    if (pid == 0) {
-        // Redirect llama-server stdout/stderr to a log file.
-        // Without this, llama-server's verbose logs (when --log-disable is off) flood
-        // the serial port buffer (/dev/console), causing all stderr writes to block —
-        // including the supervisor's watchdog kick loop, which then misses kicks and
-        // triggers a softdog reboot. With this redirect, logs go to /tmp/llama-server.log
-        // and can be inspected via fs_read_file without affecting the serial port.
-        int log_fd = open("/tmp/llama-server.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (log_fd >= 0) {
-            dup2(log_fd, STDOUT_FILENO);
-            dup2(log_fd, STDERR_FILENO);
-            close(log_fd);
-        }
+    // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
+    // args.push_back("--log-disable");
 
-        // Child process: build args vector for variable-length command
-        std::vector<const char*> args;
-        args.push_back("llama-server");
-        args.push_back("-m"); args.push_back(model_path.c_str());
-        args.push_back("--host"); args.push_back("127.0.0.1");
-        args.push_back("--port"); args.push_back(port_str.c_str());
-        args.push_back("--no-webui");
-        args.push_back("-c"); args.push_back(c_str.c_str());
-        args.push_back("-t"); args.push_back(t_str.c_str());
-        args.push_back("-tb"); args.push_back(tb_str.c_str());
-        // Flash attention: re-enabled — previous hang was likely a version-specific bug.
-        // Flash attention reduces memory usage and improves speed. Safe on all hardware.
-        args.push_back("-fa");
+    if (!rpc_endpoints.empty()) {
+        cargs.push_back("--rpc");
+        cargs.push_back(rpc_endpoints.c_str());
+        fprintf(stderr, "[child] Using RPC endpoints: %s\n", rpc_endpoints.c_str());
+    }
 
-        // CPU pinning: on hybrid CPUs (Intel Alder Lake+), pin to P-cores only.
-        // E-cores are 2-3x slower and drag barrier sync, causing massive slowdowns.
-        // On homogeneous CPUs this is a no-op (p_core_range is empty).
-        std::string cpu_range = g_hwinfo.topology.p_core_range;
-        if (!cpu_range.empty()) {
-            args.push_back("--cpu-range"); args.push_back(cpu_range.c_str());
-            args.push_back("--cpu-strict"); args.push_back("1");
-            fprintf(stderr, "[child] Hybrid CPU: pinning to P-cores: %s\n", cpu_range.c_str());
-        }
+    if (!tensor_split.empty()) {
+        cargs.push_back("--tensor-split");
+        cargs.push_back(tensor_split.c_str());
+        fprintf(stderr, "[child] Using tensor split: %s\n", tensor_split.c_str());
+    }
 
-        // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
-        // args.push_back("--log-disable");
+    cargs.push_back(nullptr);
 
-        if (!rpc_endpoints.empty()) {
-            args.push_back("--rpc");
-            args.push_back(rpc_endpoints.c_str());
-            fprintf(stderr, "[child] Using RPC endpoints: %s\n", rpc_endpoints.c_str());
-        }
+    // Build non-const argv for posix_spawnp
+    std::vector<char*> argv;
+    for (const char* a : cargs) {
+        argv.push_back(strdup(a));
+    }
 
-        if (!tensor_split.empty()) {
-            args.push_back("--tensor-split");
-            args.push_back(tensor_split.c_str());
-            fprintf(stderr, "[child] Using tensor split: %s\n", tensor_split.c_str());
-        }
+    // Redirect stdout/stderr to a log file using posix_spawn_file_actions.
+    // Without this, llama-server's verbose logs flood the serial port buffer
+    // (/dev/console), causing all stderr writes to block — including the
+    // supervisor's watchdog kick loop, which then misses kicks and triggers
+    // a softdog reboot.
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO,
+        "/tmp/llama-server.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
 
-        args.push_back(nullptr);
+    pid_t pid = safe_spawn("llama-server", argv.data(), &fa);
+    posix_spawn_file_actions_destroy(&fa);
 
-        // Build non-const argv for execv — avoids const_cast UB.
-        // strdup each arg; execv doesn't return on success, and on
-        // failure we free before _exit.
-        std::vector<char*> argv;
-        for (const char* a : args) {
-            argv.push_back(strdup(a));
-        }
-        execv("/opt/llamaste/llama-server", argv.data());
-        // execv failed — free copies before exit
-        for (char* a : argv) free(a);
-        fprintf(stderr, "[child] execv llama-server failed: %s\n", strerror(errno));
-        _exit(127);
+    // Free strdup'd argv
+    for (char* a : argv) free(a);
+
+    if (pid < 0) {
+        return false;
     }
 
     // Parent: store PID
@@ -929,21 +945,18 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
 }
 
 static bool spawn_rpc_server() {
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "[child] Failed to fork llama-rpc-server: %s\n", strerror(errno));
-        return false;
-    }
+    std::string port_str = std::to_string(g_rpc_port);
+    char* const argv[] = {
+        const_cast<char*>("llama-rpc-server"),
+        const_cast<char*>("--host"), const_cast<char*>("0.0.0.0"),
+        const_cast<char*>("--port"), const_cast<char*>(port_str.c_str()),
+        const_cast<char*>("-c"),  // Enable tensor caching for faster model reloads
+        nullptr
+    };
 
-    if (pid == 0) {
-        std::string port_str = std::to_string(g_rpc_port);
-        execl("/opt/llamaste/llama-rpc-server", "llama-rpc-server",
-              "--host", "0.0.0.0",
-              "--port", port_str.c_str(),
-              "-c",  // Enable tensor caching for faster model reloads
-              (char*)nullptr);
-        fprintf(stderr, "[child] execl llama-rpc-server failed: %s\n", strerror(errno));
-        _exit(127);
+    pid_t pid = safe_spawn("llama-rpc-server", argv);
+    if (pid < 0) {
+        return false;
     }
 
     g_rpc_pid.store(pid);
@@ -1041,46 +1054,41 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     }
 
     // Run wpa_supplicant in foreground (NO -B flag).
-    // Previous approach used -B which causes an internal double-fork — if the
-    // daemon child crashed after the parent exited, stderr was lost and we
-    // couldn't diagnose the failure.  Now our fork() handles backgrounding,
-    // and wpa_supplicant's stderr flows to our console/log.
-    //
-    // IMPORTANT: wpa_supplicant may be built with CONFIG_NO_STDOUT_DEBUG which
-    // sends all wpa_printf output to syslog (not stderr).  Since we have no
-    // syslog daemon, use -f to force output to a log file for diagnosis.
+    // Use posix_spawn with POSIX_SPAWN_SETSID to avoid fork() in
+    // multi-threaded context.  The spawn attributes create a new session
+    // (replacing setsid()) and file actions redirect stdio.
     static const char* wpa_log = "/tmp/wpa_supplicant.log";
 
-    pid_t pid = fork();
+    char* const argv[] = {
+        const_cast<char*>("wpa_supplicant"),
+        const_cast<char*>("-dd"),          // max debug verbosity
+        const_cast<char*>("-i"), const_cast<char*>(iface.c_str()),
+        const_cast<char*>("-c"), const_cast<char*>(conf),
+        const_cast<char*>("-D"), const_cast<char*>("nl80211,wext"),
+        const_cast<char*>("-f"), const_cast<char*>(wpa_log),  // log to file
+        nullptr
+    };
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // stdin → /dev/null (avoid blocking on terminal input)
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    // stdout → wpa log file
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, wpa_log,
+        O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    // stderr → same log file (capture dynamic linker errors)
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+
+    pid_t pid = safe_spawn("wpa_supplicant", argv, &fa, &attr);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&attr);
+
     if (pid < 0) {
-        fprintf(stderr, "[child] Failed to fork wpa_supplicant: %s\n",
-                strerror(errno));
         return;
-    }
-    if (pid == 0) {
-        // New session so parent signals don't kill wpa_supplicant
-        setsid();
-        // Close stdin to avoid blocking on terminal input.
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-        // Use -dd for max debug + -f for log file (bypasses CONFIG_NO_STDOUT_DEBUG).
-        // Also redirect stderr to the log file so dynamic linker errors are captured.
-        int logfd = open(wpa_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, STDOUT_FILENO);
-            dup2(logfd, STDERR_FILENO);
-            close(logfd);
-        }
-        execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
-              "-dd",          // max debug verbosity
-              "-i", iface.c_str(),
-              "-c", conf,
-              "-D", "nl80211,wext",
-              "-f", wpa_log,  // log to file (works even with CONFIG_NO_STDOUT_DEBUG)
-              (char*)nullptr);
-        // If execl fails, write to the log file we opened above
-        dprintf(2, "execl wpa_supplicant failed: %s\n", strerror(errno));
-        _exit(127);
     }
 
     // Parent: poll for ctrl socket.  wpa_supplicant creates it during init
@@ -1285,19 +1293,17 @@ static void apply_dhcp_route_and_dns(const std::string& iface) {
 }
 
 static void spawn_dhcpcd(const std::string& iface) {
-    pid_t pid = fork();
+    // Buildroot installs dhcpcd to /sbin/dhcpcd (not /usr/sbin/)
+    char* const argv[] = {
+        const_cast<char*>("dhcpcd"),
+        const_cast<char*>("-b"),            // background — retries until it gets a lease
+        const_cast<char*>(iface.c_str()),
+        nullptr
+    };
+
+    pid_t pid = safe_spawn("dhcpcd", argv);
     if (pid < 0) {
-        fprintf(stderr, "[child] Failed to fork dhcpcd: %s\n", strerror(errno));
         return;
-    }
-    if (pid == 0) {
-        // Buildroot installs dhcpcd to /sbin/dhcpcd (not /usr/sbin/)
-        execl("/sbin/dhcpcd", "dhcpcd",
-              "-b",            // background — retries until it gets a lease
-              iface.c_str(),
-              (char*)nullptr);
-        fprintf(stderr, "[child] execl dhcpcd failed: %s\n", strerror(errno));
-        _exit(127);
     }
     int wstatus;
     waitpid(pid, &wstatus, 0);
@@ -1897,6 +1903,7 @@ static void do_auto_upgrade_check(const ClusterCapacity& cap) {
     g_scheduler.push_notification(std::move(notif));
 
     std::thread([dest, gguf, model, url]() {
+        try {
 #ifdef HAVE_LIBCURL
         std::string part = dest + ".part";
         uint64_t existing = 0;
@@ -1966,6 +1973,13 @@ static void do_auto_upgrade_check(const ClusterCapacity& cap) {
         fprintf(stderr, "[cluster] Auto-upgrade requires libcurl (not built)\n");
 #endif
         g_upgrade_downloading.store(false);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[child] upgrade_download thread exception: %s\n", e.what());
+            g_upgrade_downloading.store(false);
+        } catch (...) {
+            fprintf(stderr, "[child] upgrade_download thread unknown exception\n");
+            g_upgrade_downloading.store(false);
+        }
     }).detach();
 }
 
@@ -2107,8 +2121,15 @@ int child_main(const SupervisorConfig& config) {
             }
 
             // Start monitor thread for crash recovery
-            std::thread monitor(llama_monitor_thread, config.model_path,
-                               config.cpu_cores, free_ram_estimate);
+            std::thread monitor([](std::string mp, int cc, int fr) {
+                try {
+                    llama_monitor_thread(mp, cc, fr);
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[child] llama_monitor_thread exception: %s\n", e.what());
+                } catch (...) {
+                    fprintf(stderr, "[child] llama_monitor_thread unknown exception\n");
+                }
+            }, config.model_path, config.cpu_cores, free_ram_estimate);
             monitor.detach();
         } else {
             fprintf(stderr, "[child] Failed to spawn llama-server, staying in stub mode\n");
@@ -2309,8 +2330,15 @@ int child_main(const SupervisorConfig& config) {
                         // Start a fresh monitor thread for the newly spawned server.
                         // The original monitor from boot exits early (ECHILD) when the
                         // topology callback steals its waitpid, leaving this server unmonitored.
-                        std::thread mon(llama_monitor_thread, model_path,
-                                        g_hwinfo.cpu_cores, free_ram_estimate);
+                        std::thread mon([](std::string mp, int cc, int fr) {
+                                        try {
+                                            llama_monitor_thread(mp, cc, fr);
+                                        } catch (const std::exception& e) {
+                                            fprintf(stderr, "[child] llama_monitor_thread exception: %s\n", e.what());
+                                        } catch (...) {
+                                            fprintf(stderr, "[child] llama_monitor_thread unknown exception\n");
+                                        }
+                                    }, model_path, g_hwinfo.cpu_cores, free_ram_estimate);
                         mon.detach();
                     } else if (!rpc.empty()) {
                         // Timed out waiting for llama-server — likely a dead RPC peer.
@@ -2329,8 +2357,15 @@ int child_main(const SupervisorConfig& config) {
                                 g_model_loaded.store(true);
                                 g_inference_fn = llama_inference;
                                 fprintf(stderr, "[cluster] llama-server started solo (fallback)\n");
-                                std::thread mon(llama_monitor_thread, model_path,
-                                                g_hwinfo.cpu_cores, free_ram_estimate);
+                                std::thread mon([](std::string mp, int cc, int fr) {
+                                                try {
+                                                    llama_monitor_thread(mp, cc, fr);
+                                                } catch (const std::exception& e) {
+                                                    fprintf(stderr, "[child] llama_monitor_thread exception: %s\n", e.what());
+                                                } catch (...) {
+                                                    fprintf(stderr, "[child] llama_monitor_thread unknown exception\n");
+                                                }
+                                            }, model_path, g_hwinfo.cpu_cores, free_ram_estimate);
                                 mon.detach();
                             } else {
                                 fprintf(stderr, "[cluster] llama-server solo fallback also failed\n");
@@ -2419,8 +2454,15 @@ int child_main(const SupervisorConfig& config) {
                             g_inference_fn = llama_inference;
                             fprintf(stderr, "[heartbeat] llama-server recovered (solo)\n");
                             // Fresh monitor thread for the newly started server
-                            std::thread mon(llama_monitor_thread, path,
-                                            g_hwinfo.cpu_cores, free_ram);
+                            std::thread mon([](std::string mp, int cc, int fr) {
+                                try {
+                                    llama_monitor_thread(mp, cc, fr);
+                                } catch (const std::exception& e) {
+                                    fprintf(stderr, "[child] llama_monitor_thread exception: %s\n", e.what());
+                                } catch (...) {
+                                    fprintf(stderr, "[child] llama_monitor_thread unknown exception\n");
+                                }
+                            }, path, g_hwinfo.cpu_cores, free_ram);
                             mon.detach();
                         }
                     }
@@ -2725,6 +2767,7 @@ int child_main(const SupervisorConfig& config) {
                         // Kill stale dhcpcd and respawn fresh
                         // NOTE: system() doesn't work — no /bin/sh (BR2_SYSTEM_BIN_SH_NONE)
                         // Use fork/exec directly
+                        // NOTE: fork() called from multi-threaded context — pre-exec code must be async-signal-safe
                         pid_t kpid = fork();
                         if (kpid == 0) {
                             execl("/sbin/dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
@@ -2765,6 +2808,7 @@ int child_main(const SupervisorConfig& config) {
         // Reload regulatory database — cfg80211 (built-in) tried to load
         // regulatory.db during kernel init before squashfs pivot and cached
         // the failure.  Force a retry now that /lib/firmware/ is available.
+// NOTE: fork() called from multi-threaded context — pre-exec code must be async-signal-safe
         {
             pid_t rpid = fork();
             if (rpid == 0) { execl("/usr/sbin/iw", "iw", "reg", "reload", (char*)nullptr); _exit(127); }
@@ -3040,6 +3084,7 @@ int child_main(const SupervisorConfig& config) {
             // --subsystem-match=input limits scope to only input devices (faster).
             auto run_udevadm_trigger = []() {
                 // First: settle — wait for udevd to process all pending events
+                // NOTE: fork() called from multi-threaded context — pre-exec code must be async-signal-safe
                 {
                     pid_t tpid = fork();
                     if (tpid == 0) {
@@ -3109,6 +3154,7 @@ int child_main(const SupervisorConfig& config) {
             auto try_compositor = [&](const char* label,
                                       std::function<void()> exec_fn,
                                       std::function<void()> post_ready_fn = nullptr) -> int {
+                // NOTE: fork() called from multi-threaded context — pre-exec code must be async-signal-safe
                 pid_t pid = fork();
                 if (pid == 0) {
                     exec_fn();
@@ -3227,6 +3273,7 @@ int child_main(const SupervisorConfig& config) {
                     // COG_PLATFORM_WL_VIEW_FULLSCREEN must be set here — labwc's
                     // /etc/labwc/environment is parsed by labwc for ITS children,
                     // but our cog is fork+exec'd directly, not via labwc.
+                    // NOTE: fork() called from multi-threaded context — pre-exec code must be async-signal-safe
                     pid_t cpid = fork();
                     if (cpid == 0) {
                         setenv("WAYLAND_DISPLAY", "wayland-0", 1);
