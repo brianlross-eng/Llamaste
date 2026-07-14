@@ -311,13 +311,16 @@ bool VoicePipeline::init(const VoiceConfig& config) {
 
 #ifdef HAVE_SHERPA_ONNX
     {
-        // RAM gate: neural TTS needs ~150MB, only load on 3GB+ systems
+        // RAM gate: neural TTS needs ~150MB free, only load when sufficient
         int ram_mb = 0;
 #ifndef _WIN32
         std::ifstream meminfo("/proc/meminfo");
         std::string mline;
         while (std::getline(meminfo, mline)) {
-            if (mline.find("MemTotal") == 0) {
+            // Check MemAvailable (actually free) instead of MemTotal
+            // (system total) — a 4GB system with an LLM loaded has
+            // only ~500MB available; MemTotal always shows 4GB.
+            if (mline.find("MemAvailable") == 0) {
                 size_t colon = mline.find(':');
                 if (colon != std::string::npos)
                     ram_mb = std::atoi(mline.c_str() + colon + 1) / 1024;
