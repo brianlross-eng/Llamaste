@@ -25,9 +25,12 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <random>
 #include <algorithm>
 #include <chrono>
+
+#ifdef __linux__
+#include <sys/random.h>   // getrandom() syscall
+#endif
 
 using json = nlohmann::json;
 
@@ -569,22 +572,51 @@ json McpServer::rpc_error(const json& id, int code, const std::string& message) 
 // Random hex generation
 // ---------------------------------------------------------------------------
 std::string McpServer::gen_random_hex(int bytes) {
-    static std::mt19937_64 rng(
-        std::chrono::steady_clock::now().time_since_epoch().count()
-#ifndef _WIN32
-        ^ ((uint64_t)getpid() << 32)
+    // Use kernel CSPRNG directly — no predictable PRNG fallback.
+    // getrandom() blocks until the entropy pool is seeded.
+    std::vector<unsigned char> buf(bytes);
+#ifdef __linux__
+    ssize_t got = getrandom(buf.data(), (size_t)bytes, 0);
+    if (got == (ssize_t)bytes) {
+        // Fast path: kernel filled the whole buffer.
+    } else {
+        // Fallback to /dev/urandom with partial-read loop.
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) return "";  // can't generate secure bytes
+        size_t total = 0;
+        while (total < (size_t)bytes) {
+            ssize_t n = read(fd, buf.data() + total, (size_t)bytes - total);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                close(fd);
+                return "";
+            }
+            total += (size_t)n;
+        }
+        close(fd);
+    }
+#else
+    // Windows: use CryptGenRandom via /dev/urandom equivalent
+    // (not reachable in current build target; placeholder)
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return "";
+    size_t total = 0;
+    while (total < (size_t)bytes) {
+        ssize_t n = read(fd, buf.data() + total, (size_t)bytes - total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return "";
+        }
+        total += (size_t)n;
+    }
+    close(fd);
 #endif
-    );
-    static std::mutex rng_mu;
 
-    std::lock_guard<std::mutex> lock(rng_mu);
-    std::uniform_int_distribution<uint64_t> dist;
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    for (int i = 0; i < bytes; i += 8) {
-        oss << std::setw(16) << dist(rng);
+    for (int i = 0; i < bytes; i++) {
+        oss << std::setw(2) << (unsigned)buf[i];
     }
-    std::string s = oss.str();
-    s.resize(bytes * 2);  // trim to exact length
-    return s;
+    return oss.str();
 }
