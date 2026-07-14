@@ -1350,6 +1350,9 @@ void init_load_modules() {
     // NVIDIA nouveau (=m)
     load_module_by_path(mod_base, "drivers/gpu/drm/nouveau/nouveau.ko");
 
+    // Intel Xe GPU (=m) — Arc, Battlemage, Lunar Lake
+    load_module_by_path(mod_base, "drivers/gpu/drm/xe/xe.ko");
+
     // --- Phase 2: Run depmod if modules.dep is missing ---
     // eudev's kmod integration needs modules.dep + modules.alias for auto-loading.
     // Buildroot should generate these, but safety check.
