@@ -29,6 +29,10 @@ public:
     // Returns {"error":"unknown tool: <name>"} if tool not found.
     std::string dispatch(const std::string& name, const std::string& args_json) const;
 
+    // Overload with confirmation flag bypass. When confirmed=false, tools that
+    // require confirmation will return an error instead of executing.
+    std::string dispatch(const std::string& name, const std::string& args_json, bool confirmed) const;
+
     // Generate the OpenAI-compatible tools array for the chat completions API.
     // Each entry has type:"function" with function.name, function.description,
     // function.parameters matching the tool's schema.

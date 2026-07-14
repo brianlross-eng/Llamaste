@@ -21,10 +21,21 @@ int ToolRegistry::count() const {
 }
 
 std::string ToolRegistry::dispatch(const std::string& name, const std::string& args_json) const {
+    return dispatch(name, args_json, false);
+}
+
+std::string ToolRegistry::dispatch(const std::string& name, const std::string& args_json, bool confirmed) const {
     auto it = tools_.find(name);
     if (it == tools_.end()) {
         json err;
         err["error"] = "unknown tool: " + name;
+        return err.dump();
+    }
+
+    if (!confirmed && it->second.requires_confirmation) {
+        json err;
+        err["error"] = "confirmation required for tool: " + name;
+        err["confirm_required"] = true;
         return err.dump();
     }
 
