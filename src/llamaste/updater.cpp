@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <climits>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -230,16 +231,27 @@ std::string sha256_file(const std::string& path, uint64_t offset) {
     }
     uint64_t data_size = (uint64_t)file_size - offset;
 
+    // Guard against uint64_t -> size_t truncation in malloc.
+    // If data_size exceeds SIZE_MAX, malloc((size_t)data_size) silently
+    // allocates too little memory, causing heap overflow on fread.
+    if (data_size > SIZE_MAX) {
+        fprintf(stderr, "[updater] file too large for memory: %llu bytes\n",
+                (unsigned long long)data_size);
+        fclose(f);
+        return "";
+    }
+
     // Read payload into memory (OK for squashfs — typically <200MB)
     fseek(f, (long)offset, SEEK_SET);
-    unsigned char* buf = (unsigned char*)malloc((size_t)data_size);
+    size_t alloc_size = (size_t)data_size;
+    unsigned char* buf = (unsigned char*)malloc(alloc_size);
     if (!buf) { fclose(f); return ""; }
 
-    size_t nread = fread(buf, 1, (size_t)data_size, f);
+    size_t nread = fread(buf, 1, alloc_size, f);
     fclose(f);
-    if (nread != (size_t)data_size) { free(buf); return ""; }
+    if (nread != alloc_size) { free(buf); return ""; }
 
-    std::string result = sha256_hex(buf, (size_t)data_size);
+    std::string result = sha256_hex(buf, alloc_size);
     free(buf);
     return result;
 }
