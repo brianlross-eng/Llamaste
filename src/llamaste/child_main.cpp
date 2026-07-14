@@ -3247,9 +3247,11 @@ int child_main(const SupervisorConfig& config) {
     // --- Auth helper: wraps route handlers to require authentication ---
     auto require_auth = [](std::function<void(const httplib::Request&, httplib::Response&)> handler) {
         return [handler](const httplib::Request& req, httplib::Response& res) {
-            // Desktop mode: all requests come from cog on localhost — no auth needed.
-            // Remove this bypass once keyboard input in Wayland is confirmed working.
-            if (g_boot_mode == "desktop") {
+            // Desktop mode: bypass auth only for localhost clients
+            // (e.g., cog embedded browser). Remote LAN clients in desktop
+            // mode must still authenticate.
+            if (g_boot_mode == "desktop" &&
+                (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1")) {
                 handler(req, res);
                 return;
             }
