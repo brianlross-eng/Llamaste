@@ -161,7 +161,19 @@ static void start_stderr_tee() {
 }
 
 static void supervisor_sigchld(int) {
-    g_child_exited = 1;
+    int status;
+    // Reap the child immediately in the signal handler to capture the
+    // exit status before another waitpid() call could harvest the zombie.
+    // This closes the race between async SIGCHLD delivery and the main
+    // loop's waitpid(-1).  WNOHANG prevents blocking the signal handler.
+    if (g_child_pid > 0) {
+        pid_t result = waitpid(g_child_pid, &status, WNOHANG);
+        if (result == g_child_pid) {
+            g_child_exited = 1;
+            g_last_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            g_last_exit_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+        }
+    }
 }
 
 static void supervisor_sigterm(int) {
@@ -1666,12 +1678,19 @@ static void supervisor_preflight_wifi(const SupervisorConfig& config) {
         static time_t dbus_restart_window = 0, bt_restart_window = 0;
 
         while (true) {
+            // If the SIGCHLD handler already reaped the child (race-free
+            // path), skip the blocking wait — g_last_exit_code / signal
+            // are already populated by the handler.
+            if (g_child_exited) break;
+
             pid_t exited = waitpid(-1, &status, 0);
             if (exited < 0) break; // error or no children
 
             if (exited == g_child_pid) {
                 // Main inference child exited — handle below
                 g_child_exited = 1;
+                g_last_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                g_last_exit_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
                 break;
             }
 
@@ -1711,20 +1730,8 @@ static void supervisor_preflight_wifi(const SupervisorConfig& config) {
             // Unknown child — ignore (could be a fire-and-forget process)
         }
 
-        fprintf(stderr, "[supervisor] Child exited (status=%d)\n", status);
-
-        // Record exit reason for console display
-        if (WIFEXITED(status)) {
-            g_last_exit_code = WEXITSTATUS(status);
-            g_last_exit_signal = 0;
-            fprintf(stderr, "[supervisor] Child exited with code %d\n",
-                    WEXITSTATUS(status));
-        } else if (WIFSIGNALED(status)) {
-            g_last_exit_code = -1;
-            g_last_exit_signal = WTERMSIG(status);
-            fprintf(stderr, "[supervisor] Child killed by signal %d\n",
-                    WTERMSIG(status));
-        }
+        fprintf(stderr, "[supervisor] Child exited (code=%d signal=%d)\n",
+                g_last_exit_code, g_last_exit_signal);
 
         if (g_shutdown_requested) break;
 
