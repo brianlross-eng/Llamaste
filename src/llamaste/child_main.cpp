@@ -3228,6 +3228,10 @@ int child_main(const SupervisorConfig& config) {
     // Create HTTP server
     httplib::Server svr;
 
+    // Limit request body size to prevent memory exhaustion DoS.
+    // 10 MB is enough for audio uploads while keeping memory bounded.
+    svr.set_payload_max_length(10 * 1024 * 1024);
+
     // CORS headers for development
     svr.set_default_headers({
         {"Access-Control-Allow-Origin", "*"},
