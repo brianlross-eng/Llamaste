@@ -91,6 +91,30 @@ HardwareInfo detect_hardware() {
                     const char* drv = strrchr(link, '/');
                     hw.gpu_driver = drv ? (drv + 1) : link;
                 }
+
+                // VRAM detection — try AMDGPU path first, then Intel
+                std::string vram_amd = base + "/device/mem_info_vram_total";
+                std::string vram_str = read_sysfs_line(vram_amd.c_str());
+                if (!vram_str.empty()) {
+                    // amdgpu reports VRAM in bytes
+                    unsigned long long vram_bytes = strtoull(vram_str.c_str(), nullptr, 10);
+                    hw.gpu_vram_mb = vram_bytes / (1024 * 1024);
+                    hw.gpu_is_discrete = true;
+                } else {
+                    std::string vram_intel = base + "/device/total_vram";
+                    vram_str = read_sysfs_line(vram_intel.c_str());
+                    if (!vram_str.empty()) {
+                        // Intel reports VRAM in bytes
+                        unsigned long long vram_bytes = strtoull(vram_str.c_str(), nullptr, 10);
+                        hw.gpu_vram_mb = vram_bytes / (1024 * 1024);
+                        hw.gpu_is_discrete = (vendor != "0x8086");
+                        if (vendor == "0x8086") hw.gpu_is_unified = true;
+                    } else {
+                        // No VRAM sysfs — assume shared memory (iGPU/APU like Strix Halo)
+                        hw.gpu_is_unified = true;
+                    }
+                }
+
                 break; // prefer first real GPU
             }
         }
