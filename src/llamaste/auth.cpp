@@ -266,13 +266,20 @@ bool AuthManager::verify_api_key(const std::string& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (api_key_.empty()) return false;
 
-    // Constant-time comparison
-    if (key.size() != api_key_.size()) return false;
-    volatile int diff = 0;
-    for (size_t i = 0; i < key.size(); i++) {
-        diff |= key[i] ^ api_key_[i];
+    // Constant-time comparison: always compare exactly 32 bytes regardless
+    // of actual key length. API keys are "llm-" + 20 hex chars = 24 bytes,
+    // well within the fixed 32-byte window. Short keys are padded with
+    // zero bytes to avoid leaking key length via early return or variable
+    // loop bounds. Uses volatile to block dead-store elimination.
+    static constexpr size_t FIXED_LEN = 32;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < FIXED_LEN; i++) {
+        unsigned char a = (i < key.size())       ? static_cast<unsigned char>(key[i])       : 0;
+        unsigned char b = (i < api_key_.size())  ? static_cast<unsigned char>(api_key_[i])  : 0;
+        diff |= a ^ b;
     }
-    return diff == 0;
+    volatile unsigned char vdiff = diff;
+    return vdiff == 0;
 }
 
 // ---------- Auth check (for routes) ----------
