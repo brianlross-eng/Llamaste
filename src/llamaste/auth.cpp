@@ -311,7 +311,7 @@ std::string AuthManager::extract_bearer_token(const httplib::Request& req) {
     return "";
 }
 
-bool AuthManager::is_authenticated(const httplib::Request& req) const {
+bool AuthManager::is_authenticated(const httplib::Request& req) {
     // If setup not complete, allow everything (first-boot mode)
     if (!setup_complete_) return true;
 
@@ -319,7 +319,7 @@ bool AuthManager::is_authenticated(const httplib::Request& req) const {
     std::string sid = extract_session_cookie(req);
     if (is_valid_session(sid)) {
         // Touch session to extend timeout
-        const_cast<AuthManager*>(this)->touch_session(sid);
+        touch_session(sid);
         return true;
     }
 

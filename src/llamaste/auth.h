@@ -66,7 +66,7 @@ public:
     //   - Setup is not complete (no password set, allow access), OR
     //   - Valid session cookie present, OR
     //   - Valid Bearer API key present
-    bool is_authenticated(const httplib::Request& req) const;
+    bool is_authenticated(const httplib::Request& req);
 
     // Extract session token from request cookie header.
     // Returns empty string if not found.
