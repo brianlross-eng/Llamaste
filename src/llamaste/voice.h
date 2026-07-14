@@ -11,6 +11,7 @@
 #include <functional>
 #include <mutex>
 #include <cstdint>
+#include <memory>
 
 // Voice pipeline state
 enum class VoiceState {
@@ -84,7 +85,7 @@ private:
 
     // Opaque handle (defined in voice.cpp to avoid header deps on whisper/alsa)
     struct Impl;
-    Impl* impl_ = nullptr;
+    std::unique_ptr<Impl> impl_;
 
     void voice_thread_fn();
     void play_audio(const int16_t* samples, size_t count, int sample_rate);

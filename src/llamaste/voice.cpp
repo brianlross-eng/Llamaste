@@ -202,7 +202,7 @@ struct VoicePipeline::Impl {
     bool in_speech = false;    // currently detecting speech
 };
 
-VoicePipeline::VoicePipeline() : impl_(new Impl) {}
+VoicePipeline::VoicePipeline() : impl_(std::make_unique<Impl>()) {}
 
 VoicePipeline::~VoicePipeline() {
     stop();
@@ -230,7 +230,6 @@ VoicePipeline::~VoicePipeline() {
         impl_->sherpa_tts = nullptr;
     }
 #endif
-    delete impl_;
 }
 
 bool VoicePipeline::init(const VoiceConfig& config) {
