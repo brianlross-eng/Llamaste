@@ -247,6 +247,46 @@ void WiFiManager::close_ctrl() {
 }
 
 // ---------------------------------------------------------------------------
+// mask_psk() — redact PSK from wpa_supplicant command strings for logging.
+// Commands like "SET_NETWORK 0 psk \"secret\"" become "...psk \"****\"".
+// ---------------------------------------------------------------------------
+static std::string mask_psk(const std::string& cmd) {
+    std::string result;
+    result.reserve(cmd.size());
+
+    // Look for "psk " or "psk\"" patterns and mask the value that follows
+    for (size_t i = 0; i < cmd.size(); ) {
+        // Check if we're at a PSK keyword
+        if ((i + 4 <= cmd.size()) &&
+            (cmd[i] == 'p' && cmd[i+1] == 's' && cmd[i+2] == 'k') &&
+            (i == 0 || cmd[i-1] == ' ' || cmd[i-1] == '\"')) {
+            size_t j = i + 3;  // past "psk"
+            // Skip whitespace
+            while (j < cmd.size() && cmd[j] == ' ') j++;
+            bool quoted = (j < cmd.size() && cmd[j] == '\"');
+            if (quoted) j++;  // skip opening quote
+            // Mask the value
+            result += "psk ";
+            if (quoted) result += '\"';
+            result += "****";
+            if (quoted) result += '\"';
+            // Skip original chars up to the closing quote or next space
+            if (quoted) {
+                while (j < cmd.size() && cmd[j] != '\"') j++;
+                if (j < cmd.size()) j++;  // skip closing quote
+            } else {
+                while (j < cmd.size() && cmd[j] != ' ') j++;
+            }
+            i = j;
+        } else {
+            result += cmd[i];
+            i++;
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // wpa() — send one command, receive one reply, skip event messages
 // ---------------------------------------------------------------------------
 
@@ -255,7 +295,7 @@ std::string WiFiManager::wpa(const std::string& cmd, int timeout_ms) {
 
     if (send(ctrl_fd_, cmd.c_str(), cmd.size(), 0) < 0) {
         fprintf(stderr, "[wifi] send(%s) failed: %s\n",
-                cmd.c_str(), strerror(errno));
+                mask_psk(cmd).c_str(), strerror(errno));
         close_ctrl();
         return "";
     }
