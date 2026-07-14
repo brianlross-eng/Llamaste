@@ -1362,6 +1362,10 @@ void init_load_modules() {
     // Intel Xe GPU (=m) — Arc, Battlemage, Lunar Lake
     load_module_by_path(mod_base, "drivers/gpu/drm/xe/xe.ko");
 
+    // Intel i915 GPU (=m) — pre-Meteor Lake: Skylake through Raptor Lake
+    // PREEMPT_RT conflict was resolved in kernel 6.18+
+    load_module_by_path(mod_base, "drivers/gpu/drm/i915/i915.ko");
+
     // --- Phase 2: Run depmod if modules.dep is missing ---
     // eudev's kmod integration needs modules.dep + modules.alias for auto-loading.
     // Buildroot should generate these, but safety check.
