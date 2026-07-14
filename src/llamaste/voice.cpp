@@ -103,7 +103,7 @@ bool wav_to_float32(const std::vector<uint8_t>& wav_data,
             data_size = chunk_size;
             break;
         }
-        pos += 8 + chunk_size;
+        pos += 8ULL + chunk_size;  // 64-bit to prevent uint32_t wrap on crafted WAV
         // Align to even boundary
         if (pos % 2 != 0) pos++;
     }
