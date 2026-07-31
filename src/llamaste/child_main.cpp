@@ -1327,7 +1327,7 @@ static void spawn_dhcpcd(const std::string& iface) {
 
     std::vector<char*> argv;
     for (const char* a : cargs) {
-        argv.push_back(strdup(a));
+        argv.push_back(a ? strdup(a) : nullptr);   // was: strdup(a) — strdup(NULL) segfaults on the terminator
     }
 
     pid_t pid = safe_spawn("dhcpcd", argv.data());
@@ -4140,9 +4140,12 @@ int child_main(const SupervisorConfig& config) {
                 res.set_content(err.dump(), "application/json");
                 return;
             }
-            // Force confirm for HTTP API
+            // Force confirm for HTTP API: pass confirmed=true to dispatch. The
+            // 3rd arg is the gate that install.to_disk (requires_confirmation)
+            // checks — NOT the "confirm" field in args — so the 2-arg form here
+            // always returned "confirmation required" and the web installer stalled.
             body["confirm"] = true;
-            std::string result = g_tools.dispatch("install.to_disk", body.dump());
+            std::string result = g_tools.dispatch("install.to_disk", body.dump(), true);
             res.set_content(result, "application/json");
         });
 
