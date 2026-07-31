@@ -179,6 +179,11 @@ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_NOUVEAU=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+# Vulkan drivers (RADV/ANV) — there was a Vulkan loader but no driver behind it,
+# so llama.cpp's Vulkan backend enumerated 0 devices and fell back to CPU.
+# NOTE: NOT lavapipe/SWRAST Vulkan — a software GPU would be slower than CPU.
+BR2_PACKAGE_MESA3D_VULKAN_DRIVER_AMD=y
+BR2_PACKAGE_MESA3D_VULKAN_DRIVER_INTEL=y
 # LLVM required for radeonsi + llvmpipe
 BR2_PACKAGE_LLVM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y

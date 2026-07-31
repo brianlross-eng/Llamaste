@@ -1913,7 +1913,12 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
 // ---------------------------------------------------------------------------
 static void do_auto_upgrade_check(const ClusterCapacity& cap) {
     if (!cap.upgrade_available) return;
-    const ModelInfo* mi = recommend_model((int)cap.usable_ram_mb);
+    // Bootstrap the SMALLEST tier (0.5B) rather than the largest that fits.
+    // recommend_model(usable_ram_mb) returns 32B on a 128GB box, which never fits
+    // the live-ISO tmpfs /data; users upgrade to a bigger model via the model UI.
+    const ModelInfo* table = get_model_table();
+    int n = 0; while (table[n].name) n++;
+    const ModelInfo* mi = (n > 0) ? &table[n - 1] : nullptr;
     if (!mi) return;
     std::string dest = "/data/models/" + std::string(mi->filename);
     if (access(dest.c_str(), R_OK) == 0) return;          // already on disk
