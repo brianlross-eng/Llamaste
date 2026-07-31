@@ -79,15 +79,40 @@ if [ -f "${BINARIES_DIR}/bzImage" ]; then
     cp "${BINARIES_DIR}/bzImage" "${BINARIES_DIR}/efi-part/bzImage"
 fi
 
-# Build initramfs for installed boot (device-agnostic root partition discovery)
+# Build initramfs for installed boot (device-agnostic root partition discovery).
+# The installed grub.cfg carries no root= and relies entirely on this initramfs
+# (initramfs-init.sh scans disks by llamaste.slot), so a missing initramfs =
+# kernel panic ("VFS: Unable to mount root fs") on the installed system.
+# Prefer a pre-built pxe-initramfs tree; otherwise self-build one here.
 PXE_INITRAMFS="${BUILD_DIR}/../../pxe-initramfs"
 if [ -d "${PXE_INITRAMFS}" ]; then
-    echo "[post-image] Building initramfs for installed boot..."
+    echo "[post-image] Building initramfs for installed boot from ${PXE_INITRAMFS}..."
     (cd "${PXE_INITRAMFS}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BINARIES_DIR}/efi-part/initramfs.cpio.gz")
-    echo "[post-image] Initramfs: $(du -h "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" | cut -f1)"
 else
-    echo "[post-image] WARNING: pxe-initramfs not found, installed boot may fail on NVMe"
+    echo "[post-image] pxe-initramfs not found — self-building installed-boot initramfs from initramfs-init.sh..."
+    INIT_SRC="$(dirname "$(readlink -f "$0")")/../../../scripts/initramfs-init.sh"
+    [ -f "${INIT_SRC}" ] || { echo "[post-image] ERROR: ${INIT_SRC} not found"; exit 1; }
+    BUSYBOX="${BUILD_DIR}/busybox"
+    if [ ! -x "${BUSYBOX}" ]; then
+        wget -qO "${BUSYBOX}" "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox" \
+            || { echo "[post-image] ERROR: failed to download busybox"; exit 1; }
+        chmod +x "${BUSYBOX}"
+    fi
+    IRD="$(mktemp -d)"
+    mkdir -p "${IRD}"/{bin,dev,proc,sys,tmp,mnt/root,run}
+    cp "${BUSYBOX}" "${IRD}/bin/busybox"; chmod 755 "${IRD}/bin/busybox"
+    for cmd in sh mount umount mkdir mknod switch_root sleep cat echo ls losetup ip wget udhcpc awk; do
+        ln -sf busybox "${IRD}/bin/${cmd}"
+    done
+    mknod "${IRD}/dev/console" c 5 1
+    mknod "${IRD}/dev/null"    c 1 3
+    mknod "${IRD}/dev/loop0"   b 7 0
+    cp "${INIT_SRC}" "${IRD}/init"; chmod 755 "${IRD}/init"
+    (cd "${IRD}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${BINARIES_DIR}/efi-part/initramfs.cpio.gz")
+    rm -rf "${IRD}"
 fi
+[ -f "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" ] && \
+    echo "[post-image] Initramfs: $(du -h "${BINARIES_DIR}/efi-part/initramfs.cpio.gz" | cut -f1)"
 
 if [ ! -d "${BINARIES_DIR}/efi-part/EFI" ]; then
     echo "[post-image] WARNING: efi-part/EFI not found"
