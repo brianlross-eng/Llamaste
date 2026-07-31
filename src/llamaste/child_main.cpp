@@ -935,10 +935,12 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
 
     cargs.push_back(nullptr);
 
-    // Build non-const argv for posix_spawnp
+    // Build non-const argv for posix_spawnp. cargs is nullptr-terminated;
+    // strdup(nullptr) calls strlen(nullptr) and segfaults, so preserve the
+    // terminator instead of duplicating it.
     std::vector<char*> argv;
     for (const char* a : cargs) {
-        argv.push_back(strdup(a));
+        argv.push_back(a ? strdup(a) : nullptr);
     }
 
     // Redirect stdout/stderr to a log file using posix_spawn_file_actions.
