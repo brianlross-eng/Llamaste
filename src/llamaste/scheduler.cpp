@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <climits>   // LONG_MIN/LONG_MAX
 #include <string>
 #include <vector>
 #include <fstream>

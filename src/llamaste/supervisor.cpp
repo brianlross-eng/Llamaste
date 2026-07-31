@@ -118,6 +118,11 @@ static void log_append(const std::string& line) {
 // Path of the persistent debug log file.  Readable via HTTP once WiFi is up.
 static constexpr const char* DEBUG_LOG_PATH = "/tmp/llamaste-debug.log";
 
+// Stderr tee thread — joinable so we can clean up on shutdown.
+// Declared here (before start_stderr_tee, its first user) — the definition used
+// to live further down, which made it used-before-declared and broke the build.
+static std::thread g_tee_thread;
+
 static void start_stderr_tee() {
     int pipefd[2];
     if (pipe(pipefd) != 0) return;
@@ -946,9 +951,6 @@ static void console_display_thread(const SupervisorConfig& config) {
 // (b) Signal handlers run in the main thread where g_child_exited is checked
 //
 static int g_watchdog_fd = -1;  // set before kicker thread starts
-
-// Stderr tee thread — joinable so we can clean up on shutdown.
-static std::thread g_tee_thread;
 
 static void watchdog_kicker_thread() {
     // Block ALL signals — signals must only run in the main thread.
