@@ -954,7 +954,9 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         "/tmp/llama-server.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
 
-    pid_t pid = safe_spawn("llama-server", argv.data(), &fa);
+    // Full path: llama-server installs to /opt/llamaste (not on PATH in server/
+    // live mode), so posix_spawnp by bare name fails with ENOENT.
+    pid_t pid = safe_spawn("/opt/llamaste/llama-server", argv.data(), &fa);
     posix_spawn_file_actions_destroy(&fa);
 
     // Free strdup'd argv
@@ -980,7 +982,8 @@ static bool spawn_rpc_server() {
         nullptr
     };
 
-    pid_t pid = safe_spawn("llama-rpc-server", argv);
+    // Full path: installed to /opt/llamaste, not on PATH (see spawn_llama_server).
+    pid_t pid = safe_spawn("/opt/llamaste/llama-rpc-server", argv);
     if (pid < 0) {
         return false;
     }
