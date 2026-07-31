@@ -17,9 +17,15 @@ security-hardening pass applied on top of canonical master.
 - **Default to the smallest model tier** in `do_auto_upgrade_check()` so a bare
   live boot with no bundled model still lands on a runnable 0.5B model instead of
   recommending something the box can't load.
-- **GPU / Vulkan enablement**: add AMD + Intel Mesa Vulkan drivers to the
-  defconfig and a "Live (GPU / amdgpu KMS)" GRUB entry (`amdgpu.modeset=1`),
-  keeping the nomodeset Server entry as the default. Targets the EVO-X2 (Strix Halo).
+- **GPU display**: a "Live (GPU / amdgpu KMS)" GRUB entry (`amdgpu.modeset=1`),
+  keeping the nomodeset Server entry as the default. Targets EVO-X2 (Strix Halo)
+  display bring-up.
+- **Hardware Vulkan: not available on this stack (documented limitation).**
+  Buildroot 2024.02.13 / Mesa 24.0.9 packages no AMD (RADV) Vulkan option; the
+  Intel (ANV) driver requires glibc and we build musl; only software Vulkan
+  (lavapipe) is buildable and is intentionally off (slower than CPU). The Vulkan
+  loader ships but exposes 0 devices; llama.cpp's Vulkan backend falls back to
+  CPU. Deferred until a Mesa bump exposes RADV (or a glibc toolchain for ANV).
 
 ### Security hardening (Tier 2)
 - **init.cpp**: never reformat the DATA partition on a failed ext4 resize/mount in

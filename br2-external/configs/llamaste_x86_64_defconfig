@@ -179,11 +179,16 @@ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_NOUVEAU=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
-# Vulkan drivers (RADV/ANV) — there was a Vulkan loader but no driver behind it,
-# so llama.cpp's Vulkan backend enumerated 0 devices and fell back to CPU.
-# NOTE: NOT lavapipe/SWRAST Vulkan — a software GPU would be slower than CPU.
-BR2_PACKAGE_MESA3D_VULKAN_DRIVER_AMD=y
-BR2_PACKAGE_MESA3D_VULKAN_DRIVER_INTEL=y
+# Hardware Vulkan (RADV/ANV) is NOT available on this stack:
+#   - Buildroot 2024.02.13 / Mesa 24.0.9 packages NO AMD (RADV) Vulkan option
+#     (only BROADCOM / INTEL / SWRAST exist in mesa3d Config.in).
+#   - The INTEL (ANV) driver depends on BR2_TOOLCHAIN_USES_GLIBC; we are musl.
+#   - SWRAST (lavapipe) is the only musl-buildable Vulkan ICD, but a software GPU
+#     is slower than CPU for inference, so it is intentionally left off.
+# Result: the Vulkan loader is present but exposes 0 devices; llama.cpp's Vulkan
+# backend cleanly falls back to CPU. GPU *display* on AMD is delivered via the
+# amdgpu KMS GRUB entry (grub-live.cfg), not Vulkan. Hardware Vulkan is deferred
+# until a Mesa bump that exposes RADV (or a glibc toolchain for ANV).
 # LLVM required for radeonsi + llvmpipe
 BR2_PACKAGE_LLVM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
