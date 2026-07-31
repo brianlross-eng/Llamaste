@@ -3013,6 +3013,7 @@ int child_main(const SupervisorConfig& config) {
         }
     }
     } // end outer wifi block
+#endif // _WIN32 (guards the Linux-only WiFi fallback block opened at the #ifndef above)
     } else {
         fprintf(stderr, "[net] Ethernet obtained IP — skipping WiFi fallback\n");
     }
