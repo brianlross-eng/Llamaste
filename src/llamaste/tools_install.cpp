@@ -663,7 +663,10 @@ static int try_format_ext4(const std::string& partition) {
 
     if (pid == 0) {
         // Child process: run mkfs.ext4
-        const char* argv[] = {mkfs_path, "-q", "-L", "DATA", partition.c_str(), nullptr};
+        // -F: force. After writing the image the partition already holds an ext4
+        // fs (labelled DATA); without -F, mkfs.ext4 prompts "Proceed anyway?" and
+        // hangs forever (the installer child has no stdin).
+        const char* argv[] = {mkfs_path, "-F", "-q", "-L", "DATA", partition.c_str(), nullptr};
         execv(mkfs_path, (char* const*)argv);
         _exit(127);  // exec failed
     }

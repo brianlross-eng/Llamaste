@@ -17,7 +17,9 @@ mknod dev/console c 5 1
 mknod dev/null c 1 3
 mknod dev/loop0 b 7 0
 
-cp /mnt/d/Llamaste/scripts/pxe-init.sh "$DIR/init"
+# PXE boot uses pxe-init.sh (HTTP squashfs download). For a live ISO, build-iso.sh
+# builds its own initramfs from initramfs-init.sh instead of using this dir.
+cp "$(dirname "$(readlink -f "$0")")/pxe-init.sh" "$DIR/init"
 chmod 755 "$DIR/init"
 
 echo "Initramfs dir ready at $DIR"
