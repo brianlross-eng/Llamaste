@@ -1,10 +1,28 @@
 # Llamaste Project -- Session Status
 
-**Last updated**: 2026-03-27 (v0.2.2 -- DATA partition resize fix, console version, desktop modals)
+**Last updated**: 2026-07-31 (modern-host build + ISO/installer fixes, see PR #1)
 
 ---
 
 ## Where We Are
+
+### 2026-07-31: Modern-host build + ISO/installer fixes — see [PR #1](https://github.com/brianlross-eng/Llamaste/pull/1)
+
+Buildroot 2024.02.13 now builds on a current host (Ubuntu 26.04 / GCC 15 / CMake 4)
+and the resulting ISO both boots live and installs a self-bootable system. All fixes
+verified end-to-end in QEMU (clean build → live boot → install → installed-disk UEFI boot).
+See **PR #1** (`buildroot-modern-host-fixes` → `master`).
+
+- **Build**: dropped the removed-in-2024.02.13 `ATHEROS_10K_QCA6174` legacy symbol (trips
+  `BR2_LEGACY`); grew A/B SYS-A/SYS-B partitions 384M→1024M for the model-baked squashfs
+  (~704M); `buildroot-build.sh` exports `CMAKE_POLICY_VERSION_MINIMUM=3.5` (CMake 4) and
+  `HOSTCC/HOSTCXX=gcc-13` (GCC 15's C23 default breaks host-m4's gnulib).
+- **ISO boot**: `build-iso.sh` self-builds the live initramfs from `scripts/initramfs-init.sh`
+  when `pxe-initramfs/` is absent (was shipping a non-bootable ISO → `VFS: Unable to mount
+  root fs` panic); fixed the `/mnt/d/...` path in `setup-pxe-initramfs-dir.sh`.
+- **Installer**: `mkfs.ext4 -F` (was hanging forever at 75% "Formatting DATA" — mkfs prompted
+  on the pre-existing fs); `post_image.sh` self-builds the installed-boot initramfs onto the
+  ESP (the installed grub.cfg has no `root=` and needs `initrd /initramfs.cpio.gz`).
 
 ### 2026-03-27: v0.2.2 — DATA Partition Resize Fix, Console Version, Desktop Modals
 
