@@ -506,14 +506,26 @@ std::string WiFiManager::connect(const std::string& ssid,
         }
 
         std::string id = std::to_string(net_id);
-        if (str_trim(wpa("SET_NETWORK " + id + " ssid \"" + ssid + "\"")) != "OK")
+        // SSIDs/PSKs come off the air (attacker-controlled). Send the SSID as a
+        // hex string (unquoted) so a bare " or \ can't break out of the wpa_cli
+        // command; escape " and \ in the PSK and drop control chars.
+        static const char hexd[] = "0123456789abcdef";
+        std::string ssid_hex;
+        for (unsigned char c : ssid) { ssid_hex += hexd[c >> 4]; ssid_hex += hexd[c & 0xf]; }
+        if (str_trim(wpa("SET_NETWORK " + id + " ssid " + ssid_hex)) != "OK")
             return "SET_NETWORK ssid failed";
 
         if (psk.empty()) {
             if (str_trim(wpa("SET_NETWORK " + id + " key_mgmt NONE")) != "OK")
                 return "SET_NETWORK key_mgmt failed";
         } else {
-            if (str_trim(wpa("SET_NETWORK " + id + " psk \"" + psk + "\"")) != "OK")
+            std::string psk_esc;
+            for (char c : psk) {
+                if ((unsigned char)c < 0x20) continue;
+                if (c == '\\' || c == '"') psk_esc += '\\';
+                psk_esc += c;
+            }
+            if (str_trim(wpa("SET_NETWORK " + id + " psk \"" + psk_esc + "\"")) != "OK")
                 return "SET_NETWORK psk failed";
         }
     }

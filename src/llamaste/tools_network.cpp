@@ -437,6 +437,15 @@ static std::string handle_network_set_ip(const std::string& args_json) {
         std::string gw = config["gateway"].get<std::string>();
         if (!gw.empty() && inet_pton(AF_INET, gw.c_str(), &test) != 1)
             return json_error("invalid gateway format");
+
+        // Validate DNS (AF_INET or AF_INET6). It is written verbatim into
+        // /etc/resolv.conf, so an unvalidated value containing a newline would
+        // inject an extra "nameserver ..." line.
+        std::string dns = config["dns"].get<std::string>();
+        struct in6_addr test6;
+        if (inet_pton(AF_INET, dns.c_str(), &test) != 1 &&
+            inet_pton(AF_INET6, dns.c_str(), &test6) != 1)
+            return json_error("invalid DNS address format");
     }
 
     // Save config

@@ -405,54 +405,11 @@ static void grow_ext4_online(const char* part_dev) {
     close(mountfd);
     rlog("[init] ext4 online resize failed: %m (errno=%d)\n", resize_err);
 
-    // Online resize failed (common when ext4 was created on a tiny partition
-    // and needs to grow to a much larger size — insufficient reserved GDT blocks).
-    // Fallback: unmount, mkfs.ext4, remount with a properly-sized filesystem.
-    uint64_t part_mb = part_bytes / (1024 * 1024);
-    uint64_t fs_mb = (current_blocks * fs_block_size) / (1024 * 1024);
-    if (part_mb > fs_mb * 4) {  // Only if partition is >4x the filesystem
-        rlog("[init] ext4: partition %lu MB >> filesystem %lu MB, recreating...\n",
-             (unsigned long)part_mb, (unsigned long)fs_mb);
-
-        if (umount("/data") != 0) {
-            rlog("[init] ext4: cannot unmount /data for mkfs: %m\n");
-            return;
-        }
-
-        // Try mkfs.ext4
-        pid_t pid = fork();
-        if (pid == 0) {
-            execl("/usr/sbin/mkfs.ext4", "mkfs.ext4", "-F", "-q",
-                  "-L", "LLAMASTE-DATA", part_dev, nullptr);
-            execl("/sbin/mkfs.ext4", "mkfs.ext4", "-F", "-q",
-                  "-L", "LLAMASTE-DATA", part_dev, nullptr);
-            _exit(127);
-        } else if (pid > 0) {
-            int status = 0;
-            waitpid(pid, &status, 0);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                rlog("[init] ext4: mkfs.ext4 succeeded on %s\n", part_dev);
-                if (mount(part_dev, "/data", "ext4", 0, nullptr) == 0) {
-                    rlog("[init] ext4: remounted /data (%lu MB)\n", (unsigned long)part_mb);
-                    // Recreate standard directories
-                    const char* dirs[] = {
-                        "/data/models", "/data/llamaste", "/data/llamaste/conversations",
-                        "/data/llamaste/config", "/data/llamaste/logs",
-                        "/data/llamaste/skills", "/data/llamaste/cache", nullptr
-                    };
-                    for (int i = 0; dirs[i]; i++) mkdir(dirs[i], 0755);
-                } else {
-                    rlog("[init] ext4: remount after mkfs failed: %m\n");
-                }
-            } else {
-                rlog("[init] ext4: mkfs.ext4 failed (status=%d), remounting old fs\n", status);
-                mount(part_dev, "/data", "ext4", 0, nullptr);
-            }
-        } else {
-            rlog("[init] ext4: fork failed: %m\n");
-            mount(part_dev, "/data", "ext4", 0, nullptr);
-        }
-    }
+    // Online resize failed. Do NOT reformat as a fallback: grow_ext4_online must
+    // never destroy user data. Leave the existing filesystem mounted as-is — it
+    // simply won't use the extra space until a resize succeeds on a later boot.
+    (void)part_bytes; (void)current_blocks; (void)fs_block_size;
+    rlog("[init] ext4: resize failed; keeping existing filesystem intact (no reformat)\n");
 }
 
 #endif // !_WIN32
@@ -529,7 +486,7 @@ static std::vector<std::string> discover_partitions() {
 
 // Try to mount a partition as ext4 on /data, with GPT grow + ext4 grow.
 // Returns true on success.
-static bool try_mount_data_partition(const char* dev) {
+static bool try_mount_data_partition(const char* dev, bool allow_format) {
 #ifndef _WIN32
     rlog("[init] mount_data: trying %s\n", dev);
 
@@ -586,10 +543,12 @@ static bool try_mount_data_partition(const char* dev) {
             }
         }
 
-        // Last resort: recreate ext4 filesystem with mkfs.ext4
+        // Last resort: recreate ext4 filesystem with mkfs.ext4 — ONLY for the
+        // expected phase-1 DATA slots (allow_format). NEVER for phase-2 scanned
+        // partitions, which include the user's other disks / USB drives.
         // This handles reinstall scenarios where old backup GPT persists
-        // but the ext4 superblock was overwritten by dd
-        {
+        // but the ext4 superblock was overwritten by dd.
+        if (allow_format) {
             const char* mkfs_paths[] = {
                 "/sbin/mkfs.ext4", "/usr/sbin/mkfs.ext4",
                 "/bin/mkfs.ext4", "/usr/bin/mkfs.ext4", nullptr
@@ -654,7 +613,7 @@ bool init_mount_data() {
         struct stat st;
         if (stat(candidates[i], &st) == 0) {
             rlog("[init] mount_data: found %s (mode=0%o)\n", candidates[i], st.st_mode);
-            if (try_mount_data_partition(candidates[i]))
+            if (try_mount_data_partition(candidates[i], /*allow_format=*/true))
                 return true;
         }
     }
@@ -672,7 +631,9 @@ bool init_mount_data() {
         struct stat st;
         if (stat(part.c_str(), &st) == 0) {
             rlog("[init] mount_data: trying discovered %s\n", part.c_str());
-            if (try_mount_data_partition(part.c_str()))
+            // allow_format=false: never mkfs a scanned partition — it may be a
+            // user disk / USB drive, not our DATA slot.
+            if (try_mount_data_partition(part.c_str(), /*allow_format=*/false))
                 return true;
         }
     }

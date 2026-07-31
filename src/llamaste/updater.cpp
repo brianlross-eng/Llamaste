@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -373,7 +374,20 @@ std::string install_update(const std::string& path) {
         return result.dump();
     }
 
-    // Step 4: Verify Ed25519 signature of manifest
+    // Step 4: Verify Ed25519 signature of manifest.
+    // Refuse to run if the build shipped the placeholder (all-zero) public key —
+    // otherwise signature verification is meaningless and updates would be
+    // effectively unauthenticated. Fail closed.
+    {
+        bool key_is_zero = true;
+        for (size_t i = 0; i < sizeof(UPDATE_PUBLIC_KEY); i++) {
+            if (UPDATE_PUBLIC_KEY[i] != 0) { key_is_zero = false; break; }
+        }
+        if (key_is_zero) {
+            result["error"] = "update public key is not configured (placeholder) — refusing to install unauthenticated update";
+            return result.dump();
+        }
+    }
     bool sig_ok = verify_update_signature(
         info.signature, 64,
         (const unsigned char*)info.manifest_json.data(),
@@ -385,12 +399,46 @@ std::string install_update(const std::string& path) {
         return result.dump();
     }
 
-    // Step 5: Verify SHA-256 of payload
-    std::string payload_sha = sha256_file(path, info.payload_offset);
-    if (payload_sha.empty()) {
-        result["error"] = "failed to compute payload SHA-256";
+    // Step 5: Read the payload into memory ONCE, then hash it and (in Step 6)
+    // write the SAME bytes to the partition. Re-reading the file for the write
+    // would be a TOCTOU hole: an attacker who modifies the .update file between
+    // the hash check and the write could land unverified content on the disk.
+    if (info.payload_size == 0) {
+        result["error"] = "update has no payload";
         return result.dump();
     }
+    const uint64_t MAX_PAYLOAD = 1024ULL * 1024 * 1024;  // 1 GiB (partitions are 1024M)
+    if (info.payload_size > MAX_PAYLOAD) {
+        result["error"] = "payload too large: " + std::to_string(info.payload_size) + " bytes";
+        return result.dump();
+    }
+    std::vector<unsigned char> payload;
+    {
+        FILE* pf = fopen(path.c_str(), "rb");
+        if (!pf) {
+            result["error"] = "cannot open .update file to read payload";
+            return result.dump();
+        }
+        if (fseek(pf, (long)info.payload_offset, SEEK_SET) != 0) {
+            fclose(pf);
+            result["error"] = "cannot seek to payload";
+            return result.dump();
+        }
+        try {
+            payload.resize((size_t)info.payload_size);
+        } catch (...) {
+            fclose(pf);
+            result["error"] = "out of memory buffering payload";
+            return result.dump();
+        }
+        size_t nread = fread(payload.data(), 1, payload.size(), pf);
+        fclose(pf);
+        if (nread != payload.size()) {
+            result["error"] = "short read on payload";
+            return result.dump();
+        }
+    }
+    std::string payload_sha = sha256_hex(payload.data(), payload.size());
     if (payload_sha != info.manifest.system.sha256) {
         result["error"] = "payload SHA-256 mismatch: expected " +
                           info.manifest.system.sha256 + " got " + payload_sha;
@@ -486,54 +534,32 @@ std::string install_update(const std::string& path) {
         return result.dump();
     }
 
-    // Open source (payload from .update file)
-    FILE* src = fopen(path.c_str(), "rb");
-    if (!src) {
-        result["error"] = "cannot reopen .update file";
-        return result.dump();
-    }
-    fseek(src, (long)info.payload_offset, SEEK_SET);
-
     // Open target partition
     int tgt_fd = open(block_dev.c_str(), O_WRONLY);
     if (tgt_fd < 0) {
-        fclose(src);
         result["error"] = "cannot open " + block_dev + " for writing";
         return result.dump();
     }
 
-    // Stream write in 4MB chunks
+    // Write the already-verified in-memory payload in 4MB chunks. Writing from
+    // the buffer we just hashed (not a fresh read of the file) is what closes
+    // the TOCTOU window between verification and write.
     const size_t BUF_SIZE = 4 * 1024 * 1024;
-    unsigned char* buf = (unsigned char*)malloc(BUF_SIZE);
-    if (!buf) {
-        close(tgt_fd);
-        fclose(src);
-        result["error"] = "out of memory for write buffer";
-        return result.dump();
-    }
-
     uint64_t written = 0;
     bool write_ok = true;
-    while (written < info.payload_size) {
-        size_t chunk = (size_t)std::min((uint64_t)BUF_SIZE, info.payload_size - written);
-        size_t nread = fread(buf, 1, chunk, src);
-        if (nread != chunk) {
+    while (written < payload.size()) {
+        size_t chunk = (size_t)std::min((uint64_t)BUF_SIZE, (uint64_t)payload.size() - written);
+        ssize_t nw = write(tgt_fd, payload.data() + written, chunk);
+        if (nw < 0 || (size_t)nw != chunk) {
             write_ok = false;
             break;
         }
-        ssize_t nw = write(tgt_fd, buf, nread);
-        if (nw < 0 || (size_t)nw != nread) {
-            write_ok = false;
-            break;
-        }
-        written += nread;
+        written += (uint64_t)nw;
     }
 
     // Sync and close
     fsync(tgt_fd);
     close(tgt_fd);
-    fclose(src);
-    free(buf);
 
     if (!write_ok) {
         result["error"] = "write failed after " + std::to_string(written) + " bytes";

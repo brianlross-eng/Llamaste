@@ -1514,6 +1514,19 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
         fprintf(stderr, "[wifi] console_wifi_setup: cannot write wpa.conf: %m\n");
         return;
     }
+    chmod(conf, 0600);   // contains the PSK — must not be world-readable
+    // Escape for wpa_supplicant quoted strings. SSIDs/PSKs are attacker-supplied
+    // (off the air), so a bare " or \ could break out of the quotes and inject
+    // config directives; drop control chars (incl. newlines).
+    auto wpa_escape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            if ((unsigned char)c < 0x20) continue;
+            if (c == '\\' || c == '"') out += '\\';
+            out += c;
+        }
+        return out;
+    };
     fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
     fprintf(f, "ctrl_interface_group=0\n");
     fprintf(f, "update_config=1\n");
@@ -1525,11 +1538,11 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     fprintf(f, "country=US\n");
     fprintf(f, "\n");
     fprintf(f, "network={\n");
-    fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());
+    fprintf(f, "    ssid=\"%s\"\n", wpa_escape(ssid).c_str());
     if (is_open || psk.empty()) {
         fprintf(f, "    key_mgmt=NONE\n");
     } else {
-        fprintf(f, "    psk=\"%s\"\n", psk.c_str());
+        fprintf(f, "    psk=\"%s\"\n", wpa_escape(psk).c_str());
         fprintf(f, "    key_mgmt=WPA-PSK\n");
     }
     fprintf(f, "}\n");

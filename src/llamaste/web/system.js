@@ -3,6 +3,17 @@
 (function () {
   'use strict';
 
+  // WiFi SSIDs / security strings are broadcast by nearby APs (attacker-controlled).
+  // Escape before interpolating into innerHTML or an attribute to prevent XSS.
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // --- DOM refs ---
   var scheduleCard = null;
   var aboutCard = null;
@@ -418,7 +429,7 @@
       stateEl.style.color = '#00e5a0';
       if (ssidRow) {
         ssidRow.style.display = '';
-        ssidEl.innerHTML = (data.ssid || '') + renderSignalBars(data.signal_dbm);
+        ssidEl.innerHTML = escapeHtml(data.ssid || '') + renderSignalBars(data.signal_dbm);
       }
       if (sigRow && sigVal && data.signal_dbm) {
         var q = dbmToBars(data.signal_dbm);
@@ -506,8 +517,8 @@
       var topLine = document.createElement('div');
       topLine.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:0.9em';
       topLine.innerHTML =
-        '<span title="' + (isOpen ? 'Open network' : net.security) + '" style="font-size:0.85em">' + (isOpen ? '🔓' : '🔒') + '</span>' +
-        '<span style="color:' + (isConn ? '#00e5a0' : '#e0e0e0') + ';font-weight:' + (isConn ? '600' : 'normal') + '">' + net.ssid + '</span>' +
+        '<span title="' + escapeHtml(isOpen ? 'Open network' : net.security) + '" style="font-size:0.85em">' + (isOpen ? '🔓' : '🔒') + '</span>' +
+        '<span style="color:' + (isConn ? '#00e5a0' : '#e0e0e0') + ';font-weight:' + (isConn ? '600' : 'normal') + '">' + escapeHtml(net.ssid) + '</span>' +
         wifiFreqBadge(net.freq_mhz) +
         (isConn  ? '<span style="color:#00e5a0;margin-left:4px;font-size:0.8em">✓ connected</span>' : '') +
         (isSaved && !isConn ? '<span style="color:#7ec8a0;margin-left:4px;font-size:0.75em;opacity:0.7">saved</span>' : '');
@@ -518,7 +529,7 @@
       metaLine.innerHTML =
         renderSignalBars(net.signal_dbm) +
         '<span>' + (net.signal_dbm || '?') + ' dBm</span>' +
-        '<span style="opacity:0.6">' + (net.security || 'OPEN') + '</span>';
+        '<span style="opacity:0.6">' + escapeHtml(net.security || 'OPEN') + '</span>';
 
       row.appendChild(topLine);
       row.appendChild(metaLine);

@@ -390,6 +390,11 @@ std::vector<MdnsResponder::DiscoveredService> MdnsResponder::parse_service_respo
             }
             srv_records.push_back({rr_name, info});
 
+            // Re-anchor to the record boundary like the TXT/A branches. Without
+            // this, a compressed target name leaves `offset` mid-record and
+            // desyncs the parse of every following record (dropped peers).
+            offset = rdata_start + rdlength;
+
         } else if (rr_type == DNS_TYPE_TXT && rdlength > 0) {
             // TXT RDATA: sequence of length-prefixed strings
             std::vector<std::string> kvs;

@@ -458,6 +458,17 @@ static int resize_gpt_data_partition(const std::string& device) {
             header.num_partition_entries, header.partition_entry_size,
             (unsigned long long)header.partition_entry_lba);
 
+    // Bounds-check the (attacker-influenced, on-disk) GPT counts before the
+    // multiply — otherwise num_partition_entries * partition_entry_size (both
+    // uint32) can overflow to a small value and under-allocate the buffer.
+    if (header.num_partition_entries == 0 || header.num_partition_entries > 256 ||
+        header.partition_entry_size < 128 || header.partition_entry_size > 4096) {
+        fprintf(stderr, "[installer] Invalid GPT geometry: %u entries x %u bytes\n",
+                header.num_partition_entries, header.partition_entry_size);
+        close(fd);
+        return -1;
+    }
+
     // Read all partition entries
     uint32_t entries_size = header.num_partition_entries * header.partition_entry_size;
     uint8_t* entries = (uint8_t*)malloc(entries_size);
