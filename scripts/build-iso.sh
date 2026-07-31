@@ -120,11 +120,35 @@ PXE_INITRAMFS="${BUILD_DIR}/pxe-initramfs"
 if [ -d "${PXE_INITRAMFS}" ]; then
     echo "[iso] Building initramfs from ${PXE_INITRAMFS}..."
     (cd "${PXE_INITRAMFS}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${ISO_ROOT}/boot/initramfs.cpio.gz")
-    echo "[iso] Initramfs: $(du -h "${ISO_ROOT}/boot/initramfs.cpio.gz" | cut -f1)"
 else
-    echo "WARNING: pxe-initramfs not found at ${PXE_INITRAMFS}"
-    echo "         ISO live boot with root=LABEL= will fail without initramfs"
+    # No pre-built tree: build a minimal live-boot initramfs here from a static
+    # busybox + the canonical live init (initramfs-init.sh). Self-contained so the
+    # ISO is always bootable. Do NOT rely on setup-pxe-initramfs-dir.sh — it is
+    # PXE-specific (pxe-init.sh) and hard-codes a Windows path. Requires root (mknod).
+    echo "[iso] pxe-initramfs not found — building live initramfs from initramfs-init.sh..."
+    INIT_SRC="$(dirname "$(readlink -f "$0")")/initramfs-init.sh"
+    [ -f "${INIT_SRC}" ] || { echo "ERROR: ${INIT_SRC} not found"; exit 1; }
+    BUSYBOX="${BUILD_DIR}/busybox"
+    if [ ! -x "${BUSYBOX}" ]; then
+        echo "[iso] Fetching static busybox..."
+        wget -qO "${BUSYBOX}" "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox" \
+            || { echo "ERROR: failed to download busybox"; exit 1; }
+        chmod +x "${BUSYBOX}"
+    fi
+    IRD="$(mktemp -d)"
+    mkdir -p "${IRD}"/{bin,dev,proc,sys,tmp,mnt/root,run}
+    cp "${BUSYBOX}" "${IRD}/bin/busybox"; chmod 755 "${IRD}/bin/busybox"
+    for cmd in sh mount umount mkdir mknod switch_root sleep cat echo ls losetup ip wget udhcpc awk; do
+        ln -sf busybox "${IRD}/bin/${cmd}"
+    done
+    mknod "${IRD}/dev/console" c 5 1
+    mknod "${IRD}/dev/null"    c 1 3
+    mknod "${IRD}/dev/loop0"   b 7 0
+    cp "${INIT_SRC}" "${IRD}/init"; chmod 755 "${IRD}/init"
+    (cd "${IRD}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${ISO_ROOT}/boot/initramfs.cpio.gz")
+    rm -rf "${IRD}"
 fi
+echo "[iso] Initramfs: $(du -h "${ISO_ROOT}/boot/initramfs.cpio.gz" | cut -f1)"
 
 # --- Step 3: Copy GRUB config for live boot ---
 echo "[iso] Copying GRUB live config..."
