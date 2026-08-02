@@ -3,6 +3,30 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.8-beta
+
+Out-of-box chat: bundle a default model and actually load it.
+
+### Model loading (fixes "no built-in model / no chat" on real hardware)
+- The runtime only searched `/data/models/`, which is a fresh **tmpfs** (live) or
+  the **DATA partition** (installed) — both mask whatever the squashfs carries
+  under `/data`. So with no external model drive, `/data/models` was empty and the
+  box booted to **stub mode**. (Earlier QEMU passes only "worked" because a model
+  disk was attached, which `scan_usb_for_model()` linked in — a real EVO-X2 with
+  just a flash drive had nothing.)
+- `main.cpp`: `seed_bundled_models()` symlinks `/opt/llamaste/models/*.gguf` into
+  `/data/models/` at boot (both modes). Symlink, not copy — the gguf stays mmap'd
+  from the read-only squashfs instead of eating the 512M live tmpfs.
+- `post_build.sh`: bundle the gguf(s) from `/root/llamaste-build/llm-models/` into
+  the squashfs at `/opt/llamaste/models/` (reproducible; was a fragile manual file).
+- Net: `select_model()`/`available_models()` now find the bundled Qwen2.5-0.5B and
+  load it — chat works with no network and no model drive.
+
+### Note
+- The model *download* UI still flags 32B as "recommended" on big-RAM boxes
+  (`recommend_model` by RAM). That's a "download this for more quality" hint, not
+  the boot default — the boot loads the smallest on-disk model that fits.
+
 ## 0.4.7-beta
 
 Strix Halo (gfx1151) GPU firmware — fixes the amdgpu KMS freeze.

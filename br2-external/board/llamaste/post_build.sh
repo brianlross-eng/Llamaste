@@ -124,6 +124,23 @@ else
     echo "             Download with: wget https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-low.tar.bz2"
 fi
 
+# --- LLM model (Qwen2.5 GGUF) ---
+# Bundle a small default model so the appliance boots with working chat even with
+# no network and no external model drive. Baked into the squashfs at
+# /opt/llamaste/models/ (NOT /data — /data is masked by a tmpfs on live / the DATA
+# partition on install). seed_bundled_models() in main.cpp links it into
+# /data/models/ at boot, where select_model()/available_models() look.
+LLM_MODEL_DIR="/root/llamaste-build/llm-models"
+if [ -d "$LLM_MODEL_DIR" ] && ls "$LLM_MODEL_DIR"/*.gguf >/dev/null 2>&1; then
+    mkdir -p "${TARGET_DIR}/opt/llamaste/models"
+    for m in "$LLM_MODEL_DIR"/*.gguf; do
+        cp "$m" "${TARGET_DIR}/opt/llamaste/models/"
+        echo "[post-build] Bundled LLM model: $(basename "$m")"
+    done
+else
+    echo "[post-build] NOTE: no LLM model at $LLM_MODEL_DIR — image will boot to stub mode"
+fi
+
 # --- labwc desktop config ---
 # The overlay (br2-external/board/llamaste/overlay/) is applied by Buildroot
 # via BR2_ROOTFS_OVERLAY, but we also ensure permissions here.
