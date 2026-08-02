@@ -3,6 +3,28 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.6-beta
+
+EVO-X2 (Strix Halo) bring-up fixes from real-hardware testing.
+
+### Installed boot — fixes silent post-install "hang"
+- `board/llamaste/grub.cfg` (Server + Desktop entries): the installed entries
+  used `quiet` and listed `console=tty0 console=ttyS0,115200`. The **last**
+  `console=` becomes `/dev/console`, so all initramfs/init output went to the
+  **serial port** while `quiet` hid kernel progress — on a machine with only a
+  monitor the screen looked dead after the first `pr_emerg` line (the benign
+  `RDSEED32 is broken` AMD erratum note). Reordered to
+  `console=ttyS0,115200 console=tty0` (screen is primary) and dropped `quiet`.
+- Switched the installed entries from `amdgpu.modeset=0` to **`nomodeset`**,
+  matching the known-good live entry — DRM refuses to bind, which is what the
+  EVO-X2 needs until Strix Halo GPU firmware is bundled (below).
+
+### Known limitation (follow-up)
+- The live "GPU / amdgpu KMS" entry still freezes on Strix Halo: the bundled
+  `linux-firmware` (20240115) predates gfx1151 firmware — missing `gc_11_5_2_*`,
+  `smu_14_0_x`, `vpe_6_1*`, `dcn_3_6`. Kernel 6.18 supports the hardware; the fix
+  is a `linux-firmware` bump. Use the `nomodeset` entries meanwhile.
+
 ## 0.4.5-beta
 
 Cherry-pick batch from `CHERRY-PICK-TO-MASTER.md` — usability, GPU, and a full
