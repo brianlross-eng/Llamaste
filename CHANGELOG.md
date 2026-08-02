@@ -3,6 +3,24 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.7-beta
+
+Strix Halo (gfx1151) GPU firmware — fixes the amdgpu KMS freeze.
+
+### GPU firmware
+- Added the Strix Halo amdgpu firmware to `board/llamaste/overlay/lib/firmware/amdgpu/`
+  (installed into the squashfs via `BR2_ROOTFS_OVERLAY`, since amdgpu is a module
+  loaded post-pivot). The bundled `linux-firmware` (20240115) predates gfx1151, so
+  amdgpu discovered the GPU, fetched the VBIOS, then froze in PSP/GC/SMU bring-up.
+- Fetched from linux-firmware git and verified against the kernel 6.18 source
+  (`IP_VERSION(11, 5, 2)` → prefix `gc_11_5_2`). Added the full family superset to
+  avoid a wrong-minor reflash: `gc_11_5_2_*` (imu/me/mec/mes1/mes_2/pfp/rlc),
+  `psp_14_0_{0..5}_*`, `vpe_6_1_{0,1,3}`, `dcn_3_6_dmcub`, plus `smu_14_0_{2,3}`
+  (already present). VCN/JPEG (`vcn_4_0_5`, JPEG bundled) and `sdma_6_0_3` were
+  already present.
+- The live "GPU / amdgpu KMS" entry (`amdgpu.modeset=1`) is the test vehicle;
+  installed entries stay `nomodeset` until KMS is confirmed on the EVO-X2.
+
 ## 0.4.6-beta
 
 EVO-X2 (Strix Halo) bring-up fixes from real-hardware testing.
