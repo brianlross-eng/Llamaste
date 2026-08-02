@@ -3,6 +3,24 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.9-beta
+
+Fix chat breaking on tool-calling models (`[Inference error: … type must be string, but is null]`).
+
+### Inference
+- `build_chatml_prompt()` used `msg.value("content", "")`, but nlohmann's
+  `.value(key, default)` **throws `type_error.302` when the key exists and is
+  `null`** — it only substitutes the default for *missing* keys. When a model
+  emits a tool call, the agent stores the assistant turn with `content: null`
+  (`msg_obj["content"] = nullptr`), so the *next* round's prompt build threw and
+  the whole turn failed with `[Inference error: …]`. With 67 tools in the prompt,
+  a capable model (e.g. Qwen2.5-7B) tool-calls constantly, so it looked like chat
+  failed on everything.
+- Added a null-safe `jstr()` helper (missing/null → default, string → value,
+  object → serialized JSON) and used it for role/content/tool-call name+arguments
+  in `build_chatml_prompt`. The semantic-cache readers were already safe (they
+  only read system/user content, never the null assistant content).
+
 ## 0.4.8-beta
 
 Out-of-box chat: bundle a default model and actually load it.

@@ -519,19 +519,32 @@ static std::string make_inference_error(const std::string& message) {
 
 // Build a chatml-formatted prompt string from OpenAI-format messages.
 // Used by llama_inference to bypass the broken chat template in llama-server.
+// nlohmann json::value(key, default) THROWS type_error.302 when the key EXISTS
+// but is null — it only substitutes the default for MISSING keys. Assistant
+// tool-call messages carry "content": null (see msg_obj["content"] = nullptr),
+// so a plain .value("content","") throws mid-conversation. jstr() is null-safe:
+// missing/null -> default, string -> the string, object/other (e.g. a tool_call
+// "arguments" object) -> its serialized JSON.
+static std::string jstr(const json& o, const char* key, const char* dflt) {
+    auto it = o.find(key);
+    if (it == o.end() || it->is_null()) return dflt;
+    if (it->is_string()) return it->get<std::string>();
+    return it->dump();
+}
+
 static std::string build_chatml_prompt(const json& messages) {
     std::string prompt;
     for (const auto& msg : messages) {
-        const std::string role = msg.value("role", "user");
-        std::string content = msg.value("content", "");
+        const std::string role = jstr(msg, "role", "user");
+        std::string content = jstr(msg, "content", "");
 
         // Assistant messages with tool_calls: serialize tool calls as Qwen2.5 native format
         if (role == "assistant" && content.empty() && msg.contains("tool_calls")
             && msg["tool_calls"].is_array()) {
             for (const auto& tc : msg["tool_calls"]) {
                 if (tc.contains("function")) {
-                    std::string name = tc["function"].value("name", "");
-                    std::string args = tc["function"].value("arguments", "{}");
+                    std::string name = jstr(tc["function"], "name", "");
+                    std::string args = jstr(tc["function"], "arguments", "{}");
                     content += "<tool_call>\n{\"name\": \"" + name +
                                "\", \"arguments\": " + args + "}\n</tool_call>\n";
                 }
@@ -540,7 +553,7 @@ static std::string build_chatml_prompt(const json& messages) {
 
         // Tool result messages → "tool" role (Qwen2.5 training format)
         if (role == "tool") {
-            std::string name = msg.value("name", "");
+            std::string name = jstr(msg, "name", "");
             prompt += "<|im_start|>tool\n";
             if (!name.empty()) {
                 prompt += "{\"name\": \"" + name + "\", \"content\": " +
