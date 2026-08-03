@@ -556,6 +556,54 @@ static bool is_local_ip(const std::string& ip) {
     return found;
 }
 
+// Multi-node clustering is OPT-IN and GROUPED. /data/llamaste/cluster-enabled
+// holds a cluster ID (any name/token):
+//   - absent            -> standalone: neither advertises nor discovers the
+//                          cluster service. A single appliance must NOT auto-
+//                          recruit other machines it hears on the LAN — doing so
+//                          unprompted is hostile (a home-lab user's other LLM
+//                          nodes would get silently hijacked).
+//   - present but empty -> "default" cluster.
+//   - present with text -> that cluster ID. A node ONLY peers with others
+//                          advertising the SAME id, so multiple independent
+//                          Llamaste clusters can coexist on one LAN without
+//                          merging.
+static std::string cluster_id() {
+    std::ifstream f("/data/llamaste/cluster-enabled");
+    if (!f) return "";                       // absent -> standalone
+    std::string id;
+    std::getline(f, id);
+    size_t a = id.find_first_not_of(" \t\r\n");
+    size_t b = id.find_last_not_of(" \t\r\n");
+    id = (a == std::string::npos) ? "" : id.substr(a, b - a + 1);
+    return id.empty() ? "default" : id;      // present-but-empty -> default cluster
+}
+static bool cluster_enabled() { return !cluster_id().empty(); }
+
+// True only if a Vulkan ICD (driver manifest) is actually installed. NOTE:
+// g_hwinfo.gpu_detected means a DISPLAY device (amdgpu KMS), NOT a compute
+// backend. This image ships the Vulkan *loader* but no ICD (RADV isn't buildable
+// on musl/BR-2024.02), so the loader enumerates 0 devices. Passing -ngl to
+// offload layers onto that non-existent GPU makes llama-server crash-loop
+// (intermittent stub/503). Gate GPU offload on a real ICD so it stays on CPU
+// until a build actually ships a working Vulkan driver.
+static bool has_vulkan_icd() {
+    const char* dirs[] = {"/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", nullptr};
+    for (int i = 0; dirs[i]; i++) {
+        DIR* d = opendir(dirs[i]);
+        if (!d) continue;
+        bool found = false;
+        struct dirent* e;
+        while ((e = readdir(d)) != nullptr) {
+            std::string n = e->d_name;
+            if (n.size() > 5 && n.substr(n.size() - 5) == ".json") { found = true; break; }
+        }
+        closedir(d);
+        if (found) return true;
+    }
+    return false;
+}
+
 static std::string build_chatml_prompt(const json& messages) {
     std::string prompt;
     for (const auto& msg : messages) {
@@ -938,8 +986,12 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
     // On unified memory (iGPU/APU/Strix Halo), offload all layers since
     // GPU and CPU share the same physical RAM.  On discrete GPUs, compute
     // how many layers fit in VRAM (~1.2GB/layer for 7B Q4_K_M).
+    // Only offload to the GPU if a Vulkan compute DRIVER (ICD) is actually
+    // present. gpu_detected alone = display device; offloading -ngl onto a GPU
+    // with no Vulkan backend behind the loader crash-loops llama-server.
     std::string ngl_str;
-    if (g_hwinfo.gpu_detected && g_hwinfo.gpu_vram_mb > 0) {
+    bool gpu_compute = has_vulkan_icd();
+    if (gpu_compute && g_hwinfo.gpu_detected && g_hwinfo.gpu_vram_mb > 0) {
         // Discrete GPU: layers = VRAM / 1.2GB per layer, minimum 1
         int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
         ngl_str = std::to_string(ngl);
@@ -947,12 +999,16 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
         fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
                 ngl, g_hwinfo.gpu_name.c_str(),
                 (unsigned long long)g_hwinfo.gpu_vram_mb);
-    } else if (g_hwinfo.gpu_detected && g_hwinfo.gpu_is_unified) {
+    } else if (gpu_compute && g_hwinfo.gpu_detected && g_hwinfo.gpu_is_unified) {
         // Unified memory (iGPU/APU): offload everything — GPU shares RAM
         ngl_str = "99";
         cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
         fprintf(stderr, "[child] GPU offload: all layers to %s (unified memory)\n",
                 g_hwinfo.gpu_name.c_str());
+    } else if (g_hwinfo.gpu_detected) {
+        // Display GPU but no Vulkan compute driver — stay on CPU (stable).
+        fprintf(stderr, "[child] GPU %s present but no Vulkan ICD (compute driver) "
+                "-- running on CPU (no -ngl offload)\n", g_hwinfo.gpu_name.c_str());
     }
 
     // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
@@ -2310,8 +2366,9 @@ int child_main(const SupervisorConfig& config) {
         rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
         rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
         rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
+        rpc_txt.push_back("cluster=" + cluster_id());
 
-        mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+        if (cluster_enabled()) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
         // Set self info for election
         PeerInfo self;
@@ -2324,13 +2381,16 @@ int child_main(const SupervisorConfig& config) {
         g_cluster.set_self_info(self);
 
         // Discover peers (2-second window)
-        auto discovered = mdns.discover_services("_llama-rpc._tcp", 2000);
+        auto discovered = cluster_enabled()
+            ? mdns.discover_services("_llama-rpc._tcp", 2000)
+            : std::vector<MdnsResponder::DiscoveredService>{};
         for (const auto& d : discovered) {
             if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
             PeerInfo peer;
             peer.hostname = d.hostname;
             peer.ip = d.ip;
             peer.rpc_port = d.port;
+            std::string peer_cluster;
             // Parse TXT records
             for (const auto& t : d.txt) {
                 auto eq = t.find('=');
@@ -2340,7 +2400,18 @@ int child_main(const SupervisorConfig& config) {
                 if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
                 else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
                 else if (key == "model") peer.model = val;
+                else if (key == "cluster") peer_cluster = val;
             }
+            // Reject anything without valid llamaste TXT records (ram=). A real
+            // node always advertises its RAM; ram_mb==0 means this isn't a
+            // llamaste peer (defense-in-depth vs. mis-parsed foreign mDNS).
+            if (peer.ram_mb == 0) {
+                fprintf(stderr, "[cluster] Ignoring non-llamaste mDNS responder %s (%s)\n",
+                        peer.hostname.c_str(), peer.ip.c_str());
+                continue;
+            }
+            // Only join peers in the SAME cluster group (see cluster_id()).
+            if (peer_cluster != cluster_id()) continue;
             g_cluster.add_peer(peer);
             fprintf(stderr, "[cluster] Discovered peer: %s (%s) ram=%uMB cores=%u\n",
                     peer.hostname.c_str(), peer.ip.c_str(), peer.ram_mb, peer.cpu_cores);
@@ -2480,13 +2551,16 @@ int child_main(const SupervisorConfig& config) {
             rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
             rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
             rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
-            mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+            rpc_txt.push_back("cluster=" + cluster_id());
+            if (cluster_enabled()) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
             // Expire peers not seen in 90 seconds
             g_cluster.expire_peers(90);
 
             // Re-discover peers
-            auto discovered = mdns.discover_services("_llama-rpc._tcp", 1000);
+            auto discovered = cluster_enabled()
+                ? mdns.discover_services("_llama-rpc._tcp", 1000)
+                : std::vector<MdnsResponder::DiscoveredService>{};
             auto self = g_cluster.self_info();
             for (const auto& d : discovered) {
                 if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
@@ -2494,6 +2568,7 @@ int child_main(const SupervisorConfig& config) {
                 peer.hostname = d.hostname;
                 peer.ip = d.ip;
                 peer.rpc_port = d.port;
+                std::string peer_cluster;
                 for (const auto& t : d.txt) {
                     auto eq = t.find('=');
                     if (eq == std::string::npos) continue;
@@ -2502,7 +2577,10 @@ int child_main(const SupervisorConfig& config) {
                     if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
                     else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
                     else if (key == "model") peer.model = val;
+                    else if (key == "cluster") peer_cluster = val;
                 }
+                if (peer.ram_mb == 0) continue;   // not a valid llamaste node
+                if (peer_cluster != cluster_id()) continue;  // different cluster group
                 g_cluster.add_peer(peer);
             }
 

@@ -3,6 +3,35 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.12-beta
+
+Fixes the real cause of the intermittent stub/503 — the box was auto-clustering
+with random LAN machines. Clustering is now opt-in and grouped.
+
+### Cluster safety (this is the root cause of the instability)
+- **mDNS discovery was grabbing foreign services.** `parse_service_responses()`
+  collected every SRV record arriving on the shared 224.0.0.251 multicast socket
+  without checking the owner name matched the queried `_llama-rpc._tcp`. So a
+  Windows desktop's unrelated announcements (`_oculusal_sp._tcp`, `_dosvc._tcp`)
+  were mis-added as bogus "peers" (garbage port, empty TXT → `ram_mb:0`). The box
+  then spawned llama-server with `--rpc` to them, which timed out and wedged/
+  respawned the engine — the intermittent stub, the "llama server timing out"
+  console line, and the flapping `node_count`. Now filters SRV records to the
+  queried service type. (Found live: peer `BRossAsusROG @ .101` was the user's
+  desktop's Oculus streaming service, nothing to do with Llamaste.)
+- **Reject junk peers** — discovery drops any node without a valid `ram=` TXT.
+- **Clustering is now OPT-IN and GROUPED.** A box auto-recruiting other machines'
+  LLMs off the LAN unprompted is hostile (reads like a worm). It only advertises/
+  discovers the cluster service when `/data/llamaste/cluster-enabled` exists; the
+  file's contents are a **cluster ID**, and a node only peers with others sharing
+  the same ID — so multiple independent Llamaste clusters can coexist on one LAN.
+  **Default: standalone.**
+
+### Inference (cosmetic)
+- Gate `-ngl` GPU offload on an actual Vulkan ICD, not just a detected *display*
+  GPU. This build has no ICD, so it stays on CPU exactly as before (llama.cpp was
+  already offloading 0/29 layers) — this just stops passing a no-op flag.
+
 ## 0.4.11-beta
 
 Fixes the phantom-peer 503, the false "no model" alert, and the copy button.

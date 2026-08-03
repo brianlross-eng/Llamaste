@@ -314,7 +314,7 @@ std::vector<uint8_t> MdnsResponder::build_ptr_query(const std::string& service_f
 // ---------------------------------------------------------------------------
 
 std::vector<MdnsResponder::DiscoveredService> MdnsResponder::parse_service_responses(
-        const uint8_t* pkt, size_t pkt_len) {
+        const uint8_t* pkt, size_t pkt_len, const std::string& service_type) {
     std::vector<DiscoveredService> results;
 
     if (pkt_len < 12) return results;
@@ -388,7 +388,15 @@ std::vector<MdnsResponder::DiscoveredService> MdnsResponder::parse_service_respo
             } else {
                 info.target = target;
             }
-            srv_records.push_back({rr_name, info});
+            // Only keep SRV records that actually belong to the queried service.
+            // The shared mDNS socket also receives OTHER hosts' announcements
+            // (e.g. a Windows desktop's _oculusal_sp._tcp / _dosvc._tcp); without
+            // this filter their SRV records get mis-added as bogus llama-rpc peers
+            // (garbage port, empty TXT -> ram_mb 0), which makes this node try to
+            // RPC-cluster with random LAN machines and time out.
+            if (service_type.empty() || rr_name.find(service_type) != std::string::npos) {
+                srv_records.push_back({rr_name, info});
+            }
 
             // Re-anchor to the record boundary like the TXT/A branches. Without
             // this, a compressed target name leaves `offset` mid-record and
@@ -507,7 +515,7 @@ std::vector<MdnsResponder::DiscoveredService> MdnsResponder::discover_services(
         uint16_t flags = get_u16(buf + 2);
         if (!(flags & DNS_FLAG_RESPONSE)) continue;
 
-        auto peers = parse_service_responses(buf, pkt_len);
+        auto peers = parse_service_responses(buf, pkt_len, service_type);
         for (auto& peer : peers) {
             results.push_back(std::move(peer));
         }
