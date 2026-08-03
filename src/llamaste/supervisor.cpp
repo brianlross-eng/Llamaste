@@ -1386,10 +1386,20 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
     auto wstr = [&](const char* s) { write(tty, s, strlen(s)); };
 
-    auto read_line = [&](bool echo_chars, size_t max_len) -> std::string {
+    // first_timeout_s > 0: wait at most that long for the FIRST keystroke before
+    // giving up (returns "") so an unattended boot doesn't block. Once the user
+    // starts typing, reads block normally.
+    auto read_line = [&](bool echo_chars, size_t max_len, int first_timeout_s = 0) -> std::string {
         std::string s;
         char c;
-        while (read(tty, &c, 1) == 1) {
+        bool first = true;
+        while (true) {
+            if (first && first_timeout_s > 0) {
+                struct pollfd pfd; pfd.fd = tty; pfd.events = POLLIN; pfd.revents = 0;
+                if (poll(&pfd, 1, first_timeout_s * 1000) <= 0) return s;  // no input in time
+            }
+            first = false;
+            if (read(tty, &c, 1) != 1) break;
             if (c == '\r' || c == '\n') { wstr("\r\n"); break; }
             if (c == 3 || c == 4)      { s.clear(); wstr("\r\n"); break; }
             if ((c == 127 || c == '\b') && !s.empty()) {
@@ -1401,6 +1411,22 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
             }
         }
         return s;
+    };
+
+    // Timed single keypress with a visible countdown. Returns false if the window
+    // elapses with no key — lets the caller auto-skip WiFi setup on a headless box.
+    auto wait_key = [&](int timeout_s, char* out) -> bool {
+        for (int rem = timeout_s; rem > 0; rem--) {
+            char cd[72];
+            snprintf(cd, sizeof(cd), "\r  (auto-continuing in %2ds -- press a key to choose)  ", rem);
+            wstr(cd);
+            struct pollfd pfd; pfd.fd = tty; pfd.events = POLLIN; pfd.revents = 0;
+            if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
+                if (read(tty, out, 1) == 1) { wstr("\r\n"); return true; }
+            }
+        }
+        wstr("\r\n");
+        return false;
     };
 
     // --- Phase 1: Scan ---
@@ -1443,9 +1469,15 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
                  "  Enter number (1-%d), or Enter to type manually: ", n_show);
         wstr(prompt);
 
-        // Single keypress — no Enter needed
+        // Single keypress with a boot-safety timeout — an unattended/headless box
+        // must not block forever at this prompt. Auto-skip WiFi setup on no input.
         char c = 0;
-        read(tty, &c, 1);
+        if (!wait_key(25, &c)) {
+            wstr("  No input -- skipping WiFi setup, continuing boot.\r\n");
+            tcsetattr(tty, TCSAFLUSH, &old_tio);
+            close(tty);
+            return;
+        }
         write(tty, &c, 1);
         wstr("\r\n");
 
@@ -1471,8 +1503,8 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
     // --- Phase 3: Manual SSID entry if not picked from list ---
     if (ssid.empty()) {
-        wstr("  SSID     : ");
-        ssid = read_line(true, 63);
+        wstr("  SSID (25s timeout): ");
+        ssid = read_line(true, 63, 25);   // auto-skip if nobody types
     }
 
     if (ssid.empty()) {

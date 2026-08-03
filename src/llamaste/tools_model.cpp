@@ -8,9 +8,11 @@
 #include "json.hpp"
 #include <string>
 #include <cstring>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <map>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -69,6 +71,27 @@ static std::string human_size(uint64_t bytes) {
 // ---------------------------------------------------------------------------
 // model.list — list available models in /data/models/
 // ---------------------------------------------------------------------------
+// A GGUF sharded model is stored as <base>-NNNNN-of-MMMMM.gguf (5-digit index
+// and total). llama.cpp loads the whole set when handed shard 1, so the model
+// list should present ONE logical model per group (using shard 1 as the loadable
+// file), not each shard as a separate pick. Returns true + base/idx/total on match.
+static bool parse_shard(const std::string& name, std::string& base, int& idx, int& total) {
+    if (name.size() < 5 || name.substr(name.size() - 5) != ".gguf") return false;
+    std::string stem = name.substr(0, name.size() - 5);      // strip ".gguf"
+    size_t of = stem.rfind("-of-");
+    if (of == std::string::npos || of < 6) return false;
+    if (stem[of - 6] != '-') return false;                   // need "-NNNNN-of-"
+    std::string cur = stem.substr(of - 5, 5);
+    std::string tot = stem.substr(of + 4);
+    if (tot.size() != 5) return false;
+    for (char c : cur) if (!std::isdigit((unsigned char)c)) return false;
+    for (char c : tot) if (!std::isdigit((unsigned char)c)) return false;
+    base = stem.substr(0, of - 6);
+    idx = std::stoi(cur);
+    total = std::stoi(tot);
+    return true;
+}
+
 static std::string handle_model_list(const std::string& args_json) {
     (void)args_json;
 
@@ -81,13 +104,17 @@ static std::string handle_model_list(const std::string& args_json) {
         return result.dump();
     }
 
-    json models = json::array();
+    struct Single { std::string name; uint64_t size = 0; int64_t mtime = 0; bool is_gguf = false; };
+    struct Group  { std::string shard1; uint64_t size = 0; int total = 0; int present = 0;
+                    int64_t mtime = 0; std::string quant; bool have1 = false; };
+    std::vector<Single> singles;
+    std::map<std::string, Group> groups;   // base name -> aggregate (ordered for stable output)
+
     struct dirent* ent;
     while ((ent = readdir(dir)) != nullptr) {
         std::string name = ent->d_name;
         if (name == "." || name == "..") continue;
 
-        // Only show GGUF files (the standard llama.cpp format)
         bool is_gguf = false;
         if (name.size() > 5) {
             std::string ext = name.substr(name.size() - 5);
@@ -97,27 +124,59 @@ static std::string handle_model_list(const std::string& args_json) {
 
         std::string full_path = std::string(MODELS_DIR) + "/" + name;
         struct stat st;
+        uint64_t sz = 0; int64_t mt = 0;
+        if (stat(full_path.c_str(), &st) == 0) { sz = (uint64_t)st.st_size; mt = (int64_t)st.st_mtime; }
 
-        json model;
-        model["filename"] = name;
-        model["path"] = full_path;
-
-        if (stat(full_path.c_str(), &st) == 0) {
-            model["size_bytes"] = static_cast<uint64_t>(st.st_size);
-            model["size_human"] = human_size(static_cast<uint64_t>(st.st_size));
-            model["modified"] = static_cast<int64_t>(st.st_mtime);
-        }
-
-        if (is_gguf) {
-            model["format"] = "GGUF";
-            model["quantization"] = detect_quantization(name);
+        std::string base; int idx = 0, total = 0;
+        if (is_gguf && parse_shard(name, base, idx, total)) {
+            Group& g = groups[base];
+            g.total = total;
+            g.present++;
+            g.size += sz;
+            if (mt > g.mtime) g.mtime = mt;
+            if (idx == 1) { g.shard1 = name; g.have1 = true; g.quant = detect_quantization(name); }
         } else {
-            model["format"] = "other";
+            singles.push_back({name, sz, mt, is_gguf});
         }
-
-        models.push_back(model);
     }
     closedir(dir);
+
+    json models = json::array();
+
+    // One entry per sharded model group (shard 1 is the loadable file).
+    for (auto& kv : groups) {
+        Group& g = kv.second;
+        json m;
+        m["filename"]      = g.have1 ? g.shard1 : (kv.first + ".gguf");
+        m["display_name"]  = kv.first;
+        m["path"]          = std::string(MODELS_DIR) + "/" + m["filename"].get<std::string>();
+        m["size_bytes"]    = g.size;
+        m["size_human"]    = human_size(g.size);
+        m["modified"]      = g.mtime;
+        m["format"]        = "GGUF";
+        m["quantization"]  = g.quant.empty() ? detect_quantization(kv.first) : g.quant;
+        m["sharded"]       = true;
+        m["shard_count"]   = g.total;
+        m["shards_present"]= g.present;
+        m["complete"]      = (g.present == g.total && g.have1);   // all parts + shard-1 present
+        models.push_back(m);
+    }
+
+    // Non-sharded files (single-file models + any non-gguf).
+    for (auto& s : singles) {
+        json m;
+        m["filename"]     = s.name;
+        m["display_name"] = s.name;
+        m["path"]         = std::string(MODELS_DIR) + "/" + s.name;
+        m["size_bytes"]   = s.size;
+        m["size_human"]   = human_size(s.size);
+        m["modified"]     = s.mtime;
+        if (s.is_gguf) { m["format"] = "GGUF"; m["quantization"] = detect_quantization(s.name); }
+        else           { m["format"] = "other"; }
+        m["sharded"]      = false;
+        m["complete"]     = true;
+        models.push_back(m);
+    }
 
     json result;
     result["models"] = models;
