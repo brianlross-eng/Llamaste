@@ -196,24 +196,30 @@
       copyBtn.addEventListener('click', function () {
         var key = (document.getElementById('mcp-api-key') || {}).textContent || '';
         if (!key || key === '—' || key === '(unavailable)') return;
-        navigator.clipboard.writeText(key).then(function () {
+        function flash() {
           var orig = copyBtn.textContent;
           copyBtn.textContent = 'Copied!';
           setTimeout(function () { copyBtn.textContent = orig; }, 1500);
-        }).catch(function () {
-          // Fallback for HTTP (no clipboard API)
+        }
+        // Fallback for non-secure origins (plain http:// on a LAN IP) where the
+        // async Clipboard API is unavailable. execCommand still works there.
+        function fallback() {
           var ta = document.createElement('textarea');
           ta.value = key;
           ta.style.position = 'fixed';
           ta.style.opacity = '0';
           document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
+          ta.focus(); ta.select();
+          try { document.execCommand('copy'); flash(); } catch (e) { /* give up quietly */ }
           document.body.removeChild(ta);
-          var orig = copyBtn.textContent;
-          copyBtn.textContent = 'Copied!';
-          setTimeout(function () { copyBtn.textContent = orig; }, 1500);
-        });
+        }
+        // navigator.clipboard is UNDEFINED on http:// origins — reading .writeText
+        // would throw synchronously (before any .catch), so guard existence first.
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(key).then(flash).catch(fallback);
+        } else {
+          fallback();
+        }
       });
     }
 

@@ -193,7 +193,11 @@
     dashUptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
 
     // --- Dashboard tab: Model card ---
-    dashModel.textContent = data.model || 'No model loaded';
+    // Show the logical model name: collapse a sharded filename
+    // (…-00001-of-00002.gguf) to its base so it matches the picker (#12).
+    var modelName = data.model || '';
+    modelName = modelName.replace(/-\d{5}-of-\d{5}(\.gguf)?$/i, '');
+    dashModel.textContent = modelName || 'No model loaded';
     dashSpeed.textContent = tokPerSec + ' tok/s';
 
     // Download button always visible — user may want to download additional models

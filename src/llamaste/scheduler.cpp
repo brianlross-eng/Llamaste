@@ -638,9 +638,21 @@ void Scheduler::check_alerts() {
             std::lock_guard<std::mutex> lock(mutex_);
             model_fn = model_check_fn_;
         }
+        // Track how long the model has been CONTINUOUSLY unloaded. A model swap
+        // (e.g. 0.5B -> 7B) briefly unloads it; without this, the periodic check
+        // could land in that window and fire a false "No AI Model Loaded" alert
+        // that then never clears. Only alert after a sustained unload.
+        if (model_fn) {
+            if (model_fn()) model_unloaded_since_ = 0;               // loaded -> reset
+            else if (model_unloaded_since_ == 0) model_unloaded_since_ = now;  // just went down
+        }
+        const time_t MODEL_UNLOADED_GRACE = 120;   // must be down this long before alerting
+
         if (model_fn && start_time_ > 0 &&
             (now - start_time_) >= 60 &&          // 60s startup grace
             !model_fn() &&                          // model not loaded
+            model_unloaded_since_ > 0 &&
+            (now - model_unloaded_since_) >= MODEL_UNLOADED_GRACE &&  // sustained, not a swap
             (now - last_model_alert_) >= 1800) {   // at most every 30 min
 
             last_model_alert_ = now;

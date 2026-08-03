@@ -66,6 +66,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <sys/ioctl.h>
@@ -530,6 +531,29 @@ static std::string jstr(const json& o, const char* key, const char* dflt) {
     if (it == o.end() || it->is_null()) return dflt;
     if (it->is_string()) return it->get<std::string>();
     return it->dump();
+}
+
+// True if `ip` belongs to ANY local interface. mDNS peer discovery must reject
+// self-echo: a multi-homed box (eth + wifi) announces on every interface and
+// then discovers its OWN announcement via a different interface's IP, which
+// doesn't match a single self.ip — so it adds ITSELF as a phantom peer. That
+// fake 2-node cluster makes it spawn llama-server with an RPC/tensor-split to a
+// "peer" that is really itself, which wedges the engine (persistent HTTP 503).
+static bool is_local_ip(const std::string& ip) {
+    if (ip.empty()) return false;
+    struct ifaddrs* ifa = nullptr;
+    if (getifaddrs(&ifa) != 0) return false;
+    bool found = false;
+    for (struct ifaddrs* p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        char buf[INET_ADDRSTRLEN];
+        auto* sin = (struct sockaddr_in*)p->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)) && ip == buf) {
+            found = true; break;
+        }
+    }
+    freeifaddrs(ifa);
+    return found;
 }
 
 static std::string build_chatml_prompt(const json& messages) {
@@ -2302,7 +2326,7 @@ int child_main(const SupervisorConfig& config) {
         // Discover peers (2-second window)
         auto discovered = mdns.discover_services("_llama-rpc._tcp", 2000);
         for (const auto& d : discovered) {
-            if (d.ip == self.ip) continue;  // skip self
+            if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
             PeerInfo peer;
             peer.hostname = d.hostname;
             peer.ip = d.ip;
@@ -2465,7 +2489,7 @@ int child_main(const SupervisorConfig& config) {
             auto discovered = mdns.discover_services("_llama-rpc._tcp", 1000);
             auto self = g_cluster.self_info();
             for (const auto& d : discovered) {
-                if (d.ip == self.ip) continue;
+                if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
                 PeerInfo peer;
                 peer.hostname = d.hostname;
                 peer.ip = d.ip;

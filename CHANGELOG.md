@@ -3,6 +3,61 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.4.11-beta
+
+Fixes the phantom-peer 503, the false "no model" alert, and the copy button.
+
+### Cluster / inference stability (the 503 root cause)
+- `child_main.cpp`: mDNS peer discovery filtered self by a single `self.ip`, so a
+  **multi-homed box** (eth + WiFi) discovered its OWN announcement via the other
+  interface's IP and added **itself as a phantom peer**. That fake 2-node cluster
+  made it spawn llama-server with an RPC/tensor-split to a "peer" that was really
+  itself → llama-server wedged → persistent **HTTP 503** on every chat request.
+  Added `is_local_ip()` (checks all interfaces via `getifaddrs`) and reject any
+  discovered peer whose IP is local. Observed live on the EVO-X2 (`node_count:2`,
+  `tensor_split:"21923,1"`).
+
+### Notifications
+- `scheduler.cpp`: the "No AI Model Loaded" alert fired whenever the periodic
+  check caught the brief model-swap window (e.g. 0.5B→7B) and then never cleared.
+  Debounced: only alerts after the model has been **continuously** unloaded for
+  ≥120 s, so a swap/reload can't trip it.
+
+### Web UI
+- `system.js`: the API-key **Copy button** did nothing on `http://` LAN origins —
+  `navigator.clipboard` is `undefined` there, so `.writeText` threw synchronously
+  before the `.catch` fallback. Guard for it and fall back to `execCommand`.
+- `dashboard.js`: the "current model" card now shows the logical model name
+  (strips the `-00001-of-00002` shard suffix) to match the picker (#12).
+
+### Known (not code)
+- On the EVO-X2, Linux sees only ~31 GB of 128 GB — a Strix Halo **BIOS UMA/GPU
+  memory carveout**, not a detection bug. Reduce the iGPU memory allocation in
+  BIOS to reclaim RAM for CPU models. Remaining hardening (health should reflect
+  real llama-server readiness; respawn a wedged llama-server) tracked in #14.
+
+## 0.4.10-beta
+
+Console WiFi-setup no longer blocks an unattended boot; model picker groups shards.
+
+### Console WiFi setup (supervisor.cpp)
+- The network-selection keypress and manual-SSID entry did blocking `read()`s on
+  tty1, so a headless box sat at the WiFi prompt until someone pressed a key
+  (the "hit Enter twice every boot" annoyance). Added `poll()`-based timeouts: a
+  25s countdown on the network-selection keypress that auto-skips setup and
+  continues boot if nobody responds, and a 25s first-keystroke timeout on manual
+  SSID entry. Once you start typing, input reads normally. wpa.conf escaping +
+  chmod 0600 preserved.
+
+### Model picker (tools_model.cpp `model.list`, web/dashboard.js)
+- The download/select list showed every raw `.gguf` file, including each shard of
+  a sharded model (`…-00001-of-00002.gguf`, `…-00002-of-00002.gguf`) as separate
+  picks — a user had to know to choose shard 1, and choosing shard 2 silently
+  failed. `model.list` now groups shards into one logical model (keyed on the base
+  name, using shard 1 as the loadable file), sums their size, and reports
+  `sharded`/`shard_count`/`shards_present`/`complete`. The UI shows the logical
+  name and disables any model that's missing shards.
+
 ## 0.4.9-beta
 
 Fix chat breaking on tool-calling models (`[Inference error: … type must be string, but is null]`).
