@@ -3,6 +3,45 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.0-beta
+
+**GPU inference on the AMD Strix Halo iGPU (Radeon 8060S, gfx1151) via Vulkan/RADV.**
+Until now llama-server ran CPU-only (`offloaded 0/N layers`) because the image
+shipped no Vulkan compute driver. This build ships Mesa RADV so llama.cpp's Vulkan
+backend can offload onto the iGPU instead of the CPU.
+
+### What ships now
+- **Mesa RADV Vulkan driver** for gfx1151: `libvulkan_radeon.so` +
+  `/usr/share/vulkan/icd.d/radeon_icd..json` (ICD → `/usr/lib/libvulkan_radeon.so`),
+  the Vulkan loader (`libvulkan.so.1`), and `libdrm-amdgpu`. `llama-server` links
+  `libvulkan.so.1` and its Vulkan shaders were compiled with `glslc`
+  (coopmat/coopmat2/dot/bfloat16 support — the cooperative-matrix path gfx1151 wants).
+- **llama-server GPU flags corrected**: `GGML_VULKAN=ON` (our AMD path), `GGML_HIP=OFF`
+  (HIP/ROCm needs a cross-compiler Buildroot doesn't have and hard-fails the build;
+  AMD GPUs use the Vulkan backend), `GGML_BLAS=OFF` (no OpenBLAS in the image; the
+  BLAS backend symbol was undefined at link — CPU accel still comes from `GGML_NATIVE`).
+
+### Build base moved to Buildroot 2025.02.16 + Mesa 24.2.8
+gfx1151 RADV needs Mesa ≥ 24.1, so the GPU image is built from a newer Buildroot tree
+(kept separate from the stable 0.4.12 tree). This surfaced a long tail of base-version
+build fixes, now captured in `br2-external` (and the build host's Buildroot tree):
+- **defconfig**: enable `MESA3D_VULKAN_DRIVER_AMD`, `LIBDRM_AMDGPU`, `MESA3D_LLVM`;
+  disable the Intel `iris`/`crocus` gallium drivers (they force `intel-clc`, which
+  hard-requires an unpackaged `libclc`; iris never worked here anyway — pixman fallback).
+- **onnxruntime.mk**: its CMake FetchContent can't download (Buildroot host-cmake has no
+  TLS) — a post-extract hook rewrites `deps.txt` to a local dep cache; protos are
+  generated with a matching protobuf-3.21.12 `protoc` (Buildroot's 29.3 emits a
+  `runtime_version.h` include absent in the v21.12 runtime); GCC-13 `-Werror`s downgraded.
+- **sherpa-onnx.mk**: post-extract hook pre-downloads its FetchContent deps (nested ones
+  auto-resolved via `/tmp`); `-include cstdint` for GCC-13's dropped transitive include.
+- Build-host Buildroot tree: Mesa bumped 24.0.9→24.2.8 with rebased/pruned patches,
+  `libwpe` forced shared-only (static loader failed `--no-undefined`), WebKit
+  `SPEECH_SYNTHESIS=OFF` (a VIDEO-off build bug), and a kernel-headers `AT_LEAST`
+  mapping so the custom 6.18 kernel passes the (loose) headers check.
+
+Note: **0.4.12-beta remains the stable line.** This is an experimental GPU build; verify
+boot + actual GPU offload on the EVO-X2 before promoting.
+
 ## 0.4.12-beta
 
 Fixes the real cause of the intermittent stub/503 — the box was auto-clustering

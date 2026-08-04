@@ -170,27 +170,30 @@ BR2_PACKAGE_LABWC=y
 # Wayland protocol libraries
 BR2_PACKAGE_WAYLAND=y
 BR2_PACKAGE_WAYLAND_PROTOCOLS=y
-# Mesa 3D: GPU drivers for Intel, AMD, NVIDIA + software fallback
+# Mesa 3D: GPU drivers for AMD, NVIDIA + software fallback
 BR2_PACKAGE_MESA3D=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SWRAST=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS=y
+# Intel iris/crocus gallium drivers disabled: they force intel-clc, which
+# hard-requires libclc (an LLVM subproject Buildroot doesn't package) and aborts
+# the Mesa configure. Iris never worked on our hardware anyway (desktop falls back
+# to the pixman software renderer), so dropping it costs nothing for the AMD target.
+# BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS is not set
+# BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS is not set
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_NOUVEAU=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
-# Hardware Vulkan (RADV/ANV) is NOT available on this stack:
-#   - Buildroot 2024.02.13 / Mesa 24.0.9 packages NO AMD (RADV) Vulkan option
-#     (only BROADCOM / INTEL / SWRAST exist in mesa3d Config.in).
-#   - The INTEL (ANV) driver depends on BR2_TOOLCHAIN_USES_GLIBC; we are musl.
-#   - SWRAST (lavapipe) is the only musl-buildable Vulkan ICD, but a software GPU
-#     is slower than CPU for inference, so it is intentionally left off.
-# Result: the Vulkan loader is present but exposes 0 devices; llama.cpp's Vulkan
-# backend cleanly falls back to CPU. GPU *display* on AMD is delivered via the
-# amdgpu KMS GRUB entry (grub-live.cfg), not Vulkan. Hardware Vulkan is deferred
-# until a Mesa bump that exposes RADV (or a glibc toolchain for ANV).
-# LLVM required for radeonsi + llvmpipe
+# Hardware Vulkan for AMD via RADV. gfx1151 (Strix Halo) landed in Mesa 24.1, so
+# mesa3d is bumped to 24.2.8 (see br2-external mesa3d overrides) which exposes the
+# AMD Vulkan driver. RADV uses its own ACO compiler (no LLVM needed) and needs
+# libdrm's amdgpu winsys. This gives llama.cpp's Vulkan backend a real GPU to
+# offload onto instead of falling back to CPU.
+BR2_PACKAGE_MESA3D_VULKAN_DRIVER_AMD=y
+BR2_PACKAGE_LIBDRM_AMDGPU=y
+# LLVM required for radeonsi + llvmpipe; MESA3D_LLVM links Mesa to it and, via the
+# RADV option's conditional select, pulls in the LLVM AMDGPU target too.
 BR2_PACKAGE_LLVM=y
+BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 # Graphics support libraries

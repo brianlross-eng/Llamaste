@@ -18,6 +18,7 @@ SHERPA_ONNX_DEPENDENCIES = onnxruntime
 
 SHERPA_ONNX_CONF_OPTS = \
 	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_CXX_FLAGS="-include cstdint" \
 	-DBUILD_SHARED_LIBS=ON \
 	-DSHERPA_ONNX_ENABLE_TTS=ON \
 	-DSHERPA_ONNX_ENABLE_C_API=ON \
@@ -50,5 +51,17 @@ define SHERPA_ONNX_INSTALL_TARGET_CMDS
 	find $(@D)/buildroot-build/lib -name "*.so*" -exec \
 		cp -a {} $(TARGET_DIR)/usr/lib/ \;
 endef
+
+# sherpa-onnx pulls its build deps (kaldi-native-fbank, kaldifst, openfst, espeak-ng,
+# piper-phonemize, ...) via CMake FetchContent over https. Buildroot's host-cmake has no
+# TLS, so those downloads fail. Each dep cmake checks possible_file_locations (including
+# $(CMAKE_SOURCE_DIR)/<file>) before downloading, so pre-download the needed tarballs into
+# the source dir with the exact expected filenames. Runs at post-extract so dircleans work.
+define SHERPA_ONNX_REWIRE_DEPS
+	/root/llamaste-build/sherpa-deps-fetch.sh $(@D) \
+		kaldi-native-fbank kaldi-decoder kaldifst openfst simple-sentencepiece \
+		json espeak-ng-for-piper piper-phonemize cargs
+endef
+SHERPA_ONNX_POST_EXTRACT_HOOKS += SHERPA_ONNX_REWIRE_DEPS
 
 $(eval $(cmake-package))

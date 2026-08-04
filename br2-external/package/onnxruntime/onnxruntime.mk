@@ -21,7 +21,7 @@ ONNXRUNTIME_SUBDIR = cmake
 
 ONNXRUNTIME_CONF_OPTS = \
 	-DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_CXX_FLAGS="-Wno-error=array-bounds" \
+	-DCMAKE_CXX_FLAGS="$(ONNXRUNTIME_WNOERROR)" \
 	-DBUILD_SHARED_LIBS=OFF \
 	-Donnxruntime_BUILD_SHARED_LIB=ON \
 	-Donnxruntime_BUILD_UNIT_TESTS=OFF \
@@ -52,8 +52,41 @@ ONNXRUNTIME_CONF_OPTS = \
 	-Donnxruntime_USE_CANN=OFF \
 	-Donnxruntime_USE_JSEP=OFF \
 	-Donnxruntime_USE_WEBGPU=OFF \
-	-DONNX_CUSTOM_PROTOC_EXECUTABLE=$(HOST_DIR)/bin/protoc \
+	-DONNX_CUSTOM_PROTOC_EXECUTABLE=$(ONNXRUNTIME_PROTOC) \
 	-DFETCHCONTENT_QUIET=OFF
+
+# onnxruntime v1.23.2 fetches and links protobuf v21.12 (libprotoc 3.21.12). It uses
+# ONNX_CUSTOM_PROTOC_EXECUTABLE to generate its .pb.{h,cc}. Buildroot 2025.02's host
+# protoc is 29.3, which emits `#include "google/protobuf/runtime_version.h"` -- a header
+# that does not exist in the v21.12 runtime -> fatal compile error. So generate the
+# protos with a matching 3.21.12 protoc (self-contained copy from the 2024.02 tree).
+ONNXRUNTIME_PROTOC = /root/ort-protoc-3.21.12/bin/protoc
+
+# onnxruntime appends a blanket `-Werror` at the END of each target's flags, so a blanket
+# `-Wno-error` in CMAKE_CXX_FLAGS (which lands earlier) is overridden. A *specific*
+# `-Wno-error=<warn>` overrides a later blanket `-Werror` regardless of order (GCC
+# semantics), so enumerate the warnings GCC 13 (Buildroot 2025.02) newly promotes to
+# errors in onnxruntime that older toolchains did not. Extra entries are harmless no-ops.
+ONNXRUNTIME_WNOERROR = \
+	-Wno-error=array-bounds \
+	-Wno-error=range-loop-construct \
+	-Wno-error=dangling-reference \
+	-Wno-error=maybe-uninitialized \
+	-Wno-error=restrict \
+	-Wno-error=stringop-overflow \
+	-Wno-error=stringop-overread \
+	-Wno-error=nonnull \
+	-Wno-error=attributes
+
+# Buildroot's host-cmake bundles a curl without TLS, so onnxruntime's CMake FetchContent
+# https downloads fail ("Protocol https not supported"). deps.txt accepts local file
+# paths, so pre-download the needed deps to a persistent cache and rewrite deps.txt to
+# point at them (SHA1s preserved and re-verified). Runs at post-extract so dircleans work.
+define ONNXRUNTIME_REWIRE_DEPS
+	/root/llamaste-build/ort-deps-fetch.sh $(@D)/cmake/deps.txt /root/llamaste-build/ort-deps-cache \
+		abseil_cpp protobuf onnx flatbuffers re2 date safeint mp11 microsoft_gsl pytorch_cpuinfo json eigen
+endef
+ONNXRUNTIME_POST_EXTRACT_HOOKS += ONNXRUNTIME_REWIRE_DEPS
 
 # Install shared lib and headers to staging for sherpa-onnx
 # Note: ONNXRUNTIME_SUBDIR=cmake means build dir is $(@D)/cmake/buildroot-build/
