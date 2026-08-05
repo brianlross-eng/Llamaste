@@ -3,6 +3,22 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.5-beta
+
+Boot-menu cleanup on both the live ISO and installed system. Now that GPU vs no-GPU
+is no longer a menu choice (KMS is on by default and vendor-neutral, GPU decided at
+runtime), the menus are trimmed to 3 entries each:
+
+- **Llamaste Server** (default) — KMS on, vendor-neutral
+- **Llamaste Desktop** — KMS on
+- **Llamaste Server (safe mode - no GPU)** — the one `nomodeset` recovery fallback
+
+- Live ISO menu (`grub-live.cfg`): the old default was `nomodeset` (booted the USB to
+  CPU), plus a separate "GPU / amdgpu KMS" entry and AMD-specific `amdgpu.modeset=0/1`
+  flags. Removed — the default now boots to the GPU with no vendor flags, so there's no
+  "pick the GPU entry" dance. Dropped the redundant Diagnostic and per-mode safe entries.
+- Installed menu (`grub.cfg`): dropped the redundant "Desktop (safe mode)" entry.
+
 ## 0.5.4-beta
 
 Hotfix: the 0.5.3 installed `grub.cfg` contained a non-ASCII character (an em-dash in
