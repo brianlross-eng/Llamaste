@@ -783,6 +783,55 @@
   setInterval(updateClusterCard, 10000);
   updateClusterCard();
 
+  // --- Cluster group name (join/leave) ---
+  function loadClusterConfig() {
+    var input = document.getElementById('cluster-group-input');
+    if (!input) return;
+    fetch('/llamaste/cluster/config', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (document.activeElement !== input) input.value = data.group || '';
+      })
+      .catch(function () {});
+  }
+  var clusterSaveBtn = document.getElementById('cluster-group-save');
+  if (clusterSaveBtn && !clusterSaveBtn._wired) {
+    clusterSaveBtn._wired = true;
+    clusterSaveBtn.addEventListener('click', function () {
+      var input = document.getElementById('cluster-group-input');
+      var note = document.getElementById('cluster-group-note');
+      var group = (input.value || '').trim();
+      clusterSaveBtn.disabled = true;
+      fetch('/llamaste/cluster/config', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group: group })
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          clusterSaveBtn.disabled = false;
+          note.style.display = 'block';
+          if (!res.ok) {
+            note.textContent = 'Error: ' + (res.d.error || 'could not save');
+            note.style.color = '#ff6b6b';
+            return;
+          }
+          note.textContent = res.d.enabled
+            ? 'Joined cluster group "' + res.d.group + '". Reboot to apply.'
+            : 'Set to standalone. Reboot to apply.';
+          note.style.color = '#cc9';
+        })
+        .catch(function (err) {
+          clusterSaveBtn.disabled = false;
+          note.style.display = 'block';
+          note.textContent = 'Save failed: ' + err.message;
+          note.style.color = '#ff6b6b';
+        });
+    });
+  }
+  loadClusterConfig();
+
   // --- Public refresh function ---
   // Called when switching to the System tab.
   // Fetches fresh data and updates the sections that dashboard.js does NOT handle.

@@ -402,6 +402,19 @@
               A larger model could fit this cluster. Download it to <code>/data/models/</code>.
             </div>
             <div id="cluster-peer-list" style="margin-top:8px"></div>
+            <div class="dash-row" style="margin-top:10px;align-items:center">
+              <span class="label">Group</span>
+              <span style="display:flex;gap:6px;flex:1;justify-content:flex-end">
+                <input id="cluster-group-input" type="text" maxlength="63" placeholder="(standalone)"
+                       style="flex:1;max-width:160px;background:#1a1a1a;border:1px solid #444;color:#ddd;border-radius:4px;padding:3px 6px;font-size:0.85em">
+                <button id="cluster-group-save" class="btn" style="padding:3px 10px;font-size:0.85em">Save</button>
+              </span>
+            </div>
+            <div id="cluster-group-note" style="display:none;margin-top:6px;font-size:0.82em"></div>
+            <div style="margin-top:4px;font-size:0.78em;color:#888">
+              Set the same group name on 2+ boxes to link them into one cluster. Blank = standalone
+              (no network discovery). Reboot to apply.
+            </div>
           </div>
 
           <div class="system-card">

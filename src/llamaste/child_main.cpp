@@ -2487,16 +2487,27 @@ int child_main(const SupervisorConfig& config) {
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
 
-    // Start mDNS responder so the box is discoverable as "llamaste.local"
-    // Also advertise the MCP server as _mcp._tcp so DNS-SD clients can find it.
+    // mDNS is fully opt-in ("option B"): a standalone box stays silent -- no socket opened,
+    // no llamaste.local, no service advertising, nothing listening on 224.0.0.251. It comes
+    // up only once a cluster group name is set in /data/llamaste/cluster-enabled (via the
+    // install field or the web UI). Changing the group name applies on the next boot, so
+    // mdns_started is fixed for the process lifetime -- the heartbeat below gates every
+    // responder call on it (never cluster_enabled(), which could flip mid-run from a UI edit
+    // and make us touch a responder that was never started).
     MdnsResponder mdns;
-    if (mdns.start("llamaste")) {
-        fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s)\n",
-                MdnsResponder::get_local_ip().c_str());
-        mdns.advertise_service("_mcp._tcp", 80,
-            {"path=/mcp", "version=2025-03-26", "auth=bearer"});
+    bool mdns_started = false;
+    if (cluster_enabled()) {
+        if (mdns.start("llamaste")) {
+            mdns_started = true;
+            fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s), cluster group '%s'\n",
+                    MdnsResponder::get_local_ip().c_str(), cluster_id().c_str());
+            mdns.advertise_service("_mcp._tcp", 80,
+                {"path=/mcp", "version=2025-03-26", "auth=bearer"});
+        } else {
+            fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
+        }
     } else {
-        fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
+        fprintf(stderr, "[child] mDNS: standalone (no cluster group) -- staying silent\n");
     }
 
     // --- Mesh clustering ---
@@ -2509,7 +2520,7 @@ int child_main(const SupervisorConfig& config) {
         rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
         rpc_txt.push_back("cluster=" + cluster_id());
 
-        if (cluster_enabled()) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+        if (mdns_started) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
         // Set self info for election
         PeerInfo self;
@@ -2522,7 +2533,7 @@ int child_main(const SupervisorConfig& config) {
         g_cluster.set_self_info(self);
 
         // Discover peers (2-second window)
-        auto discovered = cluster_enabled()
+        auto discovered = mdns_started
             ? mdns.discover_services("_llama-rpc._tcp", 2000)
             : std::vector<MdnsResponder::DiscoveredService>{};
         for (const auto& d : discovered) {
@@ -2680,7 +2691,7 @@ int child_main(const SupervisorConfig& config) {
     }
 
     // Cluster heartbeat: re-announce service and expire stale peers every 30s
-    std::thread cluster_heartbeat_thread([&mdns]() {
+    std::thread cluster_heartbeat_thread([&mdns, mdns_started]() {
         try {
         while (g_running.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -2693,13 +2704,13 @@ int child_main(const SupervisorConfig& config) {
             rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
             rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
             rpc_txt.push_back("cluster=" + cluster_id());
-            if (cluster_enabled()) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+            if (mdns_started) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
             // Expire peers not seen in 90 seconds
             g_cluster.expire_peers(90);
 
             // Re-discover peers
-            auto discovered = cluster_enabled()
+            auto discovered = mdns_started
                 ? mdns.discover_services("_llama-rpc._tcp", 1000)
                 : std::vector<MdnsResponder::DiscoveredService>{};
             auto self = g_cluster.self_info();
@@ -4554,6 +4565,73 @@ int child_main(const SupervisorConfig& config) {
         [](const httplib::Request&, httplib::Response& res) {
         res.set_content(g_tools.dispatch("cluster.reload", "{}"),
                         "application/json");
+    }));
+
+    // GET the current cluster group config (for the web UI to display).
+    svr.Get("/llamaste/cluster/config", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        std::string group = cluster_id();
+        json out;
+        out["group"]   = group;
+        out["enabled"] = !group.empty();
+        res.set_content(out.dump(), "application/json");
+    }));
+
+    // Set/clear the cluster group name -- the ONLY switch that turns mDNS/clustering on
+    // (option B). Writes /data/llamaste/cluster-enabled, or deletes it when the group is
+    // empty (standalone = fully silent). Applies on the next reboot: the mDNS responder is
+    // brought up (or not) at boot based on this file, so we don't tear a live cluster down.
+    svr.Post("/llamaste/cluster/config", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        json args = json::parse(req.body, nullptr, false);
+        if (args.is_discarded()) {
+            res.status = 400;
+            res.set_content(R"json({"error":"invalid JSON body"})json", "application/json");
+            return;
+        }
+        std::string group = args.value("group", "");
+        size_t a = group.find_first_not_of(" \t\r\n");
+        size_t b = group.find_last_not_of(" \t\r\n");
+        group = (a == std::string::npos) ? "" : group.substr(a, b - a + 1);
+        // Group name becomes the cluster_id: written to a file and sent in mDNS TXT, so
+        // restrict it to a safe single token: [A-Za-z0-9_-], max 63 chars.
+        bool valid = group.size() <= 63;
+        for (char c : group) {
+            bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                   || (c >= '0' && c <= '9') || c == '-' || c == '_';
+            if (!ok) valid = false;
+        }
+        if (!group.empty() && !valid) {
+            res.status = 400;
+            res.set_content(R"json({"error":"group must be <=63 chars of [A-Za-z0-9_-]"})json",
+                            "application/json");
+            return;
+        }
+
+        const char* path = "/data/llamaste/cluster-enabled";
+        json out;
+        if (group.empty()) {
+            unlink(path);  // standalone: no file, no mDNS after reboot
+            out["group"] = "";
+            out["enabled"] = false;
+            fprintf(stderr, "[cluster] group cleared -> standalone (applies on reboot)\n");
+        } else {
+            mkdir("/data/llamaste", 0755);  // ensure dir exists (no-op if present)
+            std::ofstream f(path, std::ios::trunc);
+            if (!f) {
+                res.status = 500;
+                res.set_content(R"json({"error":"could not write cluster config"})json",
+                                "application/json");
+                return;
+            }
+            f << group;
+            out["group"] = group;
+            out["enabled"] = true;
+            fprintf(stderr, "[cluster] group set to '%s' (applies on reboot)\n", group.c_str());
+        }
+        out["reboot_required"] = true;
+        out["note"] = "Reboot to apply the cluster change.";
+        res.set_content(out.dump(), "application/json");
     }));
 
     // Test endpoint: manually add a peer (for integration testing without mDNS)

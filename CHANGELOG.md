@@ -3,6 +3,21 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.8-beta
+
+Cluster join/leave is now a UI choice, and mDNS is fully opt-in (task #16, "option B").
+
+- **mDNS is silent by default.** A standalone box no longer opens the multicast socket,
+  advertises `llamaste.local` / `_mcp._tcp`, or listens for peers -- it behaves like a plain
+  llama server reached by IP. The mDNS responder starts *only* when a cluster group name is
+  set (`/data/llamaste/cluster-enabled`). Decided at boot and gated on `mdns_started`, so a
+  standalone box does zero network discovery and never touches an un-started responder.
+- **Set the group in the UI, like choosing a model** (not at install). System -> Cluster has
+  a **Group** field + Save. Same name on 2+ boxes links them into one cluster; blank =
+  standalone. Backed by `GET/POST /llamaste/cluster/config`, which writes/deletes
+  `/data/llamaste/cluster-enabled` (validated `[A-Za-z0-9_-]`, <=63 chars). Applies on the
+  next reboot -- clustering is brought up at boot, so we never tear a live cluster down.
+
 ## 0.5.7-beta
 
 Stop leaking raw `<tool_call>` tags into chat (task #15). A truncated or malformed tool
