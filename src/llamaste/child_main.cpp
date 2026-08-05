@@ -137,6 +137,12 @@ static std::function<std::string(const std::string&)> g_inference_fn;
 static std::atomic<pid_t> g_llama_pid{0};
 #endif
 static std::atomic<bool> g_model_loaded{false};
+// Real, probed readiness of the inference engine, maintained by the health-poll thread.
+// g_model_loaded only says "a model was loaded"; it stays true even if llama-server later
+// wedges (process alive but 503ing/hung), which the crash monitor's waitpid() never sees.
+// Defaults true so a freshly-loaded model reports ready immediately; the poller flips it
+// false on a detected wedge and back true on recovery. /health reports the AND of the two.
+static std::atomic<bool> g_inference_ready{true};
 static int g_llama_port = 8088;
 static std::string g_model_name;
 static std::atomic<double> g_tokens_per_sec{0.0};
@@ -1569,6 +1575,80 @@ static void llama_monitor_thread(std::string model_path, int cpu_cores, int free
     }
 }
 
+// Background thread: probe llama-server /health to catch a WEDGE (process alive but
+// 503ing / hung / deadlocked). The crash monitor above only reacts to process EXIT via
+// waitpid(); a wedged engine never exits, so without this /health would keep reporting
+// inference_ready=true while every chat request 503s. On FAIL_THRESHOLD consecutive bad
+// probes we flag the engine not-ready and SIGKILL it, which makes the crash monitor's
+// waitpid() return and respawn a fresh llama-server. One instance runs for the process
+// lifetime; it idles (does not probe or kill) whenever no model is loaded, including the
+// window while the crash monitor is respawning (g_model_loaded is false then).
+static void llama_health_poll_thread() {
+    const int POLL_INTERVAL_S = 5;
+    const int FAIL_THRESHOLD  = 3;   // ~15s wedged before forcing a respawn
+    int consecutive_fails = 0;
+
+    while (g_running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(POLL_INTERVAL_S));
+        if (!g_model_loaded.load()) { consecutive_fails = 0; continue; }
+
+        // Fresh client per probe (no keep-alive): a stale connection to a wedged server
+        // can itself hang; matches the fresh-client pattern used for inference here.
+        bool ok = false;
+        {
+            httplib::Client cli("127.0.0.1", g_llama_port);
+            cli.set_connection_timeout(2);
+            cli.set_read_timeout(3);
+            auto res = cli.Get("/health");
+            if (res && res->status == 200) {
+                auto body = json::parse(res->body, nullptr, false);
+                if (!body.is_discarded()) {
+                    std::string st = body.value("status", "");
+                    // "no slot available" == alive but busy mid-generation: still healthy.
+                    ok = (st == "ok" || st == "no slot available");
+                }
+            }
+        }
+
+        if (ok) {
+            consecutive_fails = 0;
+            g_inference_ready.store(true);
+            continue;
+        }
+
+        consecutive_fails++;
+        fprintf(stderr, "[child] llama-server health probe failed (%d/%d)\n",
+                consecutive_fails, FAIL_THRESHOLD);
+        if (consecutive_fails < FAIL_THRESHOLD) continue;
+
+        // Wedged: stop claiming ready, and force a respawn through the crash monitor.
+        g_inference_ready.store(false);
+        pid_t pid = g_llama_pid.load();
+        fprintf(stderr, "[child] llama-server appears wedged (%d failed probes); "
+                "killing PID %d to trigger respawn\n", consecutive_fails, (int)pid);
+        if (pid > 0) kill(pid, SIGKILL);
+        consecutive_fails = 0;
+        // g_model_loaded flips false once the monitor reaps the kill; we idle until the
+        // respawn sets it true again, then the next probe restores g_inference_ready.
+    }
+}
+
+// Launch the health-poll thread exactly once, no matter how many times a model is
+// (re)loaded. Called from each model-load path; std::call_once makes it idempotent.
+static void ensure_health_poller_started() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            try { llama_health_poll_thread(); }
+            catch (const std::exception& e) {
+                fprintf(stderr, "[child] health poll thread exception: %s\n", e.what());
+            } catch (...) {
+                fprintf(stderr, "[child] health poll thread unknown exception\n");
+            }
+        }).detach();
+    });
+}
+
 #endif // _WIN32
 
 // ---------------------------------------------------------------------------
@@ -2039,9 +2119,15 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
     json health;
     health["status"] = "ok";
     health["uptime_seconds"] = static_cast<int>(time(nullptr) - g_start_time);
-    health["model_loaded"] = g_model_loaded.load();
+    bool model_loaded = g_model_loaded.load();
+    bool engine_ok = g_inference_ready.load();
+    health["model_loaded"] = model_loaded;
     health["model_name"] = g_model_name.empty() ? json(nullptr) : json(g_model_name);
-    health["inference_ready"] = g_model_loaded.load();
+    // inference_ready reflects the ENGINE actually answering, not just that a model was
+    // loaded — a wedged llama-server (alive but 503ing) flips engine_ok false via the
+    // health-poll thread, so this no longer lies while chat requests fail.
+    health["inference_ready"] = model_loaded && engine_ok;
+    health["engine_responsive"] = engine_ok;
     health["tools_count"] = g_tools.count();
     health["mode"] = g_boot_mode;
     res.set_content(health.dump(), "application/json");
@@ -2324,6 +2410,10 @@ int child_main(const SupervisorConfig& config) {
             fprintf(stderr, "[child] Failed to spawn llama-server, staying in stub mode\n");
         }
     }
+    // Start the wedge-detecting health poller once, unconditionally: it runs for the
+    // process lifetime and idles while no model is loaded, so it covers boot-with-no-model
+    // followed by a later model switch as well as the normal load-at-boot path.
+    ensure_health_poller_started();
 #endif
 
     // Start llama-rpc-server for mesh clustering (port 50052)

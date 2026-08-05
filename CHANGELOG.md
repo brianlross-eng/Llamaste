@@ -3,6 +3,24 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.6-beta
+
+Detect and recover from a **wedged** llama-server (task #14). The crash monitor only
+reacted to the engine process *exiting* (`waitpid`); a wedged engine -- alive but
+503ing / hung / deadlocked -- never exits, so `/health` kept reporting
+`inference_ready: true` while every chat request failed.
+
+- New **health-poll thread** probes llama-server `/health` every 5 s while a model is
+  loaded. On 3 consecutive bad probes (~15 s wedged) it flags the engine not-ready and
+  SIGKILLs it, which makes the existing crash monitor's `waitpid()` return and respawn a
+  fresh engine. Poller detects+kills; monitor is the sole respawner (no double-respawn).
+  It idles when no model is loaded, including the respawn window, so it never kills a
+  server that is still starting up.
+- `/health` now reports real readiness: `inference_ready` = `model_loaded && engine
+  responsive`, plus a new `engine_responsive` field. It no longer lies during a wedge.
+- "no slot available" (busy mid-generation) counts as healthy, so long generations don't
+  trip a false respawn.
+
 ## 0.5.5-beta
 
 Boot-menu cleanup on both the live ISO and installed system. Now that GPU vs no-GPU
