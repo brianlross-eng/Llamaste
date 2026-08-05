@@ -3,6 +3,16 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.4-beta
+
+Hotfix: the 0.5.3 installed `grub.cfg` contained a non-ASCII character (an em-dash in
+a comment). GRUB's config parser rejected the file and dropped to the `grub>` rescue
+prompt, so a fresh install of 0.5.3 wouldn't boot (no menu). grub.cfg is now pure ASCII.
+(Recover a stuck 0.5.3 install from the `grub>` prompt with:
+`search --file --set=root /bzImage` then `linux /bzImage init=/opt/llamaste/llamaste
+rootfstype=squashfs ro amdgpu.modeset=1 llamaste.mode=server llamaste.slot=A`,
+`initrd /initramfs.cpio.gz`, `boot`.)
+
 ## 0.5.3-beta
 
 **The installed system now boots to the GPU by default** (the last thing blocking real
