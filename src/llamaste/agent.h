@@ -93,6 +93,11 @@ std::vector<ToolCall> parse_tool_calls(const std::string& response_json);
 // contain tool calls into the OpenAI tool_calls format.
 nlohmann::json parse_qwen_tool_calls(const std::string& text);
 
+// Remove <tool_call> XML residue from user-visible assistant text: complete blocks that
+// weren't consumed as structured calls, and a dangling unclosed <tool_call> (a truncated
+// or malformed call) whose raw tag text would otherwise leak into the chat. Trims result.
+std::string strip_tool_call_residue(const std::string& text);
+
 // Extract the assistant's text content from a chat completion response JSON string.
 // Returns empty string if the response is a tool_calls response with no text.
 std::string parse_content(const std::string& response_json);

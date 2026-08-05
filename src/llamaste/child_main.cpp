@@ -899,10 +899,13 @@ static std::string llama_inference(const std::string& request_json) {
         fprintf(stderr, "[inference] tool_calls: %d call(s) dispatched\n",
                 (int)tool_calls_arr.size());
     } else {
-        // Plain text response
+        // Plain text response. Strip any <tool_call> residue: a truncated/malformed call
+        // (e.g. cut off by max_tokens, or JSON the parser rejected) leaves raw tags in the
+        // text that would otherwise leak into the chat. If the model ONLY emitted a bad
+        // tool call, the stripped content is empty and the caller shows a no-response note.
         json msg_obj;
         msg_obj["role"]    = "assistant";
-        msg_obj["content"] = content;
+        msg_obj["content"] = strip_tool_call_residue(content);
         choice["message"]      = msg_obj;
         choice["finish_reason"] = "stop";
         fprintf(stderr, "[inference] generated %d tokens: %.100s\n",

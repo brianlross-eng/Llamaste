@@ -88,6 +88,34 @@ nlohmann::json parse_qwen_tool_calls(const std::string& text) {
 }
 
 // ---------------------------------------------------------------------------
+// strip_tool_call_residue — remove <tool_call> XML from user-visible text
+// ---------------------------------------------------------------------------
+
+std::string strip_tool_call_residue(const std::string& text) {
+    const std::string START = "<tool_call>";
+    const std::string END   = "</tool_call>";
+
+    std::string out;
+    out.reserve(text.size());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t s = text.find(START, pos);
+        if (s == std::string::npos) { out += text.substr(pos); break; }
+        out += text.substr(pos, s - pos);  // keep any text before the tag
+        size_t e = text.find(END, s + START.size());
+        if (e == std::string::npos) break; // unclosed (truncated call) — drop to end
+        pos = e + END.size();              // skip the whole <tool_call>...</tool_call> block
+    }
+    // Drop any stray closing tag with no opener
+    for (size_t st; (st = out.find(END)) != std::string::npos; ) out.erase(st, END.size());
+    // Trim surrounding whitespace
+    size_t first = out.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return "";
+    size_t last = out.find_last_not_of(" \t\n\r");
+    return out.substr(first, last - first + 1);
+}
+
+// ---------------------------------------------------------------------------
 // ConversationState
 // ---------------------------------------------------------------------------
 
@@ -404,7 +432,9 @@ std::string agent_turn(
 
         if (tool_calls.empty()) {
             // No tool calls — this is a final text response
-            std::string content = parse_content(response);
+            // Defense in depth: strip any <tool_call> residue in case the content
+            // reached us un-cleaned (e.g. a different inference_fn / streaming path).
+            std::string content = strip_tool_call_residue(parse_content(response));
             if (content.empty()) {
                 content = "[No response from inference engine]";
             }

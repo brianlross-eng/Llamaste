@@ -3,6 +3,24 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.7-beta
+
+Stop leaking raw `<tool_call>` tags into chat (task #15). A truncated or malformed tool
+call -- e.g. the model emits `<tool_call>\n{"name": ...` but the JSON is cut off by
+max_tokens or is otherwise unparseable -- was skipped by the tool-call parser and then
+fell through to the plain-text path, so the raw tag text showed up in the user's chat.
+
+- New `strip_tool_call_residue()` removes complete `<tool_call>...</tool_call>` blocks that
+  weren't consumed as structured calls, drops a dangling unclosed `<tool_call>` (the
+  truncated-call case), and clears stray closing tags. Applied at the source (the
+  llama_inference plain-text branch, so `/v1/chat/completions` and the semantic cache are
+  clean) and defensively inside `agent_turn` (covering `/llamaste/chat` SSE, which streams
+  the agent's final text). If the model emitted *only* a bad tool call, the stripped
+  content is empty and the caller shows the usual no-response note instead of raw tags.
+- Multiple and malformed calls in one turn were already handled (the parser loops every
+  `<tool_call>` block; a malformed block is skipped, and an all-malformed turn triggers the
+  existing GBNF grammar-constrained retry) -- this closes the remaining visible leak.
+
 ## 0.5.6-beta
 
 Detect and recover from a **wedged** llama-server (task #14). The crash monitor only
