@@ -940,9 +940,50 @@ static pid_t safe_spawn(const char* path, char* const argv[],
     return pid;
 }
 
+// Re-read the GPU memory sysfs. detect_hardware() runs early in boot, before amdgpu
+// binds its DRM node (amdgpu loads as a module after the squashfs pivot), so the early
+// scan misses the card and lands on the PCI fallback (detected+name only, no VRAM/GTT,
+// unified=false). Calling this at llama-server spawn time — when the driver IS up —
+// gives the real unified/GTT picture so the -ngl decision offloads correctly, and also
+// fixes the GPU figures reported by /debug/sysinfo. Updates g_hwinfo in place.
+static void refresh_gpu_memory() {
+    DIR* drm = opendir("/sys/class/drm");
+    if (!drm) return;
+    struct dirent* e;
+    while ((e = readdir(drm)) != nullptr) {
+        if (strncmp(e->d_name, "card", 4) != 0) continue;
+        if (strchr(e->d_name, '-')) continue;  // skip connectors (card0-HDMI-A-1)
+        std::string base = std::string("/sys/class/drm/") + e->d_name;
+        std::string vendor = read_sysfs_line((base + "/device/vendor").c_str());
+        if (vendor != "0x1002" && vendor != "0x8086" && vendor != "0x10de") continue;
+        g_hwinfo.gpu_detected = true;
+        g_hwinfo.gpu_name = (vendor == "0x1002") ? "AMD"
+                          : (vendor == "0x8086") ? "Intel" : "NVIDIA";
+        char link[256] = {};
+        ssize_t len = readlink((base + "/device/driver").c_str(), link, sizeof(link) - 1);
+        if (len > 0) { link[len] = '\0'; const char* d = strrchr(link, '/');
+                       g_hwinfo.gpu_driver = d ? d + 1 : link; }
+        std::string vram = read_sysfs_line((base + "/device/mem_info_vram_total").c_str());
+        std::string gtt  = read_sysfs_line((base + "/device/mem_info_gtt_total").c_str());
+        if (!vram.empty()) g_hwinfo.gpu_vram_mb = strtoull(vram.c_str(), nullptr, 10) / (1024 * 1024);
+        if (!gtt.empty())  g_hwinfo.gpu_gtt_mb  = strtoull(gtt.c_str(),  nullptr, 10) / (1024 * 1024);
+        // Real dGPU has >= 2 GiB dedicated VRAM not dwarfed by GTT; otherwise iGPU/APU
+        // sharing system RAM -> unified (Strix Halo: vram_total is 0, the 96 GB is GTT).
+        if (g_hwinfo.gpu_vram_mb >= 2048 && g_hwinfo.gpu_vram_mb >= g_hwinfo.gpu_gtt_mb) {
+            g_hwinfo.gpu_is_discrete = true;  g_hwinfo.gpu_is_unified = false;
+        } else {
+            g_hwinfo.gpu_is_unified = true;   g_hwinfo.gpu_is_discrete = false;
+        }
+        break;
+    }
+    closedir(drm);
+}
+
 static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
                                 int free_ram_mb, const std::string& rpc_endpoints = "",
                                 const std::string& tensor_split = "") {
+    // amdgpu is up by now — refresh the GPU picture the early boot scan couldn't see.
+    refresh_gpu_memory();
     std::lock_guard<std::mutex> lock(g_llama_mutex);
 
     int threads = compute_thread_count(cpu_cores);
@@ -991,22 +1032,29 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
     // with no Vulkan backend behind the loader crash-loops llama-server.
     std::string ngl_str;
     bool gpu_compute = has_vulkan_icd();
-    if (gpu_compute && g_hwinfo.gpu_detected && g_hwinfo.gpu_vram_mb > 0) {
-        // Discrete GPU: layers = VRAM / 1.2GB per layer, minimum 1
-        int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
-        ngl_str = std::to_string(ngl);
-        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
-        fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
-                ngl, g_hwinfo.gpu_name.c_str(),
-                (unsigned long long)g_hwinfo.gpu_vram_mb);
-    } else if (gpu_compute && g_hwinfo.gpu_detected && g_hwinfo.gpu_is_unified) {
-        // Unified memory (iGPU/APU): offload everything — GPU shares RAM
-        ngl_str = "99";
-        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
-        fprintf(stderr, "[child] GPU offload: all layers to %s (unified memory)\n",
-                g_hwinfo.gpu_name.c_str());
+    if (gpu_compute && g_hwinfo.gpu_detected) {
+        if (g_hwinfo.gpu_is_discrete && g_hwinfo.gpu_vram_mb >= 2048) {
+            // Confirmed discrete GPU with real dedicated VRAM: size -ngl to what fits
+            // (~1.2 GB/layer for 7B Q4_K_M), minimum 1.
+            int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
+            ngl_str = std::to_string(ngl);
+            cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+            fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
+                    ngl, g_hwinfo.gpu_name.c_str(),
+                    (unsigned long long)g_hwinfo.gpu_vram_mb);
+        } else {
+            // iGPU/APU/unified (Strix Halo) or unclassified: offload everything. The GPU
+            // shares system RAM via GTT, where llama.cpp's Vulkan/RADV backend allocates.
+            // A present Vulkan ICD is the reliable "GPU compute works" signal; the tiny/
+            // zero dedicated-VRAM reading (mem_info_vram_total = 0) must NOT gate this —
+            // that mis-gate silently dropped every real-size model back to CPU.
+            ngl_str = "99";
+            cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+            fprintf(stderr, "[child] GPU offload: all layers to %s (unified, %llu MB GTT)\n",
+                    g_hwinfo.gpu_name.c_str(), (unsigned long long)g_hwinfo.gpu_gtt_mb);
+        }
     } else if (g_hwinfo.gpu_detected) {
-        // Display GPU but no Vulkan compute driver — stay on CPU (stable).
+        // Display GPU but no Vulkan compute driver (ICD) — stay on CPU (stable).
         fprintf(stderr, "[child] GPU %s present but no Vulkan ICD (compute driver) "
                 "-- running on CPU (no -ngl offload)\n", g_hwinfo.gpu_name.c_str());
     }
@@ -5014,6 +5062,22 @@ int child_main(const SupervisorConfig& config) {
 
         // Llamaste server uptime
         info["server_uptime_seconds"] = (int)(time(nullptr) - g_start_time);
+
+        // GPU / VRAM — surfaced so the iGPU's memory (VRAM + GTT) is visible, and so
+        // the offload path (unified -> -ngl 99) can be verified from outside the box.
+        // Refresh from sysfs first: the boot-time scan runs before amdgpu binds.
+        refresh_gpu_memory();
+        {
+            json gpu;
+            gpu["detected"]   = g_hwinfo.gpu_detected;
+            gpu["name"]       = g_hwinfo.gpu_name;
+            gpu["driver"]     = g_hwinfo.gpu_driver;
+            gpu["vram_mb"]    = (uint64_t)g_hwinfo.gpu_vram_mb;   // dedicated VRAM (0 on APUs)
+            gpu["gtt_mb"]     = (uint64_t)g_hwinfo.gpu_gtt_mb;    // graphics-accessible system RAM
+            gpu["unified"]    = g_hwinfo.gpu_is_unified;          // iGPU/APU shares system RAM
+            gpu["discrete"]   = g_hwinfo.gpu_is_discrete;
+            info["gpu"] = gpu;
+        }
 
         res.set_content(info.dump(2), "application/json");
     }));

@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/time.h>  // struct timeval (SO_RCVTIMEO) — distinct from <time.h> on musl
 #include <termios.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -639,6 +640,39 @@ static void console_input_thread() {
 
 // ---------- Console display thread ----------
 
+// Readiness probe: is the web UI actually serving on 127.0.0.1:port yet?
+// The child PID existing only means the process forked — the HTTP server may not
+// be listening for several seconds while it inits (mounts, model load, etc.). We
+// use this to show "BOOTING" until the server answers, instead of "RUNNING" the
+// instant the child spawns. Any HTTP response (even 404) means it's serving.
+static bool web_ui_ready(int port) {
+#ifndef _WIN32
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+    struct timeval tv{1, 0};  // 1s send/recv timeout — never block the display
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(0x7f000001);  // 127.0.0.1
+    // Localhost connect is instant when listening, or ECONNREFUSED immediately
+    // when not — no long blocking either way.
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock); return false; }
+    const char* req = "GET /health HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if (write(sock, req, strlen(req)) < 0) { close(sock); return false; }
+    char buf[64];
+    ssize_t n = read(sock, buf, sizeof(buf) - 1);
+    close(sock);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    return strstr(buf, "HTTP/") != nullptr;
+#else
+    (void)port;
+    return false;
+#endif
+}
+
 static void console_display_thread(const SupervisorConfig& config) {
     fprintf(stderr, "[supervisor] Console display thread started\n");
 
@@ -671,6 +705,10 @@ static void console_display_thread(const SupervisorConfig& config) {
         }
     }
 
+    // Latched once the web UI first answers; status shows BOOTING until then.
+    // Reset across child respawns so a crashed/restarted UI re-probes.
+    bool web_ready = false;
+
     while (!g_shutdown_requested) {
         // Pause display while password is being entered on the console
         if (g_passwd_entry_active) {
@@ -699,9 +737,17 @@ static void console_display_thread(const SupervisorConfig& config) {
             temp_str = "N/A";
         }
 
-        // Determine child status
-        const char* status_str = (g_child_pid > 0 && !g_child_exited)
-            ? "\033[32mRUNNING\033[0m" : "\033[31mDOWN\033[0m";
+        // Determine status: DOWN if the child isn't up; BOOTING while the child
+        // is up but the web UI isn't answering yet; RUNNING once it serves.
+        const char* status_str;
+        if (g_child_pid <= 0 || g_child_exited) {
+            web_ready = false;                       // reset so a respawn re-probes
+            status_str = "\033[31mDOWN\033[0m";
+        } else {
+            if (!web_ready) web_ready = web_ui_ready(config.http_port);
+            status_str = web_ready ? "\033[32mRUNNING\033[0m"
+                                   : "\033[33mBOOTING\033[0m";  // yellow
+        }
 
         // Build the display using string builder
         std::string out;

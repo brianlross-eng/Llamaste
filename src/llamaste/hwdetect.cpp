@@ -96,10 +96,24 @@ HardwareInfo detect_hardware() {
                 std::string vram_amd = base + "/device/mem_info_vram_total";
                 std::string vram_str = read_sysfs_line(vram_amd.c_str());
                 if (!vram_str.empty()) {
-                    // amdgpu reports VRAM in bytes
-                    unsigned long long vram_bytes = strtoull(vram_str.c_str(), nullptr, 10);
-                    hw.gpu_vram_mb = vram_bytes / (1024 * 1024);
-                    hw.gpu_is_discrete = true;
+                    // amdgpu reports sizes in bytes. On APUs (Strix Halo) the real GPU
+                    // memory pool is GTT (graphics-accessible system RAM); mem_info_vram_total
+                    // is 0 or a tiny UMA carveout, but the file still exists. A discrete card
+                    // has GBs of dedicated VRAM.
+                    hw.gpu_vram_mb = strtoull(vram_str.c_str(), nullptr, 10) / (1024 * 1024);
+                    std::string gtt_str =
+                        read_sysfs_line((base + "/device/mem_info_gtt_total").c_str());
+                    if (!gtt_str.empty())
+                        hw.gpu_gtt_mb = strtoull(gtt_str.c_str(), nullptr, 10) / (1024 * 1024);
+                    // Classify: a real dGPU has >= 2 GiB dedicated VRAM not dwarfed by GTT.
+                    // Otherwise it's an iGPU/APU sharing system RAM -> unified. This fixes
+                    // Strix Halo, where vram_total reads 0 (the 96 GB is GTT) so the old code
+                    // marked it discrete -> no -ngl -> silent CPU fallback for real-size models.
+                    if (hw.gpu_vram_mb >= 2048 && hw.gpu_vram_mb >= hw.gpu_gtt_mb) {
+                        hw.gpu_is_discrete = true;
+                    } else {
+                        hw.gpu_is_unified = true;
+                    }
                 } else {
                     std::string vram_intel = base + "/device/total_vram";
                     vram_str = read_sysfs_line(vram_intel.c_str());

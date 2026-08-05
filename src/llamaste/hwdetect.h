@@ -12,8 +12,9 @@ struct HardwareInfo {
     bool gpu_detected = false;
     std::string gpu_name;
     std::string gpu_driver;         // kernel driver name (i915, amdgpu, nouveau, simpledrm)
-    uint64_t gpu_vram_mb = 0;       // VRAM size in MiB (0 = unknown or shared memory)
-    bool gpu_is_discrete = false;   // true if GPU has dedicated VRAM (dGPU)
+    uint64_t gpu_vram_mb = 0;       // dedicated VRAM in MiB (0 = shared/UMA, e.g. Strix Halo)
+    uint64_t gpu_gtt_mb = 0;        // GTT: graphics-accessible system RAM in MiB (APU pool)
+    bool gpu_is_discrete = false;   // true if GPU has real dedicated VRAM (dGPU)
     bool gpu_is_unified = false;    // true if GPU uses system RAM (iGPU/APU like Strix Halo)
     bool has_avx2 = false;
     bool has_avx512 = false;

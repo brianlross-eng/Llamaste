@@ -3,6 +3,52 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.3-beta
+
+**The installed system now boots to the GPU by default** (the last thing blocking real
+GPU inference after a disk install), and the boot config is vendor-neutral.
+
+- **Root cause of "installs run on CPU":** the installed `grub.cfg` forced `nomodeset`,
+  which disables kernel mode-setting for *every* GPU vendor. With no KMS, RADV (and i915 /
+  nouveau) enumerate no device, so llama.cpp silently falls back to CPU — it still prints
+  `offloaded N/N layers to GPU` but the buffers are `CPU_Mapped`. (The live ISO worked only
+  because it has a separate `amdgpu.modeset=1` GPU entry.)
+- **Fix:** the default `menuentry`s ("Llamaste Server" / "Llamaste Desktop") no longer pass
+  `nomodeset`, so KMS is on and `init` brings up whatever GPU is present (amdgpu / i915 /
+  nouveau, loaded adaptively by hardware detection). **No vendor flag is hardcoded in GRUB**
+  — the GPU-vendor decision stays at runtime, where it belongs. A `nomodeset` "safe mode"
+  entry is kept as a fallback for hardware where KMS hangs.
+- Verified on the EVO-X2 (Strix Halo, gfx1151): 32B Q4 fully offloaded (65/65, 18.5 GB on
+  `Vulkan0`) at 10.3 tok/s vs 4.4 on CPU; 14B at 21, 7B at 40, 3B at 78. See
+  `docs/gpu-benchmarks.md`.
+
+## 0.5.2-beta
+
+Makes GPU offload actually engage on Strix Halo (0.5.0/0.5.1 silently ran real-size
+models on CPU), plus boot-status and GPU-visibility improvements.
+
+### GPU offload now engages for real-size models (the important fix)
+- **Root cause: hwdetect runs before amdgpu binds.** `amdgpu` loads as a module after
+  the squashfs pivot, but `detect_hardware()` runs earlier — so the DRM scan finds no
+  card and falls to the PCI fallback, which sets only `detected`+`name` (no VRAM/GTT,
+  `unified=false`). The `-ngl` decision then hit the CPU branch — **no `-ngl` passed,
+  every model on CPU** (`offloaded 0/N`). (0.5.0's USB boot only worked by a timing
+  fluke.) Fix: **`refresh_gpu_memory()` re-reads the amdgpu sysfs at llama-server spawn
+  time** (driver up by then), reading `mem_info_vram_total` + `mem_info_gtt_total` and
+  classifying unified unless there's ≥2 GiB of real dedicated VRAM.
+- **`-ngl` decision hardened**: for any detected GPU with a Vulkan ICD present, offload
+  `-ngl 99` (all layers) unless it's a confirmed discrete card with ≥2 GiB VRAM (which is
+  sized to fit). On Strix Halo the iGPU shares system RAM via GTT — where RADV allocates —
+  so a 0/tiny dedicated-VRAM reading can never gate offload again.
+
+### GPU visibility
+- `/debug/sysinfo` now includes a live `gpu` object: detected, name, driver, `vram_mb`,
+  `gtt_mb`, `unified`, `discrete` (refreshed from sysfs on request).
+
+### Boot status
+- The console dashboard shows **BOOTING** (not RUNNING) until the web UI actually
+  answers on 127.0.0.1, instead of flipping to RUNNING the instant the child forks.
+
 ## 0.5.0-beta
 
 **GPU inference on the AMD Strix Halo iGPU (Radeon 8060S, gfx1151) via Vulkan/RADV.**
