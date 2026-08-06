@@ -3,6 +3,26 @@
 All notable changes to Llamaste are documented here. Versions are the
 `LLAMASTE_VERSION` string in `src/llamaste/version.h`.
 
+## 0.5.9-beta
+
+Restore Desktop mode's compositor (task #18). Desktop mode had silently degraded to
+"boots like server mode" -- the on-screen GUI never came up.
+
+- **Root cause:** the defconfig enabled `BR2_PACKAGE_LABWC=y`, but **labwc isn't a package
+  in Buildroot 2025.02** (it was in the old 2024.02 tree). `olddefconfig` dropped the unknown
+  symbol silently, and with it the entire wlroots stack labwc would have pulled in. So in
+  desktop mode every compositor `exec`-failed and the box just sat at a console with the web
+  server running -- indistinguishable from server mode (and the wifi console step is skipped
+  in desktop mode, so it even booted a touch faster).
+- **Fix:** enable `BR2_PACKAGE_CAGE=y` -- cage is the compositor `child_main` actually
+  launches first (wlroots-based kiosk; `zwp_text_input_v3` so typing in the web UI works),
+  and it `select`s wlroots (libinput/seatd/libdrm/pixman/hwdata/libdisplay-info). Verified
+  cage 0.2.0 + wlroots 0.18 build clean on the 2025.02 base. cog (the browser) was already
+  building fine; it just had no compositor to run inside.
+
+Desktop mode now boots with a real amdgpu KMS display (`nomodeset` is gone as of 0.5.3), so
+this is the first build where the compositor should actually render on-screen.
+
 ## 0.5.8-beta
 
 Cluster join/leave is now a UI choice, and mDNS is fully opt-in (task #16, "option B").

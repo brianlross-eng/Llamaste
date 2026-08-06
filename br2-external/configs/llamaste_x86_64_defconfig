@@ -160,13 +160,17 @@ BR2_TARGET_GENERIC_HOSTNAME="llamaste"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Llamaste"
 
 # ---------------------------------------------------------------------------
-# Desktop mode packages (labwc stacking WM + cog browser)
+# Desktop mode packages (cage kiosk compositor + cog browser)
 # ---------------------------------------------------------------------------
-# labwc: stacking Wayland compositor (real desktop, not kiosk)
-#   - openbox-compatible XML config (rc.xml, menu.xml, autostart)
-#   - windows, resize/move, keyboard shortcuts, right-click menu
-#   - Super+B: open browser  Super+Q: close  Alt+Tab: cycle
-BR2_PACKAGE_LABWC=y
+# cage: single-app fullscreen Wayland kiosk compositor (wlroots-based). This is the
+#   PRIMARY compositor child_main launches for desktop mode; wlroots implements
+#   zwp_text_input_v3 so typing in the cog/WebKit web UI works. `cage` selects wlroots,
+#   which pulls in libinput/seatd/libdrm/pixman/wayland/hwdata/libdisplay-info.
+#   NOTE: labwc (the old default) was DROPPED -- it isn't packaged in Buildroot 2025.02,
+#   so the stale BR2_PACKAGE_LABWC=y was an unknown symbol silently dropped by
+#   olddefconfig, which took the whole wlroots stack down and left desktop mode with no
+#   compositor (booted like server mode). Enabling cage restores it.
+BR2_PACKAGE_CAGE=y
 # Wayland protocol libraries
 BR2_PACKAGE_WAYLAND=y
 BR2_PACKAGE_WAYLAND_PROTOCOLS=y
