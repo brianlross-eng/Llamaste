@@ -114,5 +114,4 @@ void register_all_tools(ToolRegistry& reg) {
     register_config_tools(reg);
     register_model_tools(reg);
     register_model_download_tools(reg);
-    register_audio_tools(reg);
 }

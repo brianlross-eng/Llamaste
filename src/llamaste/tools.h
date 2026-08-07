@@ -58,7 +58,6 @@ void register_config_tools(ToolRegistry& reg);
 void register_model_tools(ToolRegistry& reg);
 void register_install_tools(ToolRegistry& reg);
 void register_model_download_tools(ToolRegistry& reg);
-void register_audio_tools(ToolRegistry& reg);
 
 void register_update_tools(ToolRegistry& reg);
 

@@ -21,7 +21,6 @@
 #include "net_mdns.h"
 #include "scheduler.h"
 #include "auth.h"
-#include "voice.h"
 #include "cluster.h"
 #include "mcp_server.h"
 #include "updater.h"
@@ -61,6 +60,8 @@
 #include <dirent.h>
 #include <termios.h>
 #include <sys/statvfs.h>
+#include <sys/mount.h>
+#include <sys/sysinfo.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -2433,56 +2434,6 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline — desktop mode only.
-    // Server mode: no TTS/STT needed (headless; voice is desktop-only UX).
-    // Live mode: no espeak-ng data dir or TTS models; installer doesn't need voice.
-    VoicePipeline voice_pipeline;
-    {
-        extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
-#ifndef _WIN32
-        if (g_boot_mode != "desktop") {
-            fprintf(stderr, "[child] %s mode: voice pipeline disabled\n", g_boot_mode.c_str());
-        } else {
-            VoiceConfig vcfg;
-            if (voice_pipeline.init(vcfg)) {
-                g_voice = &voice_pipeline;
-                fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
-                        voice_pipeline.tts_engine_name().c_str());
-
-                // Desktop mode: enable always-listening (ALSA capture + VAD)
-                if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
-                    // Wire command callback: voice commands go through the agent loop
-                    voice_pipeline.set_command_callback([&](const std::string& command) {
-                        fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
-
-                        ConversationState conv;
-                        conv.system_prompt = g_system_prompt;
-                        conv.add_user_message(command);
-                        std::string response = agent_turn(conv, g_tools, g_inference_fn);
-
-                        fprintf(stderr, "[voice] Agent response: %.80s%s\n",
-                                response.c_str(),
-                                response.size() > 80 ? "..." : "");
-
-                        // Speak the response via TTS
-                        if (!response.empty()) {
-                            voice_pipeline.speak(response);
-                        }
-                    });
-
-                    // Start the always-listening thread (ALSA capture + VAD)
-                    voice_pipeline.start();
-                } else {
-                    fprintf(stderr, "[child] Desktop mode: TTS ready, whisper model not found (STT disabled)\n");
-                }
-            } else {
-                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
-                        voice_pipeline.last_error().c_str());
-            }
-        }
-#endif
-    }
-
     // Build system prompt
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
@@ -3328,6 +3279,34 @@ int child_main(const SupervisorConfig& config) {
         // Wayland runtime dir (required by wlroots)
         mkdir("/run/user", 0755);
         mkdir("/run/user/0", 0700);
+        // XDG_RUNTIME_DIR needs its OWN roomy tmpfs. Mesa's EGL swrast software
+        // path presents the web content through wl_shm pools that land here as
+        // files (~8 MB each at 1080p: 1920*1080*4 = 8294400 B, double/triple
+        // buffered; ~33 MB each at 4K). memfd_create is unavailable in this
+        // rootfs so libwayland/Mesa fall back to a file under XDG_RUNTIME_DIR.
+        // On the shared 16 MB /run tmpfs two buffers overflow it; the pool file
+        // can't be fully backed and cage (pixman) takes a SIGBUS reading it ->
+        // the whole cage+cog group exits 135 and desktop goes black (wlroots
+        // #2864). systemd-logind mounts /run/user/<uid> as a dedicated tmpfs for
+        // exactly this reason; do the same. Size it to a fraction of RAM (a lazy
+        // cap that only consumes what's written) so it holds enough buffers on
+        // unknown target hardware: clamp(RAM/8, 128 MB, 1 GB). Harmless if the
+        // mount fails (falls back to the /run subdir).
+        {
+            unsigned long rt_mb = 256;  // fallback if sysinfo fails
+            struct sysinfo si;
+            if (sysinfo(&si) == 0) {
+                unsigned long ram_mb =
+                    (unsigned long)(((unsigned long long)si.totalram * si.mem_unit) >> 20);
+                rt_mb = ram_mb / 8;
+                if (rt_mb < 128) rt_mb = 128;
+                if (rt_mb > 1024) rt_mb = 1024;
+            }
+            char rt_opts[64];
+            snprintf(rt_opts, sizeof(rt_opts), "size=%luM,mode=0700", rt_mb);
+            mount("tmpfs", "/run/user/0", "tmpfs", 0, rt_opts);
+            fprintf(stderr, "[child] XDG_RUNTIME_DIR tmpfs: %lu MB\n", rt_mb);
+        }
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
 
         // WLR_LIBINPUT_NO_DEVICES=1: let cage start even if libinput finds 0 devices.
@@ -3383,6 +3362,10 @@ int child_main(const SupervisorConfig& config) {
         // Force Wayland backend for GTK/Qt apps launched from autostart
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
+        // NOTE: cog/WPE SIGBUS (exit 135) was NOT a GPU-render issue — it was /dev/shm
+        // running out (bumped to 512M in init.cpp). Forcing software GL
+        // (WEBKIT_DISABLE_COMPOSITING_MODE / LIBGL_ALWAYS_SOFTWARE / GALLIUM_DRIVER=llvmpipe)
+        // had zero effect, confirming the crash was in the shared-memory path, not Mesa.
 
         // NOTE: udevd is now started early in init_load_modules() (init.cpp).
         // It handles coldplug for all subsystems EXCEPT input. The input
@@ -4244,158 +4227,6 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result, "application/json");
     }));
 
-    // --- Voice I/O audio endpoints ---
-
-    // Helper: encode int16 PCM samples as in-memory WAV bytes
-    // Used by /llamaste/audio/tts to return audio/wav to the browser.
-    // (Defined as a lambda so it can capture nothing and be self-contained.)
-    auto encode_wav_for_http = [](const std::vector<int16_t>& samples, int sample_rate) -> std::string {
-        uint32_t data_size = (uint32_t)(samples.size() * 2);
-        std::string wav(44 + data_size, '\0');
-        char* p = &wav[0];
-        auto put32 = [&](uint32_t v) { memcpy(p, &v, 4); p += 4; };
-        auto put16 = [&](uint16_t v) { memcpy(p, &v, 2); p += 2; };
-        memcpy(p, "RIFF", 4); p += 4;
-        put32(36 + data_size);
-        memcpy(p, "WAVE", 4); p += 4;
-        memcpy(p, "fmt ", 4); p += 4;
-        put32(16);                              // fmt chunk size
-        put16(1);                               // PCM
-        put16(1);                               // mono
-        put32((uint32_t)sample_rate);           // sample rate
-        put32((uint32_t)sample_rate * 2);       // byte rate (rate * channels * bps/8)
-        put16(2);                               // block align
-        put16(16);                              // bits per sample
-        memcpy(p, "data", 4); p += 4;
-        put32(data_size);
-        memcpy(p, samples.data(), data_size);
-        return wav;
-    };
-
-
-    svr.Post("/llamaste/audio/transcribe", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            if (req.has_file("audio")) {
-                // Multipart upload
-                const auto& file = req.get_file_value("audio");
-                std::string tmp_path = "/data/tmp/audio_upload_" +
-                    std::to_string(time(nullptr)) + ".wav";
-#ifndef _WIN32
-                {
-                    std::ofstream ofs(tmp_path, std::ios::binary);
-                    ofs.write(file.content.data(), file.content.size());
-                }
-                json args;
-                args["audio_file"] = tmp_path;
-                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
-                unlink(tmp_path.c_str());
-                res.set_content(result, "application/json");
-#else
-                res.status = 501;
-                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-            } else if (!req.body.empty()) {
-                // Raw WAV body
-                std::string tmp_path = "/data/tmp/audio_upload_" +
-                    std::to_string(time(nullptr)) + ".wav";
-#ifndef _WIN32
-                {
-                    std::ofstream ofs(tmp_path, std::ios::binary);
-                    ofs.write(req.body.data(), req.body.size());
-                }
-                json args;
-                args["audio_file"] = tmp_path;
-                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
-                unlink(tmp_path.c_str());
-                res.set_content(result, "application/json");
-#else
-                res.status = 501;
-                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-            } else {
-                res.status = 400;
-                res.set_content(R"json({"error":"No audio data provided"})json", "application/json");
-            }
-        }
-    ));
-
-    svr.Post("/llamaste/audio/speak", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body, nullptr, false);
-            if (body.is_discarded()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"Invalid JSON"})json", "application/json");
-                return;
-            }
-            std::string result = g_tools.dispatch("audio.speak", req.body);
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    // POST /llamaste/audio/tts — synthesize text and return WAV binary for browser playback
-    svr.Post("/llamaste/audio/tts", require_auth(
-        [encode_wav_for_http](const httplib::Request& req, httplib::Response& res) {
-#ifndef _WIN32
-            extern VoicePipeline* g_voice;
-            if (!g_voice) {
-                res.status = 503;
-                res.set_content(R"json({"error":"voice pipeline not available (desktop mode required)"})json",
-                                "application/json");
-                return;
-            }
-            auto body = json::parse(req.body, nullptr, false);
-            if (body.is_discarded() || !body.contains("text") || !body["text"].is_string()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"text field required (string)"})json", "application/json");
-                return;
-            }
-            std::string text = body["text"].get<std::string>();
-            if (text.empty()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"text must not be empty"})json", "application/json");
-                return;
-            }
-            // Cap synthesis length to avoid very long audio
-            if (text.size() > 1000) text = text.substr(0, 1000);
-
-            int sample_rate = 8000; // default; overwritten by flite actual rate
-            auto pcm = g_voice->speak(text, &sample_rate);
-            if (pcm.empty()) {
-                res.status = 500;
-                res.set_content(R"json({"error":"TTS synthesis failed or TTS not configured"})json",
-                                "application/json");
-                return;
-            }
-            std::string wav = encode_wav_for_http(pcm, sample_rate);
-            res.set_content(wav, "audio/wav");
-#else
-            res.status = 501;
-            res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-        }
-    ));
-
-    svr.Get("/llamaste/audio/status", require_auth(
-        [](const httplib::Request& /*req*/, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.status", "{}");
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    svr.Get("/llamaste/audio/config", require_auth(
-        [](const httplib::Request& /*req*/, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.config", "{}");
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    svr.Post("/llamaste/audio/config", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.config", req.body);
-            res.set_content(result, "application/json");
-        }
-    ));
-
     // --- Installer routes (any mode when booted from live ISO) ---
     if (is_live_iso) {
         svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {
@@ -4816,6 +4647,43 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(tail_file("/tmp/wpa_supplicant.log", 200), "text/plain");
     }));
 
+    // Compositor / child stderr tail. UNAUTHENTICATED on purpose (like
+    // /llamaste/debug/resize-log): desktop-mode boot failures leave the display
+    // black — often before setup/login is even possible on a live USB — so this
+    // must be reachable from another LAN machine with no credentials. /tmp/child.log
+    // is the tee of the child process's stderr (all "[child] ..." messages plus
+    // cage/cog/wlroots/WPE output), so it shows exactly why cage+cog exits.
+    svr.Get("/llamaste/debug/compositor", [tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(tail_file("/tmp/child.log", 400), "text/plain");
+    });
+
+    // ---- TEMPORARY DEBUG HATCH (remove before non-beta release) ----------------
+    // A read-only "SSH/FTP-lite" over the existing web server: tail ANY file on the
+    // box (not just /data like fs.read_file). OFF by default; only active when the
+    // kernel cmdline contains "llamaste.debug" (add it at the GRUB line, same way as
+    // llamaste.mode=). No new daemon/port/package, and deleting this one block fully
+    // removes the capability.
+    //   GET /llamaste/debug/readfile?path=/tmp/child.log&lines=400
+    svr.Get("/llamaste/debug/readfile", [tail_file](const httplib::Request& req, httplib::Response& res) {
+        bool enabled = false;
+        { std::ifstream cl("/proc/cmdline"); std::string c;
+          if (std::getline(cl, c)) enabled = c.find("llamaste.debug") != std::string::npos; }
+        if (!enabled) {
+            res.status = 403;
+            res.set_content("debug hatch disabled (add 'llamaste.debug' to the kernel cmdline)\n",
+                            "text/plain");
+            return;
+        }
+        std::string path = req.get_param_value("path");
+        if (path.empty()) { res.status = 400; res.set_content("missing ?path=\n", "text/plain"); return; }
+        int lines = 400;
+        if (req.has_param("lines")) { try { lines = std::stoi(req.get_param_value("lines")); } catch (...) {} }
+        if (lines < 1) lines = 1;
+        if (lines > 5000) lines = 5000;
+        res.set_content(tail_file(path, lines), "text/plain");
+    });
+    // ---- end TEMPORARY DEBUG HATCH ---------------------------------------------
+
     svr.Get("/debug/dmesg", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string output;
         int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
@@ -5073,10 +4941,16 @@ int child_main(const SupervisorConfig& config) {
             output += std::string("  ") + vars[i] + "=" + (v ? v : "(not set)") + "\n";
         }
 
-        // Compositor log
-        output += "\n=== Compositor Log (/tmp/compositor.log) ===\n";
-        std::string clog = read_file("/tmp/compositor.log");
-        output += clog.empty() ? "(no log)\n" : clog;
+        // Compositor log (child stderr tee — see /llamaste/debug/compositor for the full tail)
+        output += "\n=== Compositor Log (/tmp/child.log, tail) ===\n";
+        std::string clog = read_file("/tmp/child.log");
+        if (clog.empty()) {
+            output += "(no log)\n";
+        } else {
+            // Only the last ~4000 chars — this endpoint is a summary, not the full log.
+            if (clog.size() > 4000) clog = "...\n" + clog.substr(clog.size() - 4000);
+            output += clog;
+        }
 
         // Wayland socket
         output += "\n=== Wayland Socket ===\n";
@@ -5113,15 +4987,7 @@ int child_main(const SupervisorConfig& config) {
             output += "  /dev/snd/ not found\n";
         }
 
-        // Voice pipeline state
-        output += "\n=== Voice Pipeline ===\n";
-        extern VoicePipeline* g_voice;
-        if (g_voice) {
-            output += "Voice pipeline: INITIALIZED\n";
-            output += "TTS engine: " + g_voice->tts_engine_name() + "\n";
-        } else {
-            output += "Voice pipeline: NOT INITIALIZED (only enabled in desktop mode)\n";
-        }
+        output += "Voice: removed\n";
 
         // Check TTS model files
         output += "\n=== TTS Models (/data/models/) ===\n";

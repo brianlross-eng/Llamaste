@@ -1,4 +1,4 @@
 #pragma once
 // version.h -- Llamaste version constant for update checks and manifest comparison
 
-constexpr const char* LLAMASTE_VERSION = "0.5.9-beta";
+constexpr const char* LLAMASTE_VERSION = "0.5.14-beta";

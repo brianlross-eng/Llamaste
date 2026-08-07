@@ -444,7 +444,13 @@ void init_mount_filesystems() {
     // crashes (SIGSEGV) on first keyboard input ("Failed to allocate shm file
     // for XKB keymap"). memfd_create is the primary path but /dev/shm must exist.
     mkdir("/dev/shm", 0755);
-    try_mount("tmpfs",    "/dev/shm", "tmpfs",    0, "size=32M");
+    // 512M (was 32M): defensive headroom for any wlroots/Mesa shm that lands here.
+    // NOTE: the desktop black-screen SIGBUS was NOT /dev/shm — Mesa's EGL swrast
+    // presents cog's frames through wl_shm pools under XDG_RUNTIME_DIR (/run/user/0),
+    // which overflowed the 16M /run tmpfs; that is fixed in child_main.cpp by giving
+    // /run/user/0 its own RAM-sized tmpfs. This larger /dev/shm is just cheap insurance
+    // (tmpfs only consumes pages actually written).
+    try_mount("tmpfs",    "/dev/shm", "tmpfs",    0, "size=512M");
 }
 
 // Enumerate all block device partitions from /sys/block/
