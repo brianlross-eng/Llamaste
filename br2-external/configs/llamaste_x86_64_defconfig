@@ -65,21 +65,6 @@ BR2_PACKAGE_VULKAN_HEADERS=y
 BR2_PACKAGE_OPENBLAS=y
 
 # Voice I/O (Phase 3a)
-BR2_PACKAGE_ALSA_LIB=y
-BR2_PACKAGE_ALSA_LIB_MIXER=y
-BR2_PACKAGE_ALSA_LIB_PCM_PLUGINS=y
-BR2_PACKAGE_ALSA_UTILS=y
-BR2_PACKAGE_ALSA_UTILS_ALSACTL=y
-BR2_PACKAGE_ALSA_UTILS_AMIXER=y
-BR2_PACKAGE_ALSA_UTILS_APLAY=y
-# BR2_PACKAGE_ALSA_UTILS_ALSAMIXER is not set
-BR2_PACKAGE_WHISPER_CPP=y
-BR2_PACKAGE_FLITE=y
-BR2_PACKAGE_ESPEAK_NG=y
-
-# Neural TTS (Phase B) — sherpa-onnx with Piper VITS models
-BR2_PACKAGE_ONNXRUNTIME=y
-BR2_PACKAGE_SHERPA_ONNX=y
 
 # WiFi support (wpa_supplicant + dhcpcd + iw + firmware for ALL common hardware)
 BR2_PACKAGE_WPA_SUPPLICANT=y
@@ -160,27 +145,44 @@ BR2_TARGET_GENERIC_HOSTNAME="llamaste"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Llamaste"
 
 # ---------------------------------------------------------------------------
-# Desktop mode packages (labwc stacking WM + cog browser)
+# Desktop mode packages (cage kiosk compositor + cog browser)
 # ---------------------------------------------------------------------------
-# labwc: stacking Wayland compositor (real desktop, not kiosk)
-#   - openbox-compatible XML config (rc.xml, menu.xml, autostart)
-#   - windows, resize/move, keyboard shortcuts, right-click menu
-#   - Super+B: open browser  Super+Q: close  Alt+Tab: cycle
-BR2_PACKAGE_LABWC=y
+# cage: single-app fullscreen Wayland kiosk compositor (wlroots-based). This is the
+#   PRIMARY compositor child_main launches for desktop mode; wlroots implements
+#   zwp_text_input_v3 so typing in the cog/WebKit web UI works. `cage` selects wlroots,
+#   which pulls in libinput/seatd/libdrm/pixman/wayland/hwdata/libdisplay-info.
+#   NOTE: labwc (the old default) was DROPPED -- it isn't packaged in Buildroot 2025.02,
+#   so the stale BR2_PACKAGE_LABWC=y was an unknown symbol silently dropped by
+#   olddefconfig, which took the whole wlroots stack down and left desktop mode with no
+#   compositor (booted like server mode). Enabling cage restores it.
+BR2_PACKAGE_CAGE=y
 # Wayland protocol libraries
 BR2_PACKAGE_WAYLAND=y
 BR2_PACKAGE_WAYLAND_PROTOCOLS=y
-# Mesa 3D: GPU drivers for Intel, AMD, NVIDIA + software fallback
+# Mesa 3D: GPU drivers for AMD, NVIDIA + software fallback
 BR2_PACKAGE_MESA3D=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SWRAST=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS=y
+# Intel iris/crocus gallium drivers disabled: they force intel-clc, which
+# hard-requires libclc (an LLVM subproject Buildroot doesn't package) and aborts
+# the Mesa configure. Iris never worked on our hardware anyway (desktop falls back
+# to the pixman software renderer), so dropping it costs nothing for the AMD target.
+# BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS is not set
+# BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS is not set
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_RADEONSI=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_NOUVEAU=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
-# LLVM required for radeonsi + llvmpipe
+# Hardware Vulkan for AMD via RADV. gfx1151 (Strix Halo) landed in Mesa 24.1, so
+# mesa3d is bumped to 24.2.8 (see br2-external mesa3d overrides) which exposes the
+# AMD Vulkan driver. RADV uses its own ACO compiler (no LLVM needed) and needs
+# libdrm's amdgpu winsys. This gives llama.cpp's Vulkan backend a real GPU to
+# offload onto instead of falling back to CPU.
+BR2_PACKAGE_MESA3D_VULKAN_DRIVER_AMD=y
+BR2_PACKAGE_LIBDRM_AMDGPU=y
+# LLVM required for radeonsi + llvmpipe; MESA3D_LLVM links Mesa to it and, via the
+# RADV option's conditional select, pulls in the LLVM AMDGPU target too.
 BR2_PACKAGE_LLVM=y
+BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 # Graphics support libraries

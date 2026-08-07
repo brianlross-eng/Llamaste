@@ -3,6 +3,17 @@
 (function () {
   'use strict';
 
+  // WiFi SSIDs / security strings are broadcast by nearby APs (attacker-controlled).
+  // Escape before interpolating into innerHTML or an attribute to prevent XSS.
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // --- DOM refs ---
   var scheduleCard = null;
   var aboutCard = null;
@@ -185,24 +196,30 @@
       copyBtn.addEventListener('click', function () {
         var key = (document.getElementById('mcp-api-key') || {}).textContent || '';
         if (!key || key === '—' || key === '(unavailable)') return;
-        navigator.clipboard.writeText(key).then(function () {
+        function flash() {
           var orig = copyBtn.textContent;
           copyBtn.textContent = 'Copied!';
           setTimeout(function () { copyBtn.textContent = orig; }, 1500);
-        }).catch(function () {
-          // Fallback for HTTP (no clipboard API)
+        }
+        // Fallback for non-secure origins (plain http:// on a LAN IP) where the
+        // async Clipboard API is unavailable. execCommand still works there.
+        function fallback() {
           var ta = document.createElement('textarea');
           ta.value = key;
           ta.style.position = 'fixed';
           ta.style.opacity = '0';
           document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
+          ta.focus(); ta.select();
+          try { document.execCommand('copy'); flash(); } catch (e) { /* give up quietly */ }
           document.body.removeChild(ta);
-          var orig = copyBtn.textContent;
-          copyBtn.textContent = 'Copied!';
-          setTimeout(function () { copyBtn.textContent = orig; }, 1500);
-        });
+        }
+        // navigator.clipboard is UNDEFINED on http:// origins — reading .writeText
+        // would throw synchronously (before any .catch), so guard existence first.
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(key).then(flash).catch(fallback);
+        } else {
+          fallback();
+        }
       });
     }
 
@@ -418,7 +435,7 @@
       stateEl.style.color = '#00e5a0';
       if (ssidRow) {
         ssidRow.style.display = '';
-        ssidEl.innerHTML = (data.ssid || '') + renderSignalBars(data.signal_dbm);
+        ssidEl.innerHTML = escapeHtml(data.ssid || '') + renderSignalBars(data.signal_dbm);
       }
       if (sigRow && sigVal && data.signal_dbm) {
         var q = dbmToBars(data.signal_dbm);
@@ -506,8 +523,8 @@
       var topLine = document.createElement('div');
       topLine.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:0.9em';
       topLine.innerHTML =
-        '<span title="' + (isOpen ? 'Open network' : net.security) + '" style="font-size:0.85em">' + (isOpen ? '🔓' : '🔒') + '</span>' +
-        '<span style="color:' + (isConn ? '#00e5a0' : '#e0e0e0') + ';font-weight:' + (isConn ? '600' : 'normal') + '">' + net.ssid + '</span>' +
+        '<span title="' + escapeHtml(isOpen ? 'Open network' : net.security) + '" style="font-size:0.85em">' + (isOpen ? '🔓' : '🔒') + '</span>' +
+        '<span style="color:' + (isConn ? '#00e5a0' : '#e0e0e0') + ';font-weight:' + (isConn ? '600' : 'normal') + '">' + escapeHtml(net.ssid) + '</span>' +
         wifiFreqBadge(net.freq_mhz) +
         (isConn  ? '<span style="color:#00e5a0;margin-left:4px;font-size:0.8em">✓ connected</span>' : '') +
         (isSaved && !isConn ? '<span style="color:#7ec8a0;margin-left:4px;font-size:0.75em;opacity:0.7">saved</span>' : '');
@@ -518,7 +535,7 @@
       metaLine.innerHTML =
         renderSignalBars(net.signal_dbm) +
         '<span>' + (net.signal_dbm || '?') + ' dBm</span>' +
-        '<span style="opacity:0.6">' + (net.security || 'OPEN') + '</span>';
+        '<span style="opacity:0.6">' + escapeHtml(net.security || 'OPEN') + '</span>';
 
       row.appendChild(topLine);
       row.appendChild(metaLine);
@@ -765,6 +782,55 @@
   // Poll cluster status every 10 seconds
   setInterval(updateClusterCard, 10000);
   updateClusterCard();
+
+  // --- Cluster group name (join/leave) ---
+  function loadClusterConfig() {
+    var input = document.getElementById('cluster-group-input');
+    if (!input) return;
+    fetch('/llamaste/cluster/config', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (document.activeElement !== input) input.value = data.group || '';
+      })
+      .catch(function () {});
+  }
+  var clusterSaveBtn = document.getElementById('cluster-group-save');
+  if (clusterSaveBtn && !clusterSaveBtn._wired) {
+    clusterSaveBtn._wired = true;
+    clusterSaveBtn.addEventListener('click', function () {
+      var input = document.getElementById('cluster-group-input');
+      var note = document.getElementById('cluster-group-note');
+      var group = (input.value || '').trim();
+      clusterSaveBtn.disabled = true;
+      fetch('/llamaste/cluster/config', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group: group })
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          clusterSaveBtn.disabled = false;
+          note.style.display = 'block';
+          if (!res.ok) {
+            note.textContent = 'Error: ' + (res.d.error || 'could not save');
+            note.style.color = '#ff6b6b';
+            return;
+          }
+          note.textContent = res.d.enabled
+            ? 'Joined cluster group "' + res.d.group + '". Reboot to apply.'
+            : 'Set to standalone. Reboot to apply.';
+          note.style.color = '#cc9';
+        })
+        .catch(function (err) {
+          clusterSaveBtn.disabled = false;
+          note.style.display = 'block';
+          note.textContent = 'Save failed: ' + err.message;
+          note.style.color = '#ff6b6b';
+        });
+    });
+  }
+  loadClusterConfig();
 
   // --- Public refresh function ---
   // Called when switching to the System tab.

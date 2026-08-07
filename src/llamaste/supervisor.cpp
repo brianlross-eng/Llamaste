@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/time.h>  // struct timeval (SO_RCVTIMEO) — distinct from <time.h> on musl
 #include <termios.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -639,6 +640,39 @@ static void console_input_thread() {
 
 // ---------- Console display thread ----------
 
+// Readiness probe: is the web UI actually serving on 127.0.0.1:port yet?
+// The child PID existing only means the process forked — the HTTP server may not
+// be listening for several seconds while it inits (mounts, model load, etc.). We
+// use this to show "BOOTING" until the server answers, instead of "RUNNING" the
+// instant the child spawns. Any HTTP response (even 404) means it's serving.
+static bool web_ui_ready(int port) {
+#ifndef _WIN32
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+    struct timeval tv{1, 0};  // 1s send/recv timeout — never block the display
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(0x7f000001);  // 127.0.0.1
+    // Localhost connect is instant when listening, or ECONNREFUSED immediately
+    // when not — no long blocking either way.
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock); return false; }
+    const char* req = "GET /health HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if (write(sock, req, strlen(req)) < 0) { close(sock); return false; }
+    char buf[64];
+    ssize_t n = read(sock, buf, sizeof(buf) - 1);
+    close(sock);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    return strstr(buf, "HTTP/") != nullptr;
+#else
+    (void)port;
+    return false;
+#endif
+}
+
 static void console_display_thread(const SupervisorConfig& config) {
     fprintf(stderr, "[supervisor] Console display thread started\n");
 
@@ -671,6 +705,10 @@ static void console_display_thread(const SupervisorConfig& config) {
         }
     }
 
+    // Latched once the web UI first answers; status shows BOOTING until then.
+    // Reset across child respawns so a crashed/restarted UI re-probes.
+    bool web_ready = false;
+
     while (!g_shutdown_requested) {
         // Pause display while password is being entered on the console
         if (g_passwd_entry_active) {
@@ -699,9 +737,17 @@ static void console_display_thread(const SupervisorConfig& config) {
             temp_str = "N/A";
         }
 
-        // Determine child status
-        const char* status_str = (g_child_pid > 0 && !g_child_exited)
-            ? "\033[32mRUNNING\033[0m" : "\033[31mDOWN\033[0m";
+        // Determine status: DOWN if the child isn't up; BOOTING while the child
+        // is up but the web UI isn't answering yet; RUNNING once it serves.
+        const char* status_str;
+        if (g_child_pid <= 0 || g_child_exited) {
+            web_ready = false;                       // reset so a respawn re-probes
+            status_str = "\033[31mDOWN\033[0m";
+        } else {
+            if (!web_ready) web_ready = web_ui_ready(config.http_port);
+            status_str = web_ready ? "\033[32mRUNNING\033[0m"
+                                   : "\033[33mBOOTING\033[0m";  // yellow
+        }
 
         // Build the display using string builder
         std::string out;
@@ -1386,10 +1432,20 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
     auto wstr = [&](const char* s) { write(tty, s, strlen(s)); };
 
-    auto read_line = [&](bool echo_chars, size_t max_len) -> std::string {
+    // first_timeout_s > 0: wait at most that long for the FIRST keystroke before
+    // giving up (returns "") so an unattended boot doesn't block. Once the user
+    // starts typing, reads block normally.
+    auto read_line = [&](bool echo_chars, size_t max_len, int first_timeout_s = 0) -> std::string {
         std::string s;
         char c;
-        while (read(tty, &c, 1) == 1) {
+        bool first = true;
+        while (true) {
+            if (first && first_timeout_s > 0) {
+                struct pollfd pfd; pfd.fd = tty; pfd.events = POLLIN; pfd.revents = 0;
+                if (poll(&pfd, 1, first_timeout_s * 1000) <= 0) return s;  // no input in time
+            }
+            first = false;
+            if (read(tty, &c, 1) != 1) break;
             if (c == '\r' || c == '\n') { wstr("\r\n"); break; }
             if (c == 3 || c == 4)      { s.clear(); wstr("\r\n"); break; }
             if ((c == 127 || c == '\b') && !s.empty()) {
@@ -1401,6 +1457,22 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
             }
         }
         return s;
+    };
+
+    // Timed single keypress with a visible countdown. Returns false if the window
+    // elapses with no key — lets the caller auto-skip WiFi setup on a headless box.
+    auto wait_key = [&](int timeout_s, char* out) -> bool {
+        for (int rem = timeout_s; rem > 0; rem--) {
+            char cd[72];
+            snprintf(cd, sizeof(cd), "\r  (auto-continuing in %2ds -- press a key to choose)  ", rem);
+            wstr(cd);
+            struct pollfd pfd; pfd.fd = tty; pfd.events = POLLIN; pfd.revents = 0;
+            if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
+                if (read(tty, out, 1) == 1) { wstr("\r\n"); return true; }
+            }
+        }
+        wstr("\r\n");
+        return false;
     };
 
     // --- Phase 1: Scan ---
@@ -1443,9 +1515,15 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
                  "  Enter number (1-%d), or Enter to type manually: ", n_show);
         wstr(prompt);
 
-        // Single keypress — no Enter needed
+        // Single keypress with a boot-safety timeout — an unattended/headless box
+        // must not block forever at this prompt. Auto-skip WiFi setup on no input.
         char c = 0;
-        read(tty, &c, 1);
+        if (!wait_key(25, &c)) {
+            wstr("  No input -- skipping WiFi setup, continuing boot.\r\n");
+            tcsetattr(tty, TCSAFLUSH, &old_tio);
+            close(tty);
+            return;
+        }
         write(tty, &c, 1);
         wstr("\r\n");
 
@@ -1471,8 +1549,8 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
 
     // --- Phase 3: Manual SSID entry if not picked from list ---
     if (ssid.empty()) {
-        wstr("  SSID     : ");
-        ssid = read_line(true, 63);
+        wstr("  SSID (25s timeout): ");
+        ssid = read_line(true, 63, 25);   // auto-skip if nobody types
     }
 
     if (ssid.empty()) {
@@ -1514,6 +1592,19 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
         fprintf(stderr, "[wifi] console_wifi_setup: cannot write wpa.conf: %m\n");
         return;
     }
+    chmod(conf, 0600);   // contains the PSK — must not be world-readable
+    // Escape for wpa_supplicant quoted strings. SSIDs/PSKs are attacker-supplied
+    // (off the air), so a bare " or \ could break out of the quotes and inject
+    // config directives; drop control chars (incl. newlines).
+    auto wpa_escape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            if ((unsigned char)c < 0x20) continue;
+            if (c == '\\' || c == '"') out += '\\';
+            out += c;
+        }
+        return out;
+    };
     fprintf(f, "ctrl_interface=/run/wpa_supplicant\n");
     fprintf(f, "ctrl_interface_group=0\n");
     fprintf(f, "update_config=1\n");
@@ -1525,11 +1616,11 @@ static void supervisor_console_wifi_setup(const std::string& iface) {
     fprintf(f, "country=US\n");
     fprintf(f, "\n");
     fprintf(f, "network={\n");
-    fprintf(f, "    ssid=\"%s\"\n", ssid.c_str());
+    fprintf(f, "    ssid=\"%s\"\n", wpa_escape(ssid).c_str());
     if (is_open || psk.empty()) {
         fprintf(f, "    key_mgmt=NONE\n");
     } else {
-        fprintf(f, "    psk=\"%s\"\n", psk.c_str());
+        fprintf(f, "    psk=\"%s\"\n", wpa_escape(psk).c_str());
         fprintf(f, "    key_mgmt=WPA-PSK\n");
     }
     fprintf(f, "}\n");

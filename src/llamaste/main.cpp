@@ -140,6 +140,33 @@ static void scan_usb_for_model() {
     }
 }
 
+// Seed models baked into the squashfs (at /opt/llamaste/models/) into
+// /data/models/ so select_model()/available_models() find them. /data is a
+// fresh tmpfs (live) or the ext4 DATA partition (installed) that MASKS whatever
+// the squashfs carries under /data — so a bundled model must live outside /data
+// and be linked in here at boot. Symlink rather than copy: the gguf stays in the
+// read-only squashfs (mmap'd by llama-server) instead of consuming the 512M
+// live tmpfs or duplicating onto disk. Idempotent.
+static void seed_bundled_models() {
+    const char* src_dir = "/opt/llamaste/models";
+    DIR* d = opendir(src_dir);
+    if (!d) return;
+    mkdir("/data/models", 0755);
+    struct dirent* de;
+    while ((de = readdir(d)) != nullptr) {
+        size_t len = strlen(de->d_name);
+        if (len < 5 || strcmp(de->d_name + len - 5, ".gguf") != 0) continue;
+        std::string src  = std::string(src_dir) + "/" + de->d_name;
+        std::string dest = std::string("/data/models/") + de->d_name;
+        if (access(dest.c_str(), F_OK) == 0) continue;   // already linked/present
+        if (symlink(src.c_str(), dest.c_str()) == 0)
+            fprintf(stderr, "[main] Bundled model linked into /data/models: %s\n", de->d_name);
+        else
+            fprintf(stderr, "[main] Bundled model link failed for %s: %m\n", de->d_name);
+    }
+    closedir(d);
+}
+
 int main(int argc, char** argv) {
     // Ultra-early diagnostic — if this doesn't appear, binary didn't start
     write(STDERR_FILENO, "[INIT] BINARY STARTED\n", 22);
@@ -180,6 +207,7 @@ int main(int argc, char** argv) {
             }
         }
         init_create_data_dirs();
+        seed_bundled_models();  // Link any squashfs-baked models into /data/models
         init_mount_esp();   // Mount ESP for grubenv (A/B update slot management)
         init_load_modules();  // Load GPU modules + start eudev auto-detection
         init_start_dbus();    // Start dbus (required by BlueZ)

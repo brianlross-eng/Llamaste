@@ -8,6 +8,7 @@
 #include "json.hpp"
 #include <string>
 #include <cstring>
+#include <cstdlib>   // realpath, free
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -57,6 +58,26 @@ static bool validate_data_path(const std::string& path) {
     if (canon != "/data" && canon.substr(0, 6) != "/data/") return false;
     // Must not contain .. (belt-and-suspenders with canonicalization)
     if (path.find("..") != std::string::npos) return false;
+#ifndef _WIN32
+    // Follow symlinks: resolve the longest EXISTING ancestor with realpath and
+    // require it to stay under /data. The lexical checks above don't catch a
+    // symlink under /data (e.g. -> /etc). The remaining non-existent suffix
+    // can't contain a symlink and is already ".."-free per the check above.
+    {
+        std::string probe = path;
+        for (;;) {
+            char* rp = realpath(probe.c_str(), nullptr);
+            if (rp) {
+                std::string r(rp);
+                free(rp);
+                return (r == "/data" || r.compare(0, 6, "/data/") == 0);
+            }
+            size_t slash = probe.find_last_of('/');
+            if (slash == std::string::npos || slash == 0) return false;
+            probe.resize(slash);
+        }
+    }
+#endif
     return true;
 }
 
@@ -249,8 +270,9 @@ static std::string handle_fs_disk_usage(const std::string& args_json) {
 // fs.search — search for files by name pattern
 // ---------------------------------------------------------------------------
 static void search_recursive(const std::string& dir, const std::string& pattern,
-                             json& results, int max_results, int& count) {
+                             json& results, int max_results, int& count, int depth = 0) {
     if (count >= max_results) return;
+    if (depth > 20) return;   // guard against symlink cycles / runaway recursion
 
     DIR* d = opendir(dir.c_str());
     if (!d) return;
@@ -276,10 +298,11 @@ static void search_recursive(const std::string& dir, const std::string& pattern,
             count++;
         }
 
-        // Recurse into directories
+        // Recurse into directories — use lstat so symlinked dirs are NOT followed
+        // (a symlink cycle under /data would otherwise recurse until the stack blows).
         struct stat st;
-        if (stat(full_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-            search_recursive(full_path, pattern, results, max_results, count);
+        if (lstat(full_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            search_recursive(full_path, pattern, results, max_results, count, depth + 1);
         }
     }
     closedir(d);

@@ -18,9 +18,9 @@ LLAMA_SERVER_CONF_OPTS = \
 	-DGGML_CUDA=OFF \
 	-DGGML_VULKAN=ON \
 	-DGGML_METAL=OFF \
-	-DGGML_HIP=ON \
+	-DGGML_HIP=OFF \
 	-DGGML_RPC=ON \
-	-DGGML_BLAS=ON \
+	-DGGML_BLAS=OFF \
 	-DLLAMA_CURL=OFF \
 	-DLLAMA_BUILD_TESTS=OFF \
 	-DLLAMA_BUILD_EXAMPLES=OFF \
@@ -29,12 +29,16 @@ LLAMA_SERVER_CONF_OPTS = \
 # GPU backend notes:
 # - Vulkan (ON): portable; works on AMD, Intel, NVIDIA GPUs. Requires
 #   vulkan-loader (BR2_PACKAGE_VULKAN_LOADER=y) and Mesa Vulkan drivers.
-# - HIP/ROCm (ON): AMD GPU compute via HSA/KFD (/dev/kfd). Requires ROCm
-#   stack (not packaged in Buildroot; silently skipped if not found).
+# - HIP/ROCm (OFF): AMD GPU compute via HSA/KFD (/dev/kfd). Requires a ROCm
+#   cross-compiler (hipcc) not available in Buildroot; llama.cpp b5460 hard-fails
+#   at enable_language(HIP) when GGML_HIP=ON without it. AMD GPUs (incl. Strix
+#   Halo gfx1151) use the Vulkan/RADV backend above instead.
 # - CUDA (OFF): requires proprietary NVIDIA driver + CUDA toolkit, not
 #   available in Buildroot. NVIDIA GPUs should use the Vulkan backend.
-# - BLAS (ON): CPU fallback via OpenBLAS (BR2_PACKAGE_OPENBLAS=y).
-#   Provides ~2-4x CPU throughput improvement without GPU acceleration.
+# - BLAS (OFF): would need OpenBLAS (BR2_PACKAGE_OPENBLAS=y) in the target. With
+#   GGML_BLAS=ON but no BLAS lib, ggml-backend-reg references ggml_backend_blas_reg
+#   which is never built -> link error. CPU acceleration still comes from GGML_NATIVE
+#   (AVX2/AVX-512). Re-enable by adding OpenBLAS to the defconfig if CPU BLAS is wanted.
 
 define LLAMA_SERVER_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/bin/llama-server \

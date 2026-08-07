@@ -300,13 +300,14 @@ static std::string http_get(const std::string& url, long timeout_seconds = 15) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Llamaste/0.1");
+    // Fail closed: NEVER disable TLS verification. Use a CA bundle if present,
+    // otherwise rely on curl's compiled-in default trust store.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
     } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
-    } else {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
 
     CURLcode res = curl_easy_perform(curl);
@@ -495,13 +496,14 @@ static std::string download_single_file(const std::string& repo_id,
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    // Fail closed: NEVER disable TLS verification. Use a CA bundle if present,
+    // otherwise rely on curl's compiled-in default trust store.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
     } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
-    } else {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
     fprintf(stderr, "[download] Starting download: %s\n", url.c_str());
 
@@ -609,13 +611,14 @@ static std::string download_single_file_direct(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    // Fail closed: NEVER disable TLS verification. Use a CA bundle if present,
+    // otherwise rely on curl's compiled-in default trust store.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
     } else if (access("/data/llamaste/cacert.pem", R_OK) == 0) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, "/data/llamaste/cacert.pem");
-    } else {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
     fprintf(stderr, "[download-direct] Starting download: %s\n", url.c_str());
 

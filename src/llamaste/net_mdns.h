@@ -84,9 +84,12 @@ public:
 
     // Parse peer info from a service response packet.
     // Extracts SRV (port+target), TXT (key=value strings), and A (IPv4)
-    // records from a DNS response packet.
+    // records from a DNS response packet. Only SRV records whose owner name is
+    // under `service_type` are returned — the shared mDNS multicast socket also
+    // receives unrelated announcements (Windows, Oculus, _dosvc, ...) whose SRV
+    // records would otherwise be mis-added as bogus peers.
     static std::vector<DiscoveredService> parse_service_responses(
-        const uint8_t* pkt, size_t pkt_len);
+        const uint8_t* pkt, size_t pkt_len, const std::string& service_type);
 
     // Discover services of a given type on the LAN.
     // service_type: e.g. "_llama-rpc._tcp" (no ".local")

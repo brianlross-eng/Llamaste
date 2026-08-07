@@ -21,7 +21,6 @@
 #include "net_mdns.h"
 #include "scheduler.h"
 #include "auth.h"
-#include "voice.h"
 #include "cluster.h"
 #include "mcp_server.h"
 #include "updater.h"
@@ -61,11 +60,14 @@
 #include <dirent.h>
 #include <termios.h>
 #include <sys/statvfs.h>
+#include <sys/mount.h>
+#include <sys/sysinfo.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <sys/ioctl.h>
@@ -136,6 +138,12 @@ static std::function<std::string(const std::string&)> g_inference_fn;
 static std::atomic<pid_t> g_llama_pid{0};
 #endif
 static std::atomic<bool> g_model_loaded{false};
+// Real, probed readiness of the inference engine, maintained by the health-poll thread.
+// g_model_loaded only says "a model was loaded"; it stays true even if llama-server later
+// wedges (process alive but 503ing/hung), which the crash monitor's waitpid() never sees.
+// Defaults true so a freshly-loaded model reports ready immediately; the poller flips it
+// false on a detected wedge and back true on recovery. /health reports the AND of the two.
+static std::atomic<bool> g_inference_ready{true};
 static int g_llama_port = 8088;
 static std::string g_model_name;
 static std::atomic<double> g_tokens_per_sec{0.0};
@@ -519,19 +527,103 @@ static std::string make_inference_error(const std::string& message) {
 
 // Build a chatml-formatted prompt string from OpenAI-format messages.
 // Used by llama_inference to bypass the broken chat template in llama-server.
+// nlohmann json::value(key, default) THROWS type_error.302 when the key EXISTS
+// but is null — it only substitutes the default for MISSING keys. Assistant
+// tool-call messages carry "content": null (see msg_obj["content"] = nullptr),
+// so a plain .value("content","") throws mid-conversation. jstr() is null-safe:
+// missing/null -> default, string -> the string, object/other (e.g. a tool_call
+// "arguments" object) -> its serialized JSON.
+static std::string jstr(const json& o, const char* key, const char* dflt) {
+    auto it = o.find(key);
+    if (it == o.end() || it->is_null()) return dflt;
+    if (it->is_string()) return it->get<std::string>();
+    return it->dump();
+}
+
+// True if `ip` belongs to ANY local interface. mDNS peer discovery must reject
+// self-echo: a multi-homed box (eth + wifi) announces on every interface and
+// then discovers its OWN announcement via a different interface's IP, which
+// doesn't match a single self.ip — so it adds ITSELF as a phantom peer. That
+// fake 2-node cluster makes it spawn llama-server with an RPC/tensor-split to a
+// "peer" that is really itself, which wedges the engine (persistent HTTP 503).
+static bool is_local_ip(const std::string& ip) {
+    if (ip.empty()) return false;
+    struct ifaddrs* ifa = nullptr;
+    if (getifaddrs(&ifa) != 0) return false;
+    bool found = false;
+    for (struct ifaddrs* p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        char buf[INET_ADDRSTRLEN];
+        auto* sin = (struct sockaddr_in*)p->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)) && ip == buf) {
+            found = true; break;
+        }
+    }
+    freeifaddrs(ifa);
+    return found;
+}
+
+// Multi-node clustering is OPT-IN and GROUPED. /data/llamaste/cluster-enabled
+// holds a cluster ID (any name/token):
+//   - absent            -> standalone: neither advertises nor discovers the
+//                          cluster service. A single appliance must NOT auto-
+//                          recruit other machines it hears on the LAN — doing so
+//                          unprompted is hostile (a home-lab user's other LLM
+//                          nodes would get silently hijacked).
+//   - present but empty -> "default" cluster.
+//   - present with text -> that cluster ID. A node ONLY peers with others
+//                          advertising the SAME id, so multiple independent
+//                          Llamaste clusters can coexist on one LAN without
+//                          merging.
+static std::string cluster_id() {
+    std::ifstream f("/data/llamaste/cluster-enabled");
+    if (!f) return "";                       // absent -> standalone
+    std::string id;
+    std::getline(f, id);
+    size_t a = id.find_first_not_of(" \t\r\n");
+    size_t b = id.find_last_not_of(" \t\r\n");
+    id = (a == std::string::npos) ? "" : id.substr(a, b - a + 1);
+    return id.empty() ? "default" : id;      // present-but-empty -> default cluster
+}
+static bool cluster_enabled() { return !cluster_id().empty(); }
+
+// True only if a Vulkan ICD (driver manifest) is actually installed. NOTE:
+// g_hwinfo.gpu_detected means a DISPLAY device (amdgpu KMS), NOT a compute
+// backend. This image ships the Vulkan *loader* but no ICD (RADV isn't buildable
+// on musl/BR-2024.02), so the loader enumerates 0 devices. Passing -ngl to
+// offload layers onto that non-existent GPU makes llama-server crash-loop
+// (intermittent stub/503). Gate GPU offload on a real ICD so it stays on CPU
+// until a build actually ships a working Vulkan driver.
+static bool has_vulkan_icd() {
+    const char* dirs[] = {"/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", nullptr};
+    for (int i = 0; dirs[i]; i++) {
+        DIR* d = opendir(dirs[i]);
+        if (!d) continue;
+        bool found = false;
+        struct dirent* e;
+        while ((e = readdir(d)) != nullptr) {
+            std::string n = e->d_name;
+            if (n.size() > 5 && n.substr(n.size() - 5) == ".json") { found = true; break; }
+        }
+        closedir(d);
+        if (found) return true;
+    }
+    return false;
+}
+
 static std::string build_chatml_prompt(const json& messages) {
     std::string prompt;
     for (const auto& msg : messages) {
-        const std::string role = msg.value("role", "user");
-        std::string content = msg.value("content", "");
+        const std::string role = jstr(msg, "role", "user");
+        std::string content = jstr(msg, "content", "");
 
         // Assistant messages with tool_calls: serialize tool calls as Qwen2.5 native format
         if (role == "assistant" && content.empty() && msg.contains("tool_calls")
             && msg["tool_calls"].is_array()) {
             for (const auto& tc : msg["tool_calls"]) {
                 if (tc.contains("function")) {
-                    std::string name = tc["function"].value("name", "");
-                    std::string args = tc["function"].value("arguments", "{}");
+                    std::string name = jstr(tc["function"], "name", "");
+                    std::string args = jstr(tc["function"], "arguments", "{}");
                     content += "<tool_call>\n{\"name\": \"" + name +
                                "\", \"arguments\": " + args + "}\n</tool_call>\n";
                 }
@@ -540,7 +632,7 @@ static std::string build_chatml_prompt(const json& messages) {
 
         // Tool result messages → "tool" role (Qwen2.5 training format)
         if (role == "tool") {
-            std::string name = msg.value("name", "");
+            std::string name = jstr(msg, "name", "");
             prompt += "<|im_start|>tool\n";
             if (!name.empty()) {
                 prompt += "{\"name\": \"" + name + "\", \"content\": " +
@@ -808,10 +900,13 @@ static std::string llama_inference(const std::string& request_json) {
         fprintf(stderr, "[inference] tool_calls: %d call(s) dispatched\n",
                 (int)tool_calls_arr.size());
     } else {
-        // Plain text response
+        // Plain text response. Strip any <tool_call> residue: a truncated/malformed call
+        // (e.g. cut off by max_tokens, or JSON the parser rejected) leaves raw tags in the
+        // text that would otherwise leak into the chat. If the model ONLY emitted a bad
+        // tool call, the stripped content is empty and the caller shows a no-response note.
         json msg_obj;
         msg_obj["role"]    = "assistant";
-        msg_obj["content"] = content;
+        msg_obj["content"] = strip_tool_call_residue(content);
         choice["message"]      = msg_obj;
         choice["finish_reason"] = "stop";
         fprintf(stderr, "[inference] generated %d tokens: %.100s\n",
@@ -855,9 +950,50 @@ static pid_t safe_spawn(const char* path, char* const argv[],
     return pid;
 }
 
+// Re-read the GPU memory sysfs. detect_hardware() runs early in boot, before amdgpu
+// binds its DRM node (amdgpu loads as a module after the squashfs pivot), so the early
+// scan misses the card and lands on the PCI fallback (detected+name only, no VRAM/GTT,
+// unified=false). Calling this at llama-server spawn time — when the driver IS up —
+// gives the real unified/GTT picture so the -ngl decision offloads correctly, and also
+// fixes the GPU figures reported by /debug/sysinfo. Updates g_hwinfo in place.
+static void refresh_gpu_memory() {
+    DIR* drm = opendir("/sys/class/drm");
+    if (!drm) return;
+    struct dirent* e;
+    while ((e = readdir(drm)) != nullptr) {
+        if (strncmp(e->d_name, "card", 4) != 0) continue;
+        if (strchr(e->d_name, '-')) continue;  // skip connectors (card0-HDMI-A-1)
+        std::string base = std::string("/sys/class/drm/") + e->d_name;
+        std::string vendor = read_sysfs_line((base + "/device/vendor").c_str());
+        if (vendor != "0x1002" && vendor != "0x8086" && vendor != "0x10de") continue;
+        g_hwinfo.gpu_detected = true;
+        g_hwinfo.gpu_name = (vendor == "0x1002") ? "AMD"
+                          : (vendor == "0x8086") ? "Intel" : "NVIDIA";
+        char link[256] = {};
+        ssize_t len = readlink((base + "/device/driver").c_str(), link, sizeof(link) - 1);
+        if (len > 0) { link[len] = '\0'; const char* d = strrchr(link, '/');
+                       g_hwinfo.gpu_driver = d ? d + 1 : link; }
+        std::string vram = read_sysfs_line((base + "/device/mem_info_vram_total").c_str());
+        std::string gtt  = read_sysfs_line((base + "/device/mem_info_gtt_total").c_str());
+        if (!vram.empty()) g_hwinfo.gpu_vram_mb = strtoull(vram.c_str(), nullptr, 10) / (1024 * 1024);
+        if (!gtt.empty())  g_hwinfo.gpu_gtt_mb  = strtoull(gtt.c_str(),  nullptr, 10) / (1024 * 1024);
+        // Real dGPU has >= 2 GiB dedicated VRAM not dwarfed by GTT; otherwise iGPU/APU
+        // sharing system RAM -> unified (Strix Halo: vram_total is 0, the 96 GB is GTT).
+        if (g_hwinfo.gpu_vram_mb >= 2048 && g_hwinfo.gpu_vram_mb >= g_hwinfo.gpu_gtt_mb) {
+            g_hwinfo.gpu_is_discrete = true;  g_hwinfo.gpu_is_unified = false;
+        } else {
+            g_hwinfo.gpu_is_unified = true;   g_hwinfo.gpu_is_discrete = false;
+        }
+        break;
+    }
+    closedir(drm);
+}
+
 static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
                                 int free_ram_mb, const std::string& rpc_endpoints = "",
                                 const std::string& tensor_split = "") {
+    // amdgpu is up by now — refresh the GPU picture the early boot scan couldn't see.
+    refresh_gpu_memory();
     std::lock_guard<std::mutex> lock(g_llama_mutex);
 
     int threads = compute_thread_count(cpu_cores);
@@ -901,21 +1037,36 @@ static bool spawn_llama_server(const std::string& model_path, int cpu_cores,
     // On unified memory (iGPU/APU/Strix Halo), offload all layers since
     // GPU and CPU share the same physical RAM.  On discrete GPUs, compute
     // how many layers fit in VRAM (~1.2GB/layer for 7B Q4_K_M).
+    // Only offload to the GPU if a Vulkan compute DRIVER (ICD) is actually
+    // present. gpu_detected alone = display device; offloading -ngl onto a GPU
+    // with no Vulkan backend behind the loader crash-loops llama-server.
     std::string ngl_str;
-    if (g_hwinfo.gpu_detected && g_hwinfo.gpu_vram_mb > 0) {
-        // Discrete GPU: layers = VRAM / 1.2GB per layer, minimum 1
-        int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
-        ngl_str = std::to_string(ngl);
-        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
-        fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
-                ngl, g_hwinfo.gpu_name.c_str(),
-                (unsigned long long)g_hwinfo.gpu_vram_mb);
-    } else if (g_hwinfo.gpu_detected && g_hwinfo.gpu_is_unified) {
-        // Unified memory (iGPU/APU): offload everything — GPU shares RAM
-        ngl_str = "99";
-        cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
-        fprintf(stderr, "[child] GPU offload: all layers to %s (unified memory)\n",
-                g_hwinfo.gpu_name.c_str());
+    bool gpu_compute = has_vulkan_icd();
+    if (gpu_compute && g_hwinfo.gpu_detected) {
+        if (g_hwinfo.gpu_is_discrete && g_hwinfo.gpu_vram_mb >= 2048) {
+            // Confirmed discrete GPU with real dedicated VRAM: size -ngl to what fits
+            // (~1.2 GB/layer for 7B Q4_K_M), minimum 1.
+            int ngl = std::max(1, (int)(g_hwinfo.gpu_vram_mb / 1200));
+            ngl_str = std::to_string(ngl);
+            cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+            fprintf(stderr, "[child] GPU offload: %d layers to %s (%llu MB VRAM)\n",
+                    ngl, g_hwinfo.gpu_name.c_str(),
+                    (unsigned long long)g_hwinfo.gpu_vram_mb);
+        } else {
+            // iGPU/APU/unified (Strix Halo) or unclassified: offload everything. The GPU
+            // shares system RAM via GTT, where llama.cpp's Vulkan/RADV backend allocates.
+            // A present Vulkan ICD is the reliable "GPU compute works" signal; the tiny/
+            // zero dedicated-VRAM reading (mem_info_vram_total = 0) must NOT gate this —
+            // that mis-gate silently dropped every real-size model back to CPU.
+            ngl_str = "99";
+            cargs.push_back("-ngl"); cargs.push_back(ngl_str.c_str());
+            fprintf(stderr, "[child] GPU offload: all layers to %s (unified, %llu MB GTT)\n",
+                    g_hwinfo.gpu_name.c_str(), (unsigned long long)g_hwinfo.gpu_gtt_mb);
+        }
+    } else if (g_hwinfo.gpu_detected) {
+        // Display GPU but no Vulkan compute driver (ICD) — stay on CPU (stable).
+        fprintf(stderr, "[child] GPU %s present but no Vulkan ICD (compute driver) "
+                "-- running on CPU (no -ngl offload)\n", g_hwinfo.gpu_name.c_str());
     }
 
     // --log-disable REMOVED for debugging (logs go to /tmp/llama-server.log)
@@ -1327,7 +1478,7 @@ static void spawn_dhcpcd(const std::string& iface) {
 
     std::vector<char*> argv;
     for (const char* a : cargs) {
-        argv.push_back(strdup(a));
+        argv.push_back(a ? strdup(a) : nullptr);   // was: strdup(a) — strdup(NULL) segfaults on the terminator
     }
 
     pid_t pid = safe_spawn("dhcpcd", argv.data());
@@ -1426,6 +1577,80 @@ static void llama_monitor_thread(std::string model_path, int cpu_cores, int free
             }
         }
     }
+}
+
+// Background thread: probe llama-server /health to catch a WEDGE (process alive but
+// 503ing / hung / deadlocked). The crash monitor above only reacts to process EXIT via
+// waitpid(); a wedged engine never exits, so without this /health would keep reporting
+// inference_ready=true while every chat request 503s. On FAIL_THRESHOLD consecutive bad
+// probes we flag the engine not-ready and SIGKILL it, which makes the crash monitor's
+// waitpid() return and respawn a fresh llama-server. One instance runs for the process
+// lifetime; it idles (does not probe or kill) whenever no model is loaded, including the
+// window while the crash monitor is respawning (g_model_loaded is false then).
+static void llama_health_poll_thread() {
+    const int POLL_INTERVAL_S = 5;
+    const int FAIL_THRESHOLD  = 3;   // ~15s wedged before forcing a respawn
+    int consecutive_fails = 0;
+
+    while (g_running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(POLL_INTERVAL_S));
+        if (!g_model_loaded.load()) { consecutive_fails = 0; continue; }
+
+        // Fresh client per probe (no keep-alive): a stale connection to a wedged server
+        // can itself hang; matches the fresh-client pattern used for inference here.
+        bool ok = false;
+        {
+            httplib::Client cli("127.0.0.1", g_llama_port);
+            cli.set_connection_timeout(2);
+            cli.set_read_timeout(3);
+            auto res = cli.Get("/health");
+            if (res && res->status == 200) {
+                auto body = json::parse(res->body, nullptr, false);
+                if (!body.is_discarded()) {
+                    std::string st = body.value("status", "");
+                    // "no slot available" == alive but busy mid-generation: still healthy.
+                    ok = (st == "ok" || st == "no slot available");
+                }
+            }
+        }
+
+        if (ok) {
+            consecutive_fails = 0;
+            g_inference_ready.store(true);
+            continue;
+        }
+
+        consecutive_fails++;
+        fprintf(stderr, "[child] llama-server health probe failed (%d/%d)\n",
+                consecutive_fails, FAIL_THRESHOLD);
+        if (consecutive_fails < FAIL_THRESHOLD) continue;
+
+        // Wedged: stop claiming ready, and force a respawn through the crash monitor.
+        g_inference_ready.store(false);
+        pid_t pid = g_llama_pid.load();
+        fprintf(stderr, "[child] llama-server appears wedged (%d failed probes); "
+                "killing PID %d to trigger respawn\n", consecutive_fails, (int)pid);
+        if (pid > 0) kill(pid, SIGKILL);
+        consecutive_fails = 0;
+        // g_model_loaded flips false once the monitor reaps the kill; we idle until the
+        // respawn sets it true again, then the next probe restores g_inference_ready.
+    }
+}
+
+// Launch the health-poll thread exactly once, no matter how many times a model is
+// (re)loaded. Called from each model-load path; std::call_once makes it idempotent.
+static void ensure_health_poller_started() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            try { llama_health_poll_thread(); }
+            catch (const std::exception& e) {
+                fprintf(stderr, "[child] health poll thread exception: %s\n", e.what());
+            } catch (...) {
+                fprintf(stderr, "[child] health poll thread unknown exception\n");
+            }
+        }).detach();
+    });
 }
 
 #endif // _WIN32
@@ -1898,9 +2123,15 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
     json health;
     health["status"] = "ok";
     health["uptime_seconds"] = static_cast<int>(time(nullptr) - g_start_time);
-    health["model_loaded"] = g_model_loaded.load();
+    bool model_loaded = g_model_loaded.load();
+    bool engine_ok = g_inference_ready.load();
+    health["model_loaded"] = model_loaded;
     health["model_name"] = g_model_name.empty() ? json(nullptr) : json(g_model_name);
-    health["inference_ready"] = g_model_loaded.load();
+    // inference_ready reflects the ENGINE actually answering, not just that a model was
+    // loaded — a wedged llama-server (alive but 503ing) flips engine_ok false via the
+    // health-poll thread, so this no longer lies while chat requests fail.
+    health["inference_ready"] = model_loaded && engine_ok;
+    health["engine_responsive"] = engine_ok;
     health["tools_count"] = g_tools.count();
     health["mode"] = g_boot_mode;
     res.set_content(health.dump(), "application/json");
@@ -1913,7 +2144,12 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
 // ---------------------------------------------------------------------------
 static void do_auto_upgrade_check(const ClusterCapacity& cap) {
     if (!cap.upgrade_available) return;
-    const ModelInfo* mi = recommend_model((int)cap.usable_ram_mb);
+    // Bootstrap the SMALLEST tier (0.5B) rather than the largest that fits.
+    // recommend_model(usable_ram_mb) returns 32B on a 128GB box, which never fits
+    // the live-ISO tmpfs /data; users upgrade to a bigger model via the model UI.
+    const ModelInfo* table = get_model_table();
+    int n = 0; while (table[n].name) n++;
+    const ModelInfo* mi = (n > 0) ? &table[n - 1] : nullptr;
     if (!mi) return;
     std::string dest = "/data/models/" + std::string(mi->filename);
     if (access(dest.c_str(), R_OK) == 0) return;          // already on disk
@@ -2178,6 +2414,10 @@ int child_main(const SupervisorConfig& config) {
             fprintf(stderr, "[child] Failed to spawn llama-server, staying in stub mode\n");
         }
     }
+    // Start the wedge-detecting health poller once, unconditionally: it runs for the
+    // process lifetime and idles while no model is loaded, so it covers boot-with-no-model
+    // followed by a later model switch as well as the normal load-at-boot path.
+    ensure_health_poller_started();
 #endif
 
     // Start llama-rpc-server for mesh clustering (port 50052)
@@ -2194,70 +2434,31 @@ int child_main(const SupervisorConfig& config) {
     }
 #endif
 
-    // Initialize voice pipeline — desktop mode only.
-    // Server mode: no TTS/STT needed (headless; voice is desktop-only UX).
-    // Live mode: no espeak-ng data dir or TTS models; installer doesn't need voice.
-    VoicePipeline voice_pipeline;
-    {
-        extern VoicePipeline* g_voice;  // defined in tools_audio.cpp
-#ifndef _WIN32
-        if (g_boot_mode != "desktop") {
-            fprintf(stderr, "[child] %s mode: voice pipeline disabled\n", g_boot_mode.c_str());
-        } else {
-            VoiceConfig vcfg;
-            if (voice_pipeline.init(vcfg)) {
-                g_voice = &voice_pipeline;
-                fprintf(stderr, "[child] Voice pipeline initialized (tts=%s)\n",
-                        voice_pipeline.tts_engine_name().c_str());
-
-                // Desktop mode: enable always-listening (ALSA capture + VAD)
-                if (access(vcfg.whisper_model.c_str(), R_OK) == 0) {
-                    // Wire command callback: voice commands go through the agent loop
-                    voice_pipeline.set_command_callback([&](const std::string& command) {
-                        fprintf(stderr, "[voice] Processing command: \"%s\"\n", command.c_str());
-
-                        ConversationState conv;
-                        conv.system_prompt = g_system_prompt;
-                        conv.add_user_message(command);
-                        std::string response = agent_turn(conv, g_tools, g_inference_fn);
-
-                        fprintf(stderr, "[voice] Agent response: %.80s%s\n",
-                                response.c_str(),
-                                response.size() > 80 ? "..." : "");
-
-                        // Speak the response via TTS
-                        if (!response.empty()) {
-                            voice_pipeline.speak(response);
-                        }
-                    });
-
-                    // Start the always-listening thread (ALSA capture + VAD)
-                    voice_pipeline.start();
-                } else {
-                    fprintf(stderr, "[child] Desktop mode: TTS ready, whisper model not found (STT disabled)\n");
-                }
-            } else {
-                fprintf(stderr, "[child] Voice pipeline init failed: %s\n",
-                        voice_pipeline.last_error().c_str());
-            }
-        }
-#endif
-    }
-
     // Build system prompt
     g_system_prompt = build_system_prompt(g_hwinfo, g_tools, config.boot_mode);
     fprintf(stderr, "[child] System prompt: %zu bytes\n", g_system_prompt.size());
 
-    // Start mDNS responder so the box is discoverable as "llamaste.local"
-    // Also advertise the MCP server as _mcp._tcp so DNS-SD clients can find it.
+    // mDNS is fully opt-in ("option B"): a standalone box stays silent -- no socket opened,
+    // no llamaste.local, no service advertising, nothing listening on 224.0.0.251. It comes
+    // up only once a cluster group name is set in /data/llamaste/cluster-enabled (via the
+    // install field or the web UI). Changing the group name applies on the next boot, so
+    // mdns_started is fixed for the process lifetime -- the heartbeat below gates every
+    // responder call on it (never cluster_enabled(), which could flip mid-run from a UI edit
+    // and make us touch a responder that was never started).
     MdnsResponder mdns;
-    if (mdns.start("llamaste")) {
-        fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s)\n",
-                MdnsResponder::get_local_ip().c_str());
-        mdns.advertise_service("_mcp._tcp", 80,
-            {"path=/mcp", "version=2025-03-26", "auth=bearer"});
+    bool mdns_started = false;
+    if (cluster_enabled()) {
+        if (mdns.start("llamaste")) {
+            mdns_started = true;
+            fprintf(stderr, "[child] mDNS: responding as llamaste.local (%s), cluster group '%s'\n",
+                    MdnsResponder::get_local_ip().c_str(), cluster_id().c_str());
+            mdns.advertise_service("_mcp._tcp", 80,
+                {"path=/mcp", "version=2025-03-26", "auth=bearer"});
+        } else {
+            fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
+        }
     } else {
-        fprintf(stderr, "[child] mDNS: could not start (non-fatal)\n");
+        fprintf(stderr, "[child] mDNS: standalone (no cluster group) -- staying silent\n");
     }
 
     // --- Mesh clustering ---
@@ -2268,8 +2469,9 @@ int child_main(const SupervisorConfig& config) {
         rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
         rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
         rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
+        rpc_txt.push_back("cluster=" + cluster_id());
 
-        mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+        if (mdns_started) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
         // Set self info for election
         PeerInfo self;
@@ -2282,13 +2484,16 @@ int child_main(const SupervisorConfig& config) {
         g_cluster.set_self_info(self);
 
         // Discover peers (2-second window)
-        auto discovered = mdns.discover_services("_llama-rpc._tcp", 2000);
+        auto discovered = mdns_started
+            ? mdns.discover_services("_llama-rpc._tcp", 2000)
+            : std::vector<MdnsResponder::DiscoveredService>{};
         for (const auto& d : discovered) {
-            if (d.ip == self.ip) continue;  // skip self
+            if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
             PeerInfo peer;
             peer.hostname = d.hostname;
             peer.ip = d.ip;
             peer.rpc_port = d.port;
+            std::string peer_cluster;
             // Parse TXT records
             for (const auto& t : d.txt) {
                 auto eq = t.find('=');
@@ -2298,7 +2503,18 @@ int child_main(const SupervisorConfig& config) {
                 if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
                 else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
                 else if (key == "model") peer.model = val;
+                else if (key == "cluster") peer_cluster = val;
             }
+            // Reject anything without valid llamaste TXT records (ram=). A real
+            // node always advertises its RAM; ram_mb==0 means this isn't a
+            // llamaste peer (defense-in-depth vs. mis-parsed foreign mDNS).
+            if (peer.ram_mb == 0) {
+                fprintf(stderr, "[cluster] Ignoring non-llamaste mDNS responder %s (%s)\n",
+                        peer.hostname.c_str(), peer.ip.c_str());
+                continue;
+            }
+            // Only join peers in the SAME cluster group (see cluster_id()).
+            if (peer_cluster != cluster_id()) continue;
             g_cluster.add_peer(peer);
             fprintf(stderr, "[cluster] Discovered peer: %s (%s) ram=%uMB cores=%u\n",
                     peer.hostname.c_str(), peer.ip.c_str(), peer.ram_mb, peer.cpu_cores);
@@ -2426,7 +2642,7 @@ int child_main(const SupervisorConfig& config) {
     }
 
     // Cluster heartbeat: re-announce service and expire stale peers every 30s
-    std::thread cluster_heartbeat_thread([&mdns]() {
+    std::thread cluster_heartbeat_thread([&mdns, mdns_started]() {
         try {
         while (g_running.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -2438,20 +2654,24 @@ int child_main(const SupervisorConfig& config) {
             rpc_txt.push_back("cores=" + std::to_string(g_hwinfo.cpu_cores));
             rpc_txt.push_back("rpc_port=" + std::to_string(g_rpc_port));
             rpc_txt.push_back("model=" + (g_model_name.empty() ? "none" : g_model_name));
-            mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
+            rpc_txt.push_back("cluster=" + cluster_id());
+            if (mdns_started) mdns.advertise_service("_llama-rpc._tcp", (uint16_t)g_rpc_port, rpc_txt);
 
             // Expire peers not seen in 90 seconds
             g_cluster.expire_peers(90);
 
             // Re-discover peers
-            auto discovered = mdns.discover_services("_llama-rpc._tcp", 1000);
+            auto discovered = mdns_started
+                ? mdns.discover_services("_llama-rpc._tcp", 1000)
+                : std::vector<MdnsResponder::DiscoveredService>{};
             auto self = g_cluster.self_info();
             for (const auto& d : discovered) {
-                if (d.ip == self.ip) continue;
+                if (d.ip == self.ip || is_local_ip(d.ip)) continue;  // skip self (any local IP)
                 PeerInfo peer;
                 peer.hostname = d.hostname;
                 peer.ip = d.ip;
                 peer.rpc_port = d.port;
+                std::string peer_cluster;
                 for (const auto& t : d.txt) {
                     auto eq = t.find('=');
                     if (eq == std::string::npos) continue;
@@ -2460,7 +2680,10 @@ int child_main(const SupervisorConfig& config) {
                     if (key == "ram") peer.ram_mb = (uint32_t)std::stoul(val);
                     else if (key == "cores") peer.cpu_cores = (uint32_t)std::stoul(val);
                     else if (key == "model") peer.model = val;
+                    else if (key == "cluster") peer_cluster = val;
                 }
+                if (peer.ram_mb == 0) continue;   // not a valid llamaste node
+                if (peer_cluster != cluster_id()) continue;  // different cluster group
                 g_cluster.add_peer(peer);
             }
 
@@ -3056,6 +3279,34 @@ int child_main(const SupervisorConfig& config) {
         // Wayland runtime dir (required by wlroots)
         mkdir("/run/user", 0755);
         mkdir("/run/user/0", 0700);
+        // XDG_RUNTIME_DIR needs its OWN roomy tmpfs. Mesa's EGL swrast software
+        // path presents the web content through wl_shm pools that land here as
+        // files (~8 MB each at 1080p: 1920*1080*4 = 8294400 B, double/triple
+        // buffered; ~33 MB each at 4K). memfd_create is unavailable in this
+        // rootfs so libwayland/Mesa fall back to a file under XDG_RUNTIME_DIR.
+        // On the shared 16 MB /run tmpfs two buffers overflow it; the pool file
+        // can't be fully backed and cage (pixman) takes a SIGBUS reading it ->
+        // the whole cage+cog group exits 135 and desktop goes black (wlroots
+        // #2864). systemd-logind mounts /run/user/<uid> as a dedicated tmpfs for
+        // exactly this reason; do the same. Size it to a fraction of RAM (a lazy
+        // cap that only consumes what's written) so it holds enough buffers on
+        // unknown target hardware: clamp(RAM/8, 128 MB, 1 GB). Harmless if the
+        // mount fails (falls back to the /run subdir).
+        {
+            unsigned long rt_mb = 256;  // fallback if sysinfo fails
+            struct sysinfo si;
+            if (sysinfo(&si) == 0) {
+                unsigned long ram_mb =
+                    (unsigned long)(((unsigned long long)si.totalram * si.mem_unit) >> 20);
+                rt_mb = ram_mb / 8;
+                if (rt_mb < 128) rt_mb = 128;
+                if (rt_mb > 1024) rt_mb = 1024;
+            }
+            char rt_opts[64];
+            snprintf(rt_opts, sizeof(rt_opts), "size=%luM,mode=0700", rt_mb);
+            mount("tmpfs", "/run/user/0", "tmpfs", 0, rt_opts);
+            fprintf(stderr, "[child] XDG_RUNTIME_DIR tmpfs: %lu MB\n", rt_mb);
+        }
         setenv("XDG_RUNTIME_DIR", "/run/user/0", 1);
 
         // WLR_LIBINPUT_NO_DEVICES=1: let cage start even if libinput finds 0 devices.
@@ -3111,6 +3362,10 @@ int child_main(const SupervisorConfig& config) {
         // Force Wayland backend for GTK/Qt apps launched from autostart
         setenv("GDK_BACKEND", "wayland", 1);
         setenv("QT_QPA_PLATFORM", "wayland", 1);
+        // NOTE: cog/WPE SIGBUS (exit 135) was NOT a GPU-render issue — it was /dev/shm
+        // running out (bumped to 512M in init.cpp). Forcing software GL
+        // (WEBKIT_DISABLE_COMPOSITING_MODE / LIBGL_ALWAYS_SOFTWARE / GALLIUM_DRIVER=llvmpipe)
+        // had zero effect, confirming the crash was in the shared-memory path, not Mesa.
 
         // NOTE: udevd is now started early in init_load_modules() (init.cpp).
         // It handles coldplug for all subsystems EXCEPT input. The input
@@ -3972,158 +4227,6 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result, "application/json");
     }));
 
-    // --- Voice I/O audio endpoints ---
-
-    // Helper: encode int16 PCM samples as in-memory WAV bytes
-    // Used by /llamaste/audio/tts to return audio/wav to the browser.
-    // (Defined as a lambda so it can capture nothing and be self-contained.)
-    auto encode_wav_for_http = [](const std::vector<int16_t>& samples, int sample_rate) -> std::string {
-        uint32_t data_size = (uint32_t)(samples.size() * 2);
-        std::string wav(44 + data_size, '\0');
-        char* p = &wav[0];
-        auto put32 = [&](uint32_t v) { memcpy(p, &v, 4); p += 4; };
-        auto put16 = [&](uint16_t v) { memcpy(p, &v, 2); p += 2; };
-        memcpy(p, "RIFF", 4); p += 4;
-        put32(36 + data_size);
-        memcpy(p, "WAVE", 4); p += 4;
-        memcpy(p, "fmt ", 4); p += 4;
-        put32(16);                              // fmt chunk size
-        put16(1);                               // PCM
-        put16(1);                               // mono
-        put32((uint32_t)sample_rate);           // sample rate
-        put32((uint32_t)sample_rate * 2);       // byte rate (rate * channels * bps/8)
-        put16(2);                               // block align
-        put16(16);                              // bits per sample
-        memcpy(p, "data", 4); p += 4;
-        put32(data_size);
-        memcpy(p, samples.data(), data_size);
-        return wav;
-    };
-
-
-    svr.Post("/llamaste/audio/transcribe", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            if (req.has_file("audio")) {
-                // Multipart upload
-                const auto& file = req.get_file_value("audio");
-                std::string tmp_path = "/data/tmp/audio_upload_" +
-                    std::to_string(time(nullptr)) + ".wav";
-#ifndef _WIN32
-                {
-                    std::ofstream ofs(tmp_path, std::ios::binary);
-                    ofs.write(file.content.data(), file.content.size());
-                }
-                json args;
-                args["audio_file"] = tmp_path;
-                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
-                unlink(tmp_path.c_str());
-                res.set_content(result, "application/json");
-#else
-                res.status = 501;
-                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-            } else if (!req.body.empty()) {
-                // Raw WAV body
-                std::string tmp_path = "/data/tmp/audio_upload_" +
-                    std::to_string(time(nullptr)) + ".wav";
-#ifndef _WIN32
-                {
-                    std::ofstream ofs(tmp_path, std::ios::binary);
-                    ofs.write(req.body.data(), req.body.size());
-                }
-                json args;
-                args["audio_file"] = tmp_path;
-                std::string result = g_tools.dispatch("audio.transcribe", args.dump());
-                unlink(tmp_path.c_str());
-                res.set_content(result, "application/json");
-#else
-                res.status = 501;
-                res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-            } else {
-                res.status = 400;
-                res.set_content(R"json({"error":"No audio data provided"})json", "application/json");
-            }
-        }
-    ));
-
-    svr.Post("/llamaste/audio/speak", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body, nullptr, false);
-            if (body.is_discarded()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"Invalid JSON"})json", "application/json");
-                return;
-            }
-            std::string result = g_tools.dispatch("audio.speak", req.body);
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    // POST /llamaste/audio/tts — synthesize text and return WAV binary for browser playback
-    svr.Post("/llamaste/audio/tts", require_auth(
-        [encode_wav_for_http](const httplib::Request& req, httplib::Response& res) {
-#ifndef _WIN32
-            extern VoicePipeline* g_voice;
-            if (!g_voice) {
-                res.status = 503;
-                res.set_content(R"json({"error":"voice pipeline not available (desktop mode required)"})json",
-                                "application/json");
-                return;
-            }
-            auto body = json::parse(req.body, nullptr, false);
-            if (body.is_discarded() || !body.contains("text") || !body["text"].is_string()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"text field required (string)"})json", "application/json");
-                return;
-            }
-            std::string text = body["text"].get<std::string>();
-            if (text.empty()) {
-                res.status = 400;
-                res.set_content(R"json({"error":"text must not be empty"})json", "application/json");
-                return;
-            }
-            // Cap synthesis length to avoid very long audio
-            if (text.size() > 1000) text = text.substr(0, 1000);
-
-            int sample_rate = 8000; // default; overwritten by flite actual rate
-            auto pcm = g_voice->speak(text, &sample_rate);
-            if (pcm.empty()) {
-                res.status = 500;
-                res.set_content(R"json({"error":"TTS synthesis failed or TTS not configured"})json",
-                                "application/json");
-                return;
-            }
-            std::string wav = encode_wav_for_http(pcm, sample_rate);
-            res.set_content(wav, "audio/wav");
-#else
-            res.status = 501;
-            res.set_content(R"json({"error":"not available on Windows"})json", "application/json");
-#endif
-        }
-    ));
-
-    svr.Get("/llamaste/audio/status", require_auth(
-        [](const httplib::Request& /*req*/, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.status", "{}");
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    svr.Get("/llamaste/audio/config", require_auth(
-        [](const httplib::Request& /*req*/, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.config", "{}");
-            res.set_content(result, "application/json");
-        }
-    ));
-
-    svr.Post("/llamaste/audio/config", require_auth(
-        [](const httplib::Request& req, httplib::Response& res) {
-            std::string result = g_tools.dispatch("audio.config", req.body);
-            res.set_content(result, "application/json");
-        }
-    ));
-
     // --- Installer routes (any mode when booted from live ISO) ---
     if (is_live_iso) {
         svr.Get("/install/disks", [](const httplib::Request& /*req*/, httplib::Response& res) {
@@ -4140,9 +4243,12 @@ int child_main(const SupervisorConfig& config) {
                 res.set_content(err.dump(), "application/json");
                 return;
             }
-            // Force confirm for HTTP API
+            // Force confirm for HTTP API: pass confirmed=true to dispatch. The
+            // 3rd arg is the gate that install.to_disk (requires_confirmation)
+            // checks — NOT the "confirm" field in args — so the 2-arg form here
+            // always returned "confirmation required" and the web installer stalled.
             body["confirm"] = true;
-            std::string result = g_tools.dispatch("install.to_disk", body.dump());
+            std::string result = g_tools.dispatch("install.to_disk", body.dump(), true);
             res.set_content(result, "application/json");
         });
 
@@ -4290,6 +4396,73 @@ int child_main(const SupervisorConfig& config) {
         [](const httplib::Request&, httplib::Response& res) {
         res.set_content(g_tools.dispatch("cluster.reload", "{}"),
                         "application/json");
+    }));
+
+    // GET the current cluster group config (for the web UI to display).
+    svr.Get("/llamaste/cluster/config", require_auth(
+        [](const httplib::Request&, httplib::Response& res) {
+        std::string group = cluster_id();
+        json out;
+        out["group"]   = group;
+        out["enabled"] = !group.empty();
+        res.set_content(out.dump(), "application/json");
+    }));
+
+    // Set/clear the cluster group name -- the ONLY switch that turns mDNS/clustering on
+    // (option B). Writes /data/llamaste/cluster-enabled, or deletes it when the group is
+    // empty (standalone = fully silent). Applies on the next reboot: the mDNS responder is
+    // brought up (or not) at boot based on this file, so we don't tear a live cluster down.
+    svr.Post("/llamaste/cluster/config", require_auth(
+        [](const httplib::Request& req, httplib::Response& res) {
+        json args = json::parse(req.body, nullptr, false);
+        if (args.is_discarded()) {
+            res.status = 400;
+            res.set_content(R"json({"error":"invalid JSON body"})json", "application/json");
+            return;
+        }
+        std::string group = args.value("group", "");
+        size_t a = group.find_first_not_of(" \t\r\n");
+        size_t b = group.find_last_not_of(" \t\r\n");
+        group = (a == std::string::npos) ? "" : group.substr(a, b - a + 1);
+        // Group name becomes the cluster_id: written to a file and sent in mDNS TXT, so
+        // restrict it to a safe single token: [A-Za-z0-9_-], max 63 chars.
+        bool valid = group.size() <= 63;
+        for (char c : group) {
+            bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                   || (c >= '0' && c <= '9') || c == '-' || c == '_';
+            if (!ok) valid = false;
+        }
+        if (!group.empty() && !valid) {
+            res.status = 400;
+            res.set_content(R"json({"error":"group must be <=63 chars of [A-Za-z0-9_-]"})json",
+                            "application/json");
+            return;
+        }
+
+        const char* path = "/data/llamaste/cluster-enabled";
+        json out;
+        if (group.empty()) {
+            unlink(path);  // standalone: no file, no mDNS after reboot
+            out["group"] = "";
+            out["enabled"] = false;
+            fprintf(stderr, "[cluster] group cleared -> standalone (applies on reboot)\n");
+        } else {
+            mkdir("/data/llamaste", 0755);  // ensure dir exists (no-op if present)
+            std::ofstream f(path, std::ios::trunc);
+            if (!f) {
+                res.status = 500;
+                res.set_content(R"json({"error":"could not write cluster config"})json",
+                                "application/json");
+                return;
+            }
+            f << group;
+            out["group"] = group;
+            out["enabled"] = true;
+            fprintf(stderr, "[cluster] group set to '%s' (applies on reboot)\n", group.c_str());
+        }
+        out["reboot_required"] = true;
+        out["note"] = "Reboot to apply the cluster change.";
+        res.set_content(out.dump(), "application/json");
     }));
 
     // Test endpoint: manually add a peer (for integration testing without mDNS)
@@ -4473,6 +4646,43 @@ int child_main(const SupervisorConfig& config) {
     svr.Get("/debug/wpa", require_auth([tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
         res.set_content(tail_file("/tmp/wpa_supplicant.log", 200), "text/plain");
     }));
+
+    // Compositor / child stderr tail. UNAUTHENTICATED on purpose (like
+    // /llamaste/debug/resize-log): desktop-mode boot failures leave the display
+    // black — often before setup/login is even possible on a live USB — so this
+    // must be reachable from another LAN machine with no credentials. /tmp/child.log
+    // is the tee of the child process's stderr (all "[child] ..." messages plus
+    // cage/cog/wlroots/WPE output), so it shows exactly why cage+cog exits.
+    svr.Get("/llamaste/debug/compositor", [tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
+        res.set_content(tail_file("/tmp/child.log", 400), "text/plain");
+    });
+
+    // ---- TEMPORARY DEBUG HATCH (remove before non-beta release) ----------------
+    // A read-only "SSH/FTP-lite" over the existing web server: tail ANY file on the
+    // box (not just /data like fs.read_file). OFF by default; only active when the
+    // kernel cmdline contains "llamaste.debug" (add it at the GRUB line, same way as
+    // llamaste.mode=). No new daemon/port/package, and deleting this one block fully
+    // removes the capability.
+    //   GET /llamaste/debug/readfile?path=/tmp/child.log&lines=400
+    svr.Get("/llamaste/debug/readfile", [tail_file](const httplib::Request& req, httplib::Response& res) {
+        bool enabled = false;
+        { std::ifstream cl("/proc/cmdline"); std::string c;
+          if (std::getline(cl, c)) enabled = c.find("llamaste.debug") != std::string::npos; }
+        if (!enabled) {
+            res.status = 403;
+            res.set_content("debug hatch disabled (add 'llamaste.debug' to the kernel cmdline)\n",
+                            "text/plain");
+            return;
+        }
+        std::string path = req.get_param_value("path");
+        if (path.empty()) { res.status = 400; res.set_content("missing ?path=\n", "text/plain"); return; }
+        int lines = 400;
+        if (req.has_param("lines")) { try { lines = std::stoi(req.get_param_value("lines")); } catch (...) {} }
+        if (lines < 1) lines = 1;
+        if (lines > 5000) lines = 5000;
+        res.set_content(tail_file(path, lines), "text/plain");
+    });
+    // ---- end TEMPORARY DEBUG HATCH ---------------------------------------------
 
     svr.Get("/debug/dmesg", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string output;
@@ -4731,10 +4941,16 @@ int child_main(const SupervisorConfig& config) {
             output += std::string("  ") + vars[i] + "=" + (v ? v : "(not set)") + "\n";
         }
 
-        // Compositor log
-        output += "\n=== Compositor Log (/tmp/compositor.log) ===\n";
-        std::string clog = read_file("/tmp/compositor.log");
-        output += clog.empty() ? "(no log)\n" : clog;
+        // Compositor log (child stderr tee — see /llamaste/debug/compositor for the full tail)
+        output += "\n=== Compositor Log (/tmp/child.log, tail) ===\n";
+        std::string clog = read_file("/tmp/child.log");
+        if (clog.empty()) {
+            output += "(no log)\n";
+        } else {
+            // Only the last ~4000 chars — this endpoint is a summary, not the full log.
+            if (clog.size() > 4000) clog = "...\n" + clog.substr(clog.size() - 4000);
+            output += clog;
+        }
 
         // Wayland socket
         output += "\n=== Wayland Socket ===\n";
@@ -4771,15 +4987,7 @@ int child_main(const SupervisorConfig& config) {
             output += "  /dev/snd/ not found\n";
         }
 
-        // Voice pipeline state
-        output += "\n=== Voice Pipeline ===\n";
-        extern VoicePipeline* g_voice;
-        if (g_voice) {
-            output += "Voice pipeline: INITIALIZED\n";
-            output += "TTS engine: " + g_voice->tts_engine_name() + "\n";
-        } else {
-            output += "Voice pipeline: NOT INITIALIZED (only enabled in desktop mode)\n";
-        }
+        output += "Voice: removed\n";
 
         // Check TTS model files
         output += "\n=== TTS Models (/data/models/) ===\n";
@@ -4891,6 +5099,22 @@ int child_main(const SupervisorConfig& config) {
 
         // Llamaste server uptime
         info["server_uptime_seconds"] = (int)(time(nullptr) - g_start_time);
+
+        // GPU / VRAM — surfaced so the iGPU's memory (VRAM + GTT) is visible, and so
+        // the offload path (unified -> -ngl 99) can be verified from outside the box.
+        // Refresh from sysfs first: the boot-time scan runs before amdgpu binds.
+        refresh_gpu_memory();
+        {
+            json gpu;
+            gpu["detected"]   = g_hwinfo.gpu_detected;
+            gpu["name"]       = g_hwinfo.gpu_name;
+            gpu["driver"]     = g_hwinfo.gpu_driver;
+            gpu["vram_mb"]    = (uint64_t)g_hwinfo.gpu_vram_mb;   // dedicated VRAM (0 on APUs)
+            gpu["gtt_mb"]     = (uint64_t)g_hwinfo.gpu_gtt_mb;    // graphics-accessible system RAM
+            gpu["unified"]    = g_hwinfo.gpu_is_unified;          // iGPU/APU shares system RAM
+            gpu["discrete"]   = g_hwinfo.gpu_is_discrete;
+            info["gpu"] = gpu;
+        }
 
         res.set_content(info.dump(2), "application/json");
     }));

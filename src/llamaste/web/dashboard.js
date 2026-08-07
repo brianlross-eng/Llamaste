@@ -193,7 +193,11 @@
     dashUptime.textContent = data.uptime ? formatUptime(data.uptime) : '--';
 
     // --- Dashboard tab: Model card ---
-    dashModel.textContent = data.model || 'No model loaded';
+    // Show the logical model name: collapse a sharded filename
+    // (…-00001-of-00002.gguf) to its base so it matches the picker (#12).
+    var modelName = data.model || '';
+    modelName = modelName.replace(/-\d{5}-of-\d{5}(\.gguf)?$/i, '');
+    dashModel.textContent = modelName || 'No model loaded';
     dashSpeed.textContent = tokPerSec + ' tok/s';
 
     // Download button always visible — user may want to download additional models
@@ -290,11 +294,14 @@
 
           downloadedModels.forEach(function(m) {
             var opt = document.createElement('option');
-            opt.value = '/data/models/' + m.filename;
-            var sizeStr = m.size_mb > 1024
-              ? (m.size_mb / 1024).toFixed(1) + ' GB'
-              : m.size_mb + ' MB';
-            opt.textContent = m.filename + ' (' + sizeStr + ')';
+            opt.value = '/data/models/' + m.filename;   // shard-1 for sharded models
+            var label = (m.display_name || m.filename);
+            if (m.size_human) label += ' (' + m.size_human + ')';
+            if (m.sharded && m.complete === false) {
+              label += ' [incomplete: ' + m.shards_present + '/' + m.shard_count + ' parts]';
+              opt.disabled = true;   // can't load a model that's missing shards
+            }
+            opt.textContent = label;
             selEl.appendChild(opt);
           });
           selBtn.disabled = false;

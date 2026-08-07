@@ -99,6 +99,7 @@ private:
     // For startup grace period + model-not-loaded cooldown
     time_t start_time_ = 0;
     time_t last_model_alert_ = 0;
+    time_t model_unloaded_since_ = 0;   // when the model first went unloaded (0 = loaded)
 
     std::vector<ScheduledTask> tasks_;
     AlertConfig alerts_;

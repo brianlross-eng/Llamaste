@@ -21,7 +21,6 @@ set(LLAMASTE_SOURCES
     tools_schedule.cpp
     tools_auth.cpp
     tools_model_download.cpp
-    tools_audio.cpp
     tools_cluster.cpp
     tools_update.cpp
     tools_wifi.cpp
@@ -29,7 +28,6 @@ set(LLAMASTE_SOURCES
     cluster.cpp
     updater.cpp
     tweetnacl.c
-    voice.cpp
     mcp_server.cpp
     agent.cpp
     prompt_builder.cpp
@@ -123,81 +121,6 @@ if(NOT CURL_FOUND)
     endif()
 endif()
 
-# whisper.cpp for speech-to-text (Voice I/O)
-find_library(WHISPER_LIB NAMES whisper)
-find_library(GGML_LIB NAMES ggml)
-find_library(GGML_BASE_LIB NAMES ggml-base)
-find_library(GGML_CPU_LIB NAMES ggml-cpu)
-if(WHISPER_LIB)
-    message(STATUS "Found whisper: ${WHISPER_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_WHISPER)
-    target_link_libraries(llamaste PRIVATE ${WHISPER_LIB})
-    if(GGML_LIB)
-        target_link_libraries(llamaste PRIVATE ${GGML_LIB})
-    endif()
-    if(GGML_CPU_LIB)
-        target_link_libraries(llamaste PRIVATE ${GGML_CPU_LIB})
-    endif()
-    if(GGML_BASE_LIB)
-        target_link_libraries(llamaste PRIVATE ${GGML_BASE_LIB})
-    endif()
-    # whisper/ggml deps
-    target_link_libraries(llamaste PRIVATE m dl)
-else()
-    message(STATUS "whisper not found — speech-to-text disabled")
-endif()
-
-# ALSA for audio capture/playback (Voice I/O)
-find_library(ALSA_LIB NAMES asound)
-if(ALSA_LIB)
-    message(STATUS "Found ALSA: ${ALSA_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_ALSA)
-    target_link_libraries(llamaste PRIVATE ${ALSA_LIB})
-else()
-    message(STATUS "ALSA not found — audio capture disabled")
-endif()
-
-# Flite TTS (BSD-licensed, linked directly)
-find_library(FLITE_LIB NAMES flite)
-find_library(FLITE_USENGLISH_LIB NAMES flite_usenglish)
-find_library(FLITE_CMULEX_LIB NAMES flite_cmulex)
-find_library(FLITE_CMU_US_KAL_LIB NAMES flite_cmu_us_kal)
-if(FLITE_LIB)
-    message(STATUS "Found flite: ${FLITE_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_FLITE)
-    target_link_libraries(llamaste PRIVATE
-        ${FLITE_CMU_US_KAL_LIB}
-        ${FLITE_USENGLISH_LIB}
-        ${FLITE_CMULEX_LIB}
-        ${FLITE_LIB}
-        m)
-else()
-    message(STATUS "flite not found — text-to-speech disabled")
-endif()
-
-# espeak-ng for formant TTS (22kHz, 100+ languages)
-find_library(ESPEAK_NG_LIB NAMES espeak-ng)
-find_path(ESPEAK_NG_INCLUDE NAMES espeak-ng/speak_lib.h)
-if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
-    message(STATUS "Found espeak-ng: ${ESPEAK_NG_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_ESPEAK_NG)
-    target_include_directories(llamaste PRIVATE ${ESPEAK_NG_INCLUDE})
-    target_link_libraries(llamaste PRIVATE ${ESPEAK_NG_LIB})
-else()
-    message(STATUS "espeak-ng not found — formant TTS disabled, using flite fallback")
-endif()
-
-# sherpa-onnx for neural TTS (Piper VITS models) — requires musl-built onnxruntime
-find_library(SHERPA_ONNX_LIB NAMES sherpa-onnx-c-api)
-find_path(SHERPA_ONNX_INCLUDE NAMES sherpa-onnx/c-api/c-api.h)
-if(SHERPA_ONNX_LIB AND SHERPA_ONNX_INCLUDE)
-    message(STATUS "Found sherpa-onnx: ${SHERPA_ONNX_LIB}")
-    target_compile_definitions(llamaste PRIVATE HAVE_SHERPA_ONNX)
-    target_include_directories(llamaste PRIVATE ${SHERPA_ONNX_INCLUDE})
-    target_link_libraries(llamaste PRIVATE ${SHERPA_ONNX_LIB})
-else()
-    message(STATUS "sherpa-onnx not found — neural TTS disabled")
-endif()
 
 # Web asset embedding (production builds)
 # When web_embed.cpp/h are generated, add them and define LLAMASTE_HAS_EMBED
