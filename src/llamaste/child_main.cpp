@@ -1263,7 +1263,12 @@ static void spawn_wpa_supplicant(const std::string& iface) {
     // stderr → same log file (capture dynamic linker errors)
     posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
 
-    pid_t pid = safe_spawn("wpa_supplicant", argv, &fa, &attr);
+    // Use the ABSOLUTE path, not the bare name: safe_spawn() uses posix_spawnp()
+    // which PATH-searches a bare name. In desktop mode PATH does not yet include
+    // /usr/sbin at this point (it is set later in the compositor block), so the
+    // bare name failed with ENOENT even though the binary exists here (the
+    // access() check above passed). An absolute path is used directly, no search.
+    pid_t pid = safe_spawn("/usr/sbin/wpa_supplicant", argv, &fa, &attr);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&attr);
 
@@ -1481,7 +1486,10 @@ static void spawn_dhcpcd(const std::string& iface) {
         argv.push_back(a ? strdup(a) : nullptr);   // was: strdup(a) — strdup(NULL) segfaults on the terminator
     }
 
-    pid_t pid = safe_spawn("dhcpcd", argv.data());
+    // Absolute path (see spawn_wpa_supplicant): posix_spawnp() would PATH-search a
+    // bare name, and /sbin is not on PATH in desktop mode -> ENOENT. dhcpcd is at
+    // /sbin/dhcpcd (Buildroot).
+    pid_t pid = safe_spawn("/sbin/dhcpcd", argv.data());
     // Free strdup'd strings (safe after posix_spawn — kernel copies args)
     for (char* a : argv) free(a);
     if (pid < 0) {
