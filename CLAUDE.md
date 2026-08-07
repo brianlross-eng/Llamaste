@@ -8,7 +8,7 @@ Llamaste is a bootable Linux image where the LLM IS the operating system. A sing
 - **Backup**: `D:\Llamaste\backups\v0.2.1\` — ISO, IMG, source zip (v0.2.1)
 - **Bare metal test**: ASUS VivoBook i5-1035G1, 36GB RAM — SATA + NVMe install, boot, 3B (~14 tok/s) + 14B (2.2 tok/s) inference working.
 - **AVX2 SIMD**: GGML_NATIVE=ON → ~14 tok/s on 3B Q4_K_M (was 0.028 tok/s, ~500x speedup).
-- **Neural TTS**: End-to-end verified — sherpa-onnx Piper VITS synthesizes speech on VDI. 20 voices (en_US/en_GB/en_AU).
+- **Neural TTS**: ~~sherpa-onnx Piper VITS, 20 voices (en_US/en_GB/en_AU)~~ — **REMOVED on `gpu-radv-gfx1151`** (voice/audio dropped for image size).
 - **Multi-node**: Integration test PASSED — 2 VMs cluster correctly (election, capacity, tensor-split).
 - **Recovery hardening**: Dead-peer crash recovery 239s → 10s (fresh monitor thread per topology spawn).
 - **Session status file**: `D:\Llamaste\SESSION-STATUS.md` (detailed progress)
@@ -200,7 +200,7 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 ## Known Bugs
 - **VirtualBox mDNS**: Host-only networking doesn't forward multicast (224.0.0.251). Use `/llamaste/cluster/add-peer` for manual peer registration in VirtualBox.
 - **VirtualBox reset**: `controlvm reset` (hard reset) can leave child process stuck on next boot. Use `poweroff` + `startvm` instead.
-- **EVO-X2 desktop mode console-only**: Server mode works, desktop mode shows console only (no web UI). Likely AMD GPU/DRM detection issue — shared CPU/GPU/AI chip memory may confuse compositor.
+- **EVO-X2 desktop mode black screen** [FIXED, gpu-radv-gfx1151]: it was a `wl_shm` SIGBUS, not a GPU-detection issue. Mesa's EGL swrast presents cog through ~8 MB `wl_shm` pools created as files under `XDG_RUNTIME_DIR=/run/user/0`, which sat on the 16 MB `/run` tmpfs — two buffers overflow it and cage (pixman) SIGBUSes reading the truncated pool (wlroots #2864). Fix: mount a dedicated RAM-sized tmpfs on `/run/user/0` (`clamp(RAM/8, 128 MB, 1 GB)`) before launching the compositor (`child_main.cpp`). Desktop renders + keyboard + GPU inference (~225 tok/s) verified on hardware.
 - **EVO-X2 kernel panic on kernel 6.12**: v0.2.2 (kernel 6.12) causes kernel panic on EVO-X2 when booting from NVMe after install. USB live boot works fine (even desktop-live). Root cause: grub.cfg hardcoded `/dev/sda3`/`/dev/sda4` (wrong for NVMe = `/dev/nvme0n1p3`) + missing `rootwait`. Fix: installer now patches grub.cfg on ESP post-install with correct device path, and `rootwait` added to kernel cmdline.
 - **Desktop resolution cosmetic**: simpledrm inherits EFI framebuffer resolution (often 1024x768), not native panel resolution. Needs real GPU driver (i915/iris) or GRUB `set gfxpayload=` tuning for native res.
 - **CONFIG_DRM_AMDGPU=y causes black screen**: Built-in AMDGPU steals display from simpledrm before rootfs mounted (no firmware). Must use =m (module) loaded after squashfs pivot. Currently disabled.
@@ -224,8 +224,8 @@ Buildroot, llama.cpp internals, bootable images, CPU optimization, mesh clusteri
 
 ### Secondary
 5. **Desktop resolution fix** — simpledrm uses EFI framebuffer res, not native panel
-6. **Audio fix (mic/speaker + volume controls)** — Native C++ audio bypass for desktop mode
-7. **EVO-X2 issues** — amdgpu fatal error, missing firmware, WiFi driver not binding, internet connectivity
+6. ~~Audio fix (mic/speaker + volume controls)~~ — **REMOVED**: the voice/audio (TTS/STT/mic/speaker) feature was dropped entirely on `gpu-radv-gfx1151` for image size (onnxruntime/sherpa/whisper/espeak/flite/ALSA gone; ISO 4.59→4.44 GB). No audio in desktop mode by design.
+7. **EVO-X2 status** — GPU inference works (RADV Vulkan, ~225 tok/s on the iGPU); desktop mode fixed (see Known Bugs); WiFi works in server **and** desktop mode (spawn-by-absolute-path fix); install-to-disk + NVMe boot verified. Remaining: GPU-accelerated *desktop compositing* is parked (radeonsi GL needs LLVM 18+ for gfx1151; software pixman path works fine for the kiosk UI).
 
 ### Roadmap (Future Phases)
 - **Phase C: Multi-user auth** — User accounts, roles (admin/user/guest), per-user chat history
