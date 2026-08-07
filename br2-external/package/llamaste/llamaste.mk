@@ -23,17 +23,15 @@ LLAMASTE_SUPPORTS_IN_SOURCE_BUILD = NO
 # (eudev, wayland, mesa, cage, wpewebkit, etc.) so the musl dynamic
 # linker and all .so deps are already present.  This avoids the
 # transitive static-dependency chain for libcurl (nghttp2, psl, icu, z).
+# NOTE: -DLLAMASTE_TEST_API=ON enables the /llamaste/tool dispatch endpoint,
+# the debug tools, and the unauthenticated /llamaste/debug/{compositor,resize-log}
+# endpoints. It is OFF for release builds. Add it back only for local debugging.
 LLAMASTE_CONF_OPTS = \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DLLAMASTE_STATIC=OFF \
-	-DLLAMASTE_EMBED_WEB=ON \
-	-DLLAMASTE_TEST_API=ON
+	-DLLAMASTE_EMBED_WEB=ON
 
-# sherpa-onnx added when BR2_PACKAGE_SHERPA_ONNX=y is enabled in .config
-LLAMASTE_DEPENDENCIES = libcurl openssl whisper-cpp alsa-lib espeak-ng
-ifeq ($(BR2_PACKAGE_SHERPA_ONNX),y)
-LLAMASTE_DEPENDENCIES += sherpa-onnx
-endif
+LLAMASTE_DEPENDENCIES = libcurl openssl
 
 define LLAMASTE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/llamaste \
