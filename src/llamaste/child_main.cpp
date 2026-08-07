@@ -3915,7 +3915,8 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(result.dump(), "application/json");
     });
 
-    // GET /llamaste/debug/resize-log — Read init resize diagnostic log
+#ifdef LLAMASTE_TEST_API
+    // GET /llamaste/debug/resize-log -- init resize diagnostic log. TEST BUILDS ONLY.
     svr.Get("/llamaste/debug/resize-log", [](const httplib::Request& req, httplib::Response& res) {
         std::ifstream f("/tmp/init-resize.log");
         if (f.is_open()) {
@@ -3926,6 +3927,7 @@ int child_main(const SupervisorConfig& config) {
             res.set_content("No resize log found (init did not run resize or not PID 1)\n", "text/plain");
         }
     });
+#endif  // LLAMASTE_TEST_API
 
     // --- Power control routes (protected) ---
     // POST /llamaste/shutdown — Clean shutdown via supervisor (SIGTERM to PID 1)
@@ -4655,42 +4657,14 @@ int child_main(const SupervisorConfig& config) {
         res.set_content(tail_file("/tmp/wpa_supplicant.log", 200), "text/plain");
     }));
 
-    // Compositor / child stderr tail. UNAUTHENTICATED on purpose (like
-    // /llamaste/debug/resize-log): desktop-mode boot failures leave the display
-    // black — often before setup/login is even possible on a live USB — so this
-    // must be reachable from another LAN machine with no credentials. /tmp/child.log
-    // is the tee of the child process's stderr (all "[child] ..." messages plus
-    // cage/cog/wlroots/WPE output), so it shows exactly why cage+cog exits.
+#ifdef LLAMASTE_TEST_API
+    // Compositor / child stderr tail -- TEST BUILDS ONLY (compiled out of release).
+    // /tmp/child.log is the tee of the child's stderr (all "[child] ..." messages
+    // plus cage/cog/wlroots/WPE output), so it shows exactly why cage+cog exits.
     svr.Get("/llamaste/debug/compositor", [tail_file](const httplib::Request& /*req*/, httplib::Response& res) {
         res.set_content(tail_file("/tmp/child.log", 400), "text/plain");
     });
-
-    // ---- TEMPORARY DEBUG HATCH (remove before non-beta release) ----------------
-    // A read-only "SSH/FTP-lite" over the existing web server: tail ANY file on the
-    // box (not just /data like fs.read_file). OFF by default; only active when the
-    // kernel cmdline contains "llamaste.debug" (add it at the GRUB line, same way as
-    // llamaste.mode=). No new daemon/port/package, and deleting this one block fully
-    // removes the capability.
-    //   GET /llamaste/debug/readfile?path=/tmp/child.log&lines=400
-    svr.Get("/llamaste/debug/readfile", [tail_file](const httplib::Request& req, httplib::Response& res) {
-        bool enabled = false;
-        { std::ifstream cl("/proc/cmdline"); std::string c;
-          if (std::getline(cl, c)) enabled = c.find("llamaste.debug") != std::string::npos; }
-        if (!enabled) {
-            res.status = 403;
-            res.set_content("debug hatch disabled (add 'llamaste.debug' to the kernel cmdline)\n",
-                            "text/plain");
-            return;
-        }
-        std::string path = req.get_param_value("path");
-        if (path.empty()) { res.status = 400; res.set_content("missing ?path=\n", "text/plain"); return; }
-        int lines = 400;
-        if (req.has_param("lines")) { try { lines = std::stoi(req.get_param_value("lines")); } catch (...) {} }
-        if (lines < 1) lines = 1;
-        if (lines > 5000) lines = 5000;
-        res.set_content(tail_file(path, lines), "text/plain");
-    });
-    // ---- end TEMPORARY DEBUG HATCH ---------------------------------------------
+#endif  // LLAMASTE_TEST_API
 
     svr.Get("/debug/dmesg", require_auth([](const httplib::Request& /*req*/, httplib::Response& res) {
         std::string output;
